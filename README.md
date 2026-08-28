@@ -4,6 +4,15 @@ GameBeats is a non-intrusive background music automation and overlay system desi
 
 ---
 
+## Download
+
+Get the standalone Windows installer:
+
+- **Itch.io**: [Download GameBeats on itch.io](https://ssaborr.itch.io/gamebeats)
+- **GitHub Releases**: Download `GameBeatsSetup.exe` from the repository releases page.
+
+---
+
 ## Features
 
 - **Automatic Game Detection**: Actively identifies running games across Steam, Epic Games Launcher, and custom executables.
