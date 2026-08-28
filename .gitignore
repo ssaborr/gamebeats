@@ -1,0 +1,72 @@
+# Byte-compiled / optimized / Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Build and distribution directories
+build/
+build_tmp/
+dist/
+dist_release/
+installer_output/
+*.egg-info/
+*.egg
+
+# Dynamic runtime configurations, tokens, and caches
+**/tokens.json
+**/track_cache.json
+**/playlist_search_cache.json
+**/puppy_position.json
+**/config.json
+**/games.json
+**/blocked_playlists.json
+saves/
+
+# Logs and crash dumps
+*.log
+gamebeats.log
+**/gamebeats.log
+gamebeats_crash.txt
+crashdump*.dmp
+
+# Browser profiles and Chromium user-data caches
+**/spotify_web_profile/
+**/spotify_chrome_player_profile/
+.cache
+.cache/
+
+# Generated runtime helper scripts
+**/spotify_launch_*.vbs
+**/spotify_hidden.vbs
+
+# Temporary scrapers and archive artifacts
+_scraper_html_*
+_scraper_tracks_*
+source.zip
+*.zip
+*.tar.gz
+*.rar
+
+# C / C++ object files
+*.o
+*.obj
+
+# Operating System & IDE artifacts
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
