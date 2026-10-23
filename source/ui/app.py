@@ -2,10 +2,11 @@ import tkinter as tk
 from tkinter import messagebox
 import customtkinter as ctk
 
-ctk.set_appearance_mode("light")
+ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 import threading
 import time
+import math
 import json
 import os
 import sys
@@ -14,7 +15,7 @@ from io import BytesIO
 import subprocess
 
 try:
-    from PIL import Image, ImageTk
+    from PIL import Image, ImageTk, ImageOps
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -38,6 +39,7 @@ from core.audio_monitor import (
     GameMusicDetector,
     HAS_PROCESS_LOOPBACK,
     HAS_PYAUDIO_WP,
+    HAS_PYCAW,
     _clear_spotify_mixer_mute,
 )
 from ui.onboarding import OnboardingOverlay
@@ -122,8 +124,44 @@ def _load_puppy_window_icon(max_size=(64, 64)):
         return None
 
 
+def _design_asset_path(*parts) -> str:
+    """Find a file under the bundled assets directory."""
+    path = os.path.join(str(T.assets_dir()), *parts)
+    return path if os.path.exists(path) else ""
+
+
+def _load_design_room(name="den_room.png"):
+    path = _design_asset_path("room", name)
+    if not path or not HAS_PIL:
+        return None
+    try:
+        return Image.open(path).convert("RGB")
+    except Exception:
+        return None
+
+
+def _load_design_sprite(name):
+    path = _design_asset_path("puppy_design", f"{name}.png")
+    if not path or not HAS_PIL:
+        return None
+    try:
+        return Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+
+
 # ── Palette (from theme.py) ──────────────────────────────────────────────────
 BG         = T.BG
+NIGHT      = T.NIGHT
+CREAM      = T.CREAM
+GOLD       = T.GOLD
+ORANGE     = T.ORANGE
+MINT       = T.MINT
+WOOD       = T.WOOD
+DECK       = T.DECK
+DECK_TOP   = T.DECK_TOP
+ROSE       = T.ROSE
+MAGENTA    = T.MAGENTA
 SIDEBAR    = T.SIDEBAR
 SURFACE    = T.SURFACE
 SURFACE2   = T.SURFACE2
@@ -165,6 +203,9 @@ F_SMALL    = T.F_SMALL
 F_MICRO    = T.F_MICRO
 F_MONO     = T.F_MONO
 F_UI       = T.F_UI
+F_PIXEL    = T.F_PIXEL
+F_RETRO    = T.F_RETRO
+F_SERIF    = T.F_SERIF
 
 
 # ── Reusable widgets ──────────────────────────────────────────────────────────
@@ -207,7 +248,7 @@ def _make_entry(parent, textvariable=None, show="", font_size=10, mono=False, **
 
 class RoundedButton(ctk.CTkButton):
     def __init__(self, parent, text="", command=None, width=160, height=48,
-                 bg=ACCENT, fg="#ffffff", radius=RADIUS_MD, font_size=11, canvas_bg=BG,
+                 bg=ACCENT, fg=BG, radius=RADIUS_MD, font_size=11, canvas_bg=BG,
                  border_color="", **kwargs):
         import tkinter.font as tkfont
         try:
@@ -219,9 +260,9 @@ class RoundedButton(ctk.CTkButton):
 
         super().__init__(parent, text=text, command=command, width=width, height=height,
                          fg_color=bg, text_color=fg, corner_radius=radius,
-                         font=ctk.CTkFont(family=F_UI, size=font_size, weight="bold"),
+                         font=T.pixel_font(max(8, font_size), "bold"),
                          border_color=border_color, border_width=1 if border_color else 0,
-                         hover_color=T.ACCENT_HOV if bg == ACCENT else SURFACE4,
+                         hover_color=T.ACCENT_HOV if bg in (ACCENT, GOLD) else SURFACE4,
                          **kwargs)
 
     def update_text(self, text):
@@ -239,7 +280,7 @@ class CircleBtn(ctk.CTkButton):
             parent, text=text, command=command,
             width=size, height=size, corner_radius=size // 2,
             fg_color=bg, text_color=fg,
-            font=ctk.CTkFont(family=F_UI, size=font_size, weight="bold"),
+            font=T.retro_font(font_size, "bold"),
             border_width=0,
             hover_color=T.ACCENT_HOV if accent else SURFACE4,
             **kwargs,
@@ -253,7 +294,7 @@ class CircleBtn(ctk.CTkButton):
     def set_active(self, active: bool):
         if active:
             bg_n = ACCENT if self.accent else SURFACE3
-            fg_n = "#ffffff" if self.accent else ACCENT
+            fg_n = BG if self.accent else ACCENT
         else:
             bg_n = SURFACE3
             fg_n = TEXT
@@ -297,7 +338,7 @@ class SplashScreen:
             lc = tk.Canvas(logo_frame, width=52, height=52, bg=SURFACE, highlightthickness=0)
             lc.pack()
             lc.create_oval(4, 4, 48, 48, fill=ACCENT_DIM, outline=ACCENT, width=1)
-            lc.create_text(26, 26, text="\u266a", fill=ACCENT2, font=(F_UI, 20, "bold"))
+            lc.create_text(26, 26, text="\u266a", fill=ACCENT2, font=(F_UI, -20, "bold"))
 
         ctk.CTkLabel(self.win, text="GameBeats", fg_color="transparent", text_color=TEXT,
                      font=ctk.CTkFont(family=F_UI, size=22, weight="bold")).pack()
@@ -454,6 +495,7 @@ class GameBeatsApp:
         self._audio_monitor_running = False
         self._spotify_started_by_us = False
         self._play_in_progress = False
+        self._autoplay_pending = False
         self._game_audio = None
         self.auto_mode   = tk.BooleanVar(value=True)
         self.seamless_music_var = tk.BooleanVar(
@@ -473,6 +515,7 @@ class GameBeatsApp:
         self._is_playing  = False
         self._user_toggle_ts = 0.0  # timestamp of last user play/pause click
         self._play_pause_busy = False
+        self._play_pause_watchdog = None
         self._manual_paused = False
         self._current_page = "main"
         self._current_playlist_uri = ""
@@ -538,7 +581,14 @@ class GameBeatsApp:
             on_prev=self._overlay_prev,
             on_next=self._overlay_next,
             on_block=self._overlay_block,
-            on_try_another=self._overlay_try_another
+            on_try_another=self._overlay_try_another,
+            get_playing=lambda: (
+                (not self._intentional_pause_active())
+                and (
+                    self._spotify_sound_detected_recently(3.0)
+                    or bool(getattr(self, "_is_playing", False))
+                )
+            ),
         )
         self._puppy_singing_overlay = PuppySingingOverlay(self.root)
 
@@ -1043,111 +1093,330 @@ class GameBeatsApp:
             ).start()
 
     def _build_ui(self):
+        # ── Room assets ───────────────────────────────────────────────────────
+        self._room_pil = _load_design_room("den_room.png")
+        self._room_dim_pil = _load_design_room("den_room_dim.png")
+        self._puppy_sprites = {
+            name: _load_design_sprite(name)
+            for name in ("idle", "mic", "sing", "encore")
+        }
+        self._puppy_photo_cache = {}
+        self._room_image_item = None
+        self._room_photo = None
+        self._room_base_cache = None
+        self._room_base_key = None
+        self._room_redraw_job = None
+        self._puppy_job = None
+        self._puppy_frame = 0
+        self._vu_job = None
+        self._clock_job = None
+        self._heart_until = 0.0
+        self._footer_buttons = {}
+        self._footer_tools = {}
+        self._is_maximized = False
+        self._restore_geometry = ""
+        self._brand_widgets = []
+
+        self._room_dim_photo = None
+        if self._room_dim_pil is not None:
+            try:
+                self._room_dim_photo = ImageTk.PhotoImage(self._room_dim_pil)
+            except Exception:
+                self._room_dim_photo = None
+
         # ── Root layout ───────────────────────────────────────────────────────
         container = ctk.CTkFrame(self.root, fg_color=BG, corner_radius=0)
         container.pack(fill=tk.BOTH, expand=True)
+        self._container = container
 
-        # ── Sidebar (native CTk — no canvas clipping) ─────────────────────────
-        logo_photo = _load_puppy_logo_photo((40, 40))
-        self._brand_logo_photo = logo_photo
-
-        self.sidebar = T.SidebarPanel(
-            container,
-            on_nav=self._nav,
-            logo_photo=logo_photo,
-        )
-        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
-        self._sidebar_brand = self.sidebar.brand_frame
-
-        self._current_page = "main"
-
-        # ── Main content ──────────────────────────────────────────────────────
-        main = ctk.CTkFrame(container, fg_color=BG, corner_radius=0)
-        main.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        header = ctk.CTkFrame(main, fg_color=BG, height=40, corner_radius=0)
+        # ── Window bar ────────────────────────────────────────────────────────
+        header = ctk.CTkFrame(container, fg_color=NIGHT, height=48, corner_radius=0)
         header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        self.header = header
 
-        # Custom window controls (Minimize / Close) for frameless window
-        win_controls = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
-        win_controls.pack(side=tk.RIGHT, padx=(0, 12))
+        brand = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0, cursor="hand2")
+        brand.pack(side=tk.LEFT, padx=(18, 0))
 
-        # Close button (hover light red)
-        close_btn = ctk.CTkButton(
-            win_controls, text="\u2715", width=28, height=28, fg_color="transparent",
-            text_color=TEXT_MUTED, hover_color="#fee2e2", corner_radius=RADIUS_SM,
-            font=ctk.CTkFont(family=F_UI, size=11),
-            command=self._on_close
+        brand_logo = None
+        self._brand_puppy_photo = None
+        try:
+            sprite = _load_design_sprite("idle")
+            if sprite is not None:
+                resampling = getattr(Image, "Resampling", Image)
+                logo = sprite.resize((36, 40), resampling.NEAREST)
+                self._brand_puppy_photo = ImageTk.PhotoImage(logo)
+                brand_logo = tk.Label(
+                    brand, image=self._brand_puppy_photo, bg=NIGHT,
+                    bd=0, highlightthickness=0, cursor="hand2",
+                )
+        except Exception:
+            brand_logo = None
+
+        if brand_logo is not None:
+            brand_logo.pack(side=tk.LEFT, padx=(0, 9))
+            paw = brand_logo
+        else:
+            paw = ctk.CTkLabel(
+                brand, text="\u266a", fg_color="transparent", text_color=GOLD,
+                font=T.retro_font(28, "bold"),
+            )
+            paw.pack(side=tk.LEFT, padx=(0, 9))
+
+        brand_title = ctk.CTkLabel(
+            brand, text="GAMEBEATS", fg_color="transparent", text_color=TEXT,
+            font=T.pixel_font(17, "bold"),
         )
-        close_btn.pack(side=tk.RIGHT, padx=2)
+        brand_title.pack(side=tk.LEFT)
+
+        brand_sub = ctk.CTkLabel(
+            brand, text="THE DEN / VOL. 01", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
+        )
+        brand_sub.pack(side=tk.LEFT, padx=(12, 0))
+
+        self._brand_frame = brand
+        self._brand_widgets = [brand, paw, brand_title, brand_sub]
+
+        # Window buttons (far right first)
+        win_controls = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
+        win_controls.pack(side=tk.RIGHT, padx=(0, 10))
+
+        close_btn = ctk.CTkButton(
+            win_controls, text="\u2715", width=30, height=30, fg_color="transparent",
+            text_color=TEXT_MUTED, hover_color="#4A1A1A", corner_radius=RADIUS_SM,
+            font=T.retro_font(19, "bold"), command=self._on_close,
+        )
+        close_btn.pack(side=tk.RIGHT, padx=1)
+
+        max_btn = ctk.CTkButton(
+            win_controls, text="\u25a1", width=30, height=30, fg_color="transparent",
+            text_color=TEXT_MUTED, hover_color=SURFACE3, corner_radius=RADIUS_SM,
+            font=T.retro_font(18), command=self._toggle_maximize_window,
+        )
+        max_btn.pack(side=tk.RIGHT, padx=1)
 
         min_btn = ctk.CTkButton(
-            win_controls, text="\u2014", width=28, height=28, fg_color="transparent",
+            win_controls, text="\u2014", width=30, height=30, fg_color="transparent",
             text_color=TEXT_MUTED, hover_color=SURFACE3, corner_radius=RADIUS_SM,
-            font=ctk.CTkFont(family=F_UI, size=11),
-            command=self._minimize_window
+            font=T.retro_font(17), command=self._minimize_window,
         )
-        min_btn.pack(side=tk.RIGHT, padx=2)
+        min_btn.pack(side=tk.RIGHT, padx=1)
 
+        ctk.CTkFrame(header, fg_color=BORDER, width=1, height=18).pack(
+            side=tk.RIGHT, padx=(0, 14), pady=15,
+        )
+
+        # Live status pill (Watching games, game name, verifying…)
         status_cluster = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
-        status_cluster.pack(side=tk.RIGHT, padx=(0, 10))
+        status_cluster.pack(side=tk.RIGHT, padx=(0, 16))
 
         self.status_dot = ctk.CTkLabel(
-            status_cluster, text="\u25cf", fg_color="transparent", text_color=TEXT_MUTED,
-            font=ctk.CTkFont(family=F_UI, size=8)
+            status_cluster, text="\u25cf", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.retro_font(13),
         )
-        self.status_dot.pack(side=tk.RIGHT, padx=(4, 0), pady=8)
+        self.status_dot.pack(side=tk.RIGHT, padx=(5, 0))
 
         self.status_pill = ctk.CTkLabel(
-            status_cluster, text="Idle", fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.ctk_font(12),
+            status_cluster, text="STARTING UP", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
         )
-        self.status_pill.pack(side=tk.RIGHT, pady=8)
+        self.status_pill.pack(side=tk.RIGHT)
 
-        self.content = ctk.CTkFrame(main, fg_color=BG, corner_radius=0)
-        self.content.pack(fill=tk.BOTH, expand=True, padx=(14, 14), pady=(6, 10))
+        ctk.CTkFrame(header, fg_color=BORDER, width=1, height=18).pack(
+            side=tk.RIGHT, padx=(0, 14), pady=15,
+        )
 
-        # Expose widgets
-        self.header = header
-        self.main = main
+        # Spotify connection LED
+        conn = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0, cursor="hand2")
+        conn.pack(side=tk.RIGHT, padx=(0, 6))
+
+        self.connection_dot = ctk.CTkLabel(
+            conn, text="\u25cf", fg_color="transparent", text_color=MAGENTA,
+            font=T.retro_font(13),
+        )
+        self.connection_dot.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.connection_lbl = ctk.CTkLabel(
+            conn, text="SPOTIFY OFFLINE", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
+        )
+        self.connection_lbl.pack(side=tk.LEFT)
+
+        for widget in (conn, self.connection_dot, self.connection_lbl):
+            widget.bind("<Button-1>", lambda e: self._nav("settings"))
+            widget.bind("<Enter>", lambda e: conn.configure(cursor="hand2"))
+
+        # ── Topline ───────────────────────────────────────────────────────────
+        topline = ctk.CTkFrame(container, fg_color=BG, height=44, corner_radius=0)
+        topline.pack(fill=tk.X)
+        topline.pack_propagate(False)
+        self.topline = topline
+
+        room_line = ctk.CTkFrame(topline, fg_color="transparent", corner_radius=0)
+        room_line.pack(side=tk.LEFT, padx=(30, 0))
+        ctk.CTkLabel(
+            room_line, text="\u25aa", fg_color="transparent",
+            text_color=ACCENT, font=T.retro_font(16),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ctk.CTkLabel(
+            room_line, text="PLAYER 1'S ROOM", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
+        ).pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            room_line, text="/", fg_color="transparent",
+            text_color=WOOD, font=T.pixel_font(9),
+        ).pack(side=tk.LEFT, padx=8)
+
+        self._clock_lbl = ctk.CTkLabel(
+            room_line, text="08:42 PM \u00b7 GOLDEN HOUR", fg_color="transparent",
+            text_color=ROSE, font=T.pixel_font(9),
+        )
+        self._clock_lbl.pack(side=tk.LEFT)
+
+        ctk.CTkButton(
+            topline, text="\u2726  THE LITTLE DETAILS", command=lambda: self._nav("faq"),
+            fg_color="transparent", text_color=ROSE, hover_color=SURFACE3,
+            width=194, height=28, corner_radius=0,
+            font=T.pixel_font(9),
+        ).pack(side=tk.RIGHT, padx=(0, 28))
+
+        # ── Content ──────────────────────────────────────────────────────────
+        self.content = ctk.CTkFrame(container, fg_color=BG, corner_radius=0)
+        self.content.pack(fill=tk.BOTH, expand=True)
+
+        # ── Footer nav ───────────────────────────────────────────────────────
+        footer = ctk.CTkFrame(container, fg_color=NIGHT, height=62, corner_radius=0)
+        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        footer.pack_propagate(False)
+        self.footer = footer
+
+        nav = ctk.CTkFrame(footer, fg_color="transparent", corner_radius=0)
+        nav.pack(side=tk.LEFT, padx=(26, 0), fill=tk.Y)
+
+        nav_items = [
+            ("main", "\u2302", "01 / THE DEN"),
+            ("games", "\u25a5", "02 / GAME SHELF"),
+            ("playlists", "\u25c9", "03 / RECORD CRATE"),
+            ("settings", "\u2692", "04 / CONTROL PANEL"),
+        ]
+        for page, icon, label in nav_items:
+            btn = ctk.CTkButton(
+                nav, text=f"{icon}  {label}", command=lambda p=page: self._nav(p),
+                fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+                width=148, height=34, corner_radius=0,
+                font=T.pixel_font(9), anchor="w",
+            )
+            btn.pack(side=tk.LEFT, padx=(0, 4), pady=14)
+            self._footer_buttons[page] = btn
+
+        tools = ctk.CTkFrame(footer, fg_color="transparent", corner_radius=0)
+        tools.pack(side=tk.RIGHT, padx=(0, 26), fill=tk.Y)
+
+        self._footer_version_lbl = ctk.CTkLabel(
+            tools, text="V.01  \u25aa  MADE FOR YOUR SIDE QUESTS", fg_color="transparent",
+            text_color=WOOD, font=T.pixel_font(8),
+        )
+        self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))
+
+        overlay_btn = ctk.CTkButton(
+            tools, text="\u2723  OVERLAY", command=self._show_control_overlay,
+            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            width=94, height=34, corner_radius=0, font=T.pixel_font(9),
+        )
+        overlay_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._footer_tools["overlay"] = overlay_btn
+
+        faq_btn = ctk.CTkButton(
+            tools, text="\u2726  FAQ", command=lambda: self._nav("faq"),
+            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            width=74, height=34, corner_radius=0, font=T.pixel_font(9),
+        )
+        faq_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._footer_tools["faq"] = faq_btn
+
+        blocked_btn = ctk.CTkButton(
+            tools, text="\u2298  BLOCKED", command=lambda: self._nav("blocked"),
+            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            width=102, height=34, corner_radius=0, font=T.pixel_font(9),
+        )
+        blocked_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._footer_tools["blocked"] = blocked_btn
+
+        # ── Build pages + wiring ─────────────────────────────────────────────
+        self._current_page = "main"
+        self.main = container
         self.player_frame = None
         self._build_pages()
         self._setup_window_dragging()
+        self._tick_clock()
+        self._refresh_connection_ui()
+
+    def _toggle_maximize_window(self):
+        """Maximize/restore the frameless window without relying on WM chrome."""
+        try:
+            if getattr(self, "_is_maximized", False):
+                if self._restore_geometry:
+                    self.root.geometry(self._restore_geometry)
+                self._is_maximized = False
+            else:
+                self._restore_geometry = self.root.geometry()
+                sw = self.root.winfo_screenwidth()
+                sh = self.root.winfo_screenheight()
+                self.root.geometry(f"{sw}x{sh}+0+0")
+                self._is_maximized = True
+        except Exception:
+            pass
 
     def _setup_window_dragging(self):
         self._drag_x = 0
         self._drag_y = 0
+        self._drag_moved = False
 
         def _start_drag(event):
             self._drag_enabled = True
-            self._drag_x = event.x
-            self._drag_y = event.y
+            self._drag_moved = False
+            self._drag_x = event.x_root
+            self._drag_y = event.y_root
 
         def _drag_motion(event):
             if not getattr(self, "_drag_enabled", True):
                 return
-            deltax = event.x - self._drag_x
-            deltay = event.y - self._drag_y
-            x = self.root.winfo_x() + deltax
-            y = self.root.winfo_y() + deltay
+            dx = event.x_root - self._drag_x
+            dy = event.y_root - self._drag_y
+            if abs(dx) + abs(dy) > 2:
+                self._drag_moved = True
+            x = self.root.winfo_x() + dx
+            y = self.root.winfo_y() + dy
             self.root.geometry(f"+{x}+{y}")
+            self._drag_x = event.x_root
+            self._drag_y = event.y_root
 
-        drag_targets = [self.header, self._sidebar_brand]
+        def _brand_release(_event):
+            if not getattr(self, "_drag_moved", False):
+                self._nav("main")
+
+        drag_targets = [self.header] + list(getattr(self, "_brand_widgets", []))
         for widget in drag_targets:
             if widget:
-                widget.bind("<Button-1>", _start_drag)
-                widget.bind("<B1-Motion>", _drag_motion)
+                widget.bind("<Button-1>", _start_drag, add="+")
+                widget.bind("<B1-Motion>", _drag_motion, add="+")
 
-        def _toggle_maximize(event):
-            if self.root.state() == "zoomed":
-                self.root.state("normal")
-            else:
-                self.root.state("zoomed")
+        for widget in getattr(self, "_brand_widgets", []) or []:
+            widget.bind("<ButtonRelease-1>", _brand_release, add="+")
 
         if self.header:
-            self.header.bind("<Double-Button-1>", _toggle_maximize)
-        if self._sidebar_brand:
-            self._sidebar_brand.bind("<Double-Button-1>", _toggle_maximize)
+            self.header.bind("<Double-Button-1>",
+                             lambda e: self._toggle_maximize_window(), add="+")
+
+    def _tick_clock(self):
+        try:
+            stamp = time.strftime("%I:%M %p").lstrip("0")
+            if hasattr(self, "_clock_lbl"):
+                self._clock_lbl.configure(text=f"{stamp} \u00b7 GOLDEN HOUR")
+            self._clock_job = self.root.after(30000, self._tick_clock)
+        except Exception:
+            pass
 
     def _show_verifying(self, show: bool = True):
         """Show or hide the verifying playback indicator in the status bar."""
@@ -1167,131 +1436,195 @@ class GameBeatsApp:
             _update()
 
     def _on_root_resize(self, event=None):
-        """Update fonts, sidebar, wraplengths, and padding based on window size."""
+        """Keep the den proportional and update wraplengths without rescaling fonts."""
         try:
             w = max(300, self.root.winfo_width())
             h = max(300, self.root.winfo_height())
         except Exception:
             w, h = WIN_W, WIN_H
 
-        # Scale factor: 1.0 at 1280px wide, scales down/up proportionally
-        scale = max(0.7, min(1.3, w / 1280))
-        # Avoid redundant updates (only act on meaningful change)
-        prev_scale = getattr(self, '_prev_scale', 0)
-        if abs(scale - prev_scale) < 0.02 and prev_scale != 0:
+        if getattr(self, "_last_resize", None) == (w, h):
             return
-        self._prev_scale = scale
+        self._last_resize = (w, h)
 
-        def _sf(base_size):
-            """Scale a font size. Disabled per user request so fonts don't grow huge on maximize."""
-            return base_size
-
-        # ── Sidebar ──────────────────────────────────────────────────────
-        try:
-            self.sidebar.configure(width=SIDEBAR_W)
-        except Exception:
-            pass
-
-        # ── Content area wraplengths ─────────────────────────────────────
-        wrap = max(240, w - SIDEBAR_W - 150)
-
-        # Game banner + mood
-        try:
-            self.game_banner.configure(font=(F_UI, _sf(15), "bold"), wraplength=wrap)
-        except Exception:
-            pass
-        try:
-            self.mood_lbl.configure(font=(F_UI, _sf(11)), wraplength=wrap)
-        except Exception:
-            pass
-        try:
-            self.playlist_display_lbl.configure(font=(F_UI, _sf(10), "italic"), wraplength=wrap)
-        except Exception:
-            pass
-
-        # Track title
-        try:
-            self.track_lbl.configure(font=(F_UI, _sf(17), "bold"), wraplength=wrap)
-        except Exception:
-            pass
-
-        # Status log
-        try:
-            self.status_log_lbl.configure(font=(F_UI, _sf(10)), wraplength=wrap)
-        except Exception:
-            pass
-
-        # Header status
-        try:
-            self.status_pill.configure(font=(F_UI, _sf(9)))
-        except Exception:
-            pass
-
-        # Seamless music description
-        try:
-            self._seamless_desc_lbl.configure(
-                font=(F_UI, _sf(9)), wraplength=max(200, wrap - 60))
-        except Exception:
-            pass
-
-        # Playlists / blocked page labels
-        for attr in ('pl_status_lbl', 'blocked_status_lbl'):
+        room_h = max(260, h - 48 - 44 - 62)
+        self._deck_height = int(room_h * 0.34)
+        for attr in ("_deck_wrap", "_deck_shadow"):
             try:
-                lbl = getattr(self, attr, None)
-                if lbl:
-                    lbl.configure(font=(F_UI, _sf(10)), wraplength=wrap)
+                getattr(self, attr).place_configure(relheight=0.34)
             except Exception:
                 pass
 
-        # Store for other code
+        wrap = max(300, w - 120)
+        deck_wrap = max(240, int(w * 0.584) - 230)
+        cart_w = max(190, int(w * 0.145))
+        try:
+            self._deck_body.grid_columnconfigure(0, minsize=cart_w)
+            self._deck_cart.configure(width=cart_w)
+        except Exception:
+            pass
+
+        for attr in ("game_banner", "mood_lbl"):
+            try:
+                getattr(self, attr).configure(wraplength=max(110, cart_w - 70))
+            except Exception:
+                pass
+        try:
+            self.playlist_display_lbl.configure(wraplength=max(150, cart_w - 40))
+        except Exception:
+            pass
+        try:
+            self.track_lbl.configure(wraplength=deck_wrap)
+        except Exception:
+            pass
+        try:
+            self.status_log_lbl.configure(wraplength=deck_wrap)
+        except Exception:
+            pass
+        try:
+            self.deck_artist_lbl.configure(wraplength=deck_wrap)
+        except Exception:
+            pass
+
+        for attr in ("pl_status_lbl", "blocked_status_lbl"):
+            try:
+                lbl = getattr(self, attr, None)
+                if lbl:
+                    lbl.configure(wraplength=wrap)
+            except Exception:
+                pass
+
+        try:
+            if hasattr(self, "_footer_version_lbl"):
+                if w < 1120:
+                    self._footer_version_lbl.pack_forget()
+                else:
+                    self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))
+        except Exception:
+            pass
+
         self._dynamic_wrap = wrap
-        self._ui_scale = scale
+        self._ui_scale = 1.0
 
     def _nav(self, page):
-        self._current_page = page
-        if hasattr(self, "sidebar") and self.sidebar:
-            self.sidebar.set_active(page)
+        if page == "overlay":
+            self._show_control_overlay()
+            return
 
-        # Hide all pages, show selected
-        for f in [getattr(self, '_page_main', None),
-                  getattr(self, '_page_playlists', None),
-                  getattr(self, '_page_games', None),
-                  getattr(self, '_page_blocked', None),
-                  getattr(self, '_page_settings', None),
-                  getattr(self, '_page_faq', None)]:
+        self._current_page = page
+
+        for f in [
+            getattr(self, "_page_main", None),
+            getattr(self, "_page_playlists", None),
+            getattr(self, "_page_games", None),
+            getattr(self, "_page_blocked", None),
+            getattr(self, "_page_settings", None),
+            getattr(self, "_page_faq", None),
+        ]:
             try:
-                if f: f.pack_forget()
+                if f:
+                    f.pack_forget()
             except Exception:
                 pass
 
         page_map = {
-            "main":      getattr(self, '_page_main', None),
-            "playlists": getattr(self, '_page_playlists', None),
-            "games":     getattr(self, '_page_games', None),
-            "blocked":   getattr(self, '_page_blocked', None),
-            "settings":  getattr(self, '_page_settings', None),
-            "faq":       getattr(self, '_page_faq', None),
+            "main": getattr(self, "_page_main", None),
+            "playlists": getattr(self, "_page_playlists", None),
+            "games": getattr(self, "_page_games", None),
+            "blocked": getattr(self, "_page_blocked", None),
+            "settings": getattr(self, "_page_settings", None),
+            "faq": getattr(self, "_page_faq", None),
         }
         target = page_map.get(page)
         if target:
             target.pack(fill=tk.BOTH, expand=True)
-        if page == "playlists" and self.spotify:
+
+        self._paint_footer(page)
+
+        if page == "main":
+            self._redraw_room()
+            self._start_puppy_animation()
+            self._start_vu_animation()
+        else:
+            self._stop_puppy_animation()
+            self._stop_vu_animation()
+
+        if page == "playlists" and getattr(self, "spotify", None):
             self._load_playlists()
         if page == "blocked":
             self._refresh_blocked_page()
 
-        return
+    def _paint_footer(self, page):
+        for key, btn in getattr(self, "_footer_buttons", {}).items():
+            try:
+                if key == page:
+                    btn.configure(fg_color=SURFACE2, text_color=ACCENT)
+                else:
+                    btn.configure(fg_color="transparent", text_color=TEXT_MUTED)
+            except Exception:
+                pass
+        for key, btn in getattr(self, "_footer_tools", {}).items():
+            try:
+                if key == page:
+                    btn.configure(fg_color=SURFACE2, text_color=ACCENT)
+                else:
+                    btn.configure(fg_color="transparent", text_color=TEXT_MUTED)
+            except Exception:
+                pass
+
+    def _show_control_overlay(self):
+        try:
+            if getattr(self, "_control_overlay", None):
+                self._control_overlay.show()
+        except Exception as e:
+            try:
+                self._log(f"Could not open overlay: {e}")
+            except Exception:
+                pass
+
+    def _refresh_connection_ui(self):
+        connected = bool(getattr(self, "spotify", None))
+        try:
+            if connected:
+                self.connection_lbl.configure(text="SPOTIFY CONNECTED", text_color=MINT)
+                self.connection_dot.configure(text_color=GREEN)
+                if hasattr(self, "deck_led"):
+                    self.deck_led.configure(text="\u25cf  SPOTIFY IN", text_color=MINT)
+            else:
+                self.connection_lbl.configure(text="SPOTIFY OFFLINE", text_color=TEXT_MUTED)
+                self.connection_dot.configure(text_color=MAGENTA)
+                if hasattr(self, "deck_led"):
+                    self.deck_led.configure(text="\u25cb  SPOTIFY OUT", text_color=TEXT_MUTED)
+        except Exception:
+            pass
+
+    def _new_page(self):
+        page = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
+        if getattr(self, "_room_dim_photo", None) is not None:
+            try:
+                bg = tk.Label(
+                    page, image=self._room_dim_photo, bg=BG, bd=0,
+                    highlightthickness=0, anchor="nw",
+                )
+                bg.place(x=0, y=0, relwidth=1, relheight=1)
+                bg.lower()
+            except Exception:
+                pass
+        return page
+
+    def _make_page_body(self, page, padx=26, pady=(14, 8)):
+        body = ctk.CTkFrame(page, fg_color=BG, corner_radius=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=padx, pady=pady)
+        return body
 
     def _build_pages(self):
-        page_bg = lambda: ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
-        self._page_main = page_bg()
-        self._page_playlists = page_bg()
-        self._page_games = page_bg()
-        self._page_blocked = page_bg()
-        self._page_settings = page_bg()
-        self._page_faq = page_bg()
+        self._page_main = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
+        self._page_playlists = self._new_page()
+        self._page_games = self._new_page()
+        self._page_blocked = self._new_page()
+        self._page_settings = self._new_page()
+        self._page_faq = self._new_page()
 
-        # Build page contents (each page isolated so one failure won't skip the rest)
         for build in (
             self._build_main_page,
             self._build_playlists_page,
@@ -1308,8 +1641,7 @@ class GameBeatsApp:
                 except Exception:
                     pass
 
-        # Show default page
-        self._nav('main')
+        self._nav("main")
 
     def _card(self, parent, pady=0):
         return T.elevated_card(parent, pady=pady)
@@ -1322,252 +1654,815 @@ class GameBeatsApp:
     def _build_main_page(self):
         mp = self._page_main
 
-        self._section_lbl(mp, "Console")
-        console = self._card(mp, pady=0)
+        self._room_canvas = tk.Canvas(mp, bg=BG, highlightthickness=0, bd=0)
+        self._room_canvas.pack(fill=tk.BOTH, expand=True)
+        self._room_canvas.bind("<Configure>", self._on_room_canvas_configure)
+        self._room_canvas.bind("<Button-1>", self._on_room_canvas_click)
+        self._room_image_item = None
+        self._puppy_bbox = (0, 0, 0, 0)
+        self._vu_level = 0.0
+        self._deck_height = 260
 
-        # Game status + auto
-        status_row = ctk.CTkFrame(console, fg_color="transparent", corner_radius=0)
-        status_row.pack(fill=tk.X, pady=(0, 8))
-
-        status_left = ctk.CTkFrame(status_row, fg_color="transparent", corner_radius=0)
-        status_left.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 12))
-
-        game_icon_sz = 40
-        self._game_icon_holder = ctk.CTkFrame(
-            status_left, fg_color=SURFACE3, width=game_icon_sz, height=game_icon_sz,
-            corner_radius=RADIUS_SM, border_width=0,
+        self._deck_shadow = tk.Frame(mp, bg=NIGHT, bd=0, highlightthickness=0)
+        self._deck_shadow.place(
+            relx=0.057, rely=0.90, anchor="sw", relwidth=0.584,
+            relheight=0.34, x=7, y=7,
         )
-        self._game_icon_holder.pack(side=tk.LEFT, padx=(0, 10))
+
+        self._deck_wrap = tk.Frame(mp, bg=DECK, bd=0, highlightthickness=0)
+        self._deck_wrap.place(
+            relx=0.057, rely=0.90, anchor="sw", relwidth=0.584,
+            relheight=0.34,
+        )
+
+        self._deck = ctk.CTkFrame(
+            self._deck_wrap, fg_color=DECK, corner_radius=0,
+            border_width=3, border_color=NIGHT,
+        )
+        self._deck.pack(fill=tk.BOTH, expand=True)
+
+        top = ctk.CTkFrame(self._deck, fg_color=DECK_TOP, height=25, corner_radius=0)
+        top.pack(fill=tk.X)
+        top.pack_propagate(False)
+        ctk.CTkLabel(
+            top, text="GB\u201401 / AUTO-SOUND SYSTEM", fg_color="transparent",
+            text_color=GOLD, font=T.pixel_font(8, "bold"),
+        ).pack(side=tk.LEFT, padx=10)
+
+        self.deck_led = ctk.CTkLabel(
+            top, text="\u25cb  SPOTIFY OUT", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(8), cursor="hand2",
+        )
+        self.deck_led.pack(side=tk.RIGHT, padx=10)
+        self.deck_led.bind("<Button-1>", lambda e: self._nav("settings"))
+
+        body = ctk.CTkFrame(self._deck, fg_color=DECK, corner_radius=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=9, pady=(7, 4))
+        body.grid_columnconfigure(0, weight=0, minsize=230)
+        body.grid_columnconfigure(1, weight=1)
+        body.grid_rowconfigure(0, weight=1)
+        self._deck_body = body
+
+        # ── Cartridge ────────────────────────────────────────────────────────
+        cart = ctk.CTkFrame(
+            body, fg_color=SURFACE2, corner_radius=0,
+            border_width=2, border_color=NIGHT, width=230,
+        )
+        cart.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        cart.grid_propagate(False)
+        self._deck_cart = cart
+
+        ridges = tk.Canvas(cart, height=9, bg=NIGHT, highlightthickness=0)
+        ridges.pack(fill=tk.X)
+        for i in range(18):
+            ridges.create_line(8 + i * 9, 2, 8 + i * 9, 7, fill=DECK)
+
+        cart_label = ctk.CTkFrame(cart, fg_color=NIGHT, corner_radius=0)
+        cart_label.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+        head = ctk.CTkFrame(cart_label, fg_color="transparent", corner_radius=0)
+        head.pack(fill=tk.X, padx=7, pady=(7, 2))
+
+        self._game_icon_holder = ctk.CTkFrame(
+            head, fg_color=SURFACE3, width=34, height=34, corner_radius=0,
+            border_width=1, border_color=WOOD,
+        )
+        self._game_icon_holder.pack(side=tk.LEFT, padx=(0, 7))
         self._game_icon_holder.pack_propagate(False)
 
         self._game_icon_label = ctk.CTkLabel(
             self._game_icon_holder, text="\U0001f3ae", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.ctk_font(16),
+            text_color=TEXT_MUTED, font=T.retro_font(16),
         )
         self._game_icon_label.pack(fill=tk.BOTH, expand=True)
 
-        status_text = ctk.CTkFrame(status_left, fg_color="transparent", corner_radius=0)
-        status_text.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        name_col = ctk.CTkFrame(head, fg_color="transparent", corner_radius=0)
+        name_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         self.game_banner = ctk.CTkLabel(
-            status_text, text="No saved game running",
-            fg_color="transparent", text_color=TEXT,
-            font=T.ctk_font(15, "bold"), anchor="w",
+            name_col, text="NO SAVED GAME RUNNING", fg_color="transparent",
+            text_color=TEXT, font=T.pixel_font(10, "bold"),
+            anchor="w", justify=tk.LEFT, wraplength=160,
         )
         self.game_banner.pack(fill=tk.X)
 
         self.mood_lbl = ctk.CTkLabel(
-            status_text,
-            text="Add games in My Games \u2014 music starts when they run",
-            fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.ctk_font(12), anchor="w", justify=tk.LEFT,
+            name_col, text="Waiting for a game", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.retro_font(12),
+            anchor="w", justify=tk.LEFT, wraplength=160,
         )
-        self.mood_lbl.pack(fill=tk.X, pady=(2, 0))
-
-        auto_frame = ctk.CTkFrame(status_row, fg_color="transparent", corner_radius=0)
-        auto_frame.pack(side=tk.RIGHT)
-
-        ctk.CTkLabel(
-            auto_frame, text="Auto", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.ctk_font(13),
-        ).pack(side=tk.LEFT, padx=(0, 6))
-
-        ctk.CTkSwitch(
-            auto_frame, variable=self.auto_mode, text="",
-            fg_color=SURFACE4, progress_color=ACCENT,
-            button_color="#ffffff", button_hover_color=SURFACE3,
-            width=40, height=20,
-        ).pack(side=tk.LEFT)
+        self.mood_lbl.pack(fill=tk.X, pady=(1, 0))
 
         self.playlist_display_lbl = ctk.CTkLabel(
-            console, text="Playlist: \u2014", fg_color="transparent",
-            text_color=ACCENT, font=T.ctk_font(13), anchor="w",
+            cart_label, text="PLAYLIST: \u2014", fg_color="transparent",
+            text_color=GOLD, font=T.retro_font(12),
+            anchor="w", justify=tk.LEFT, wraplength=190,
         )
-        self.playlist_display_lbl.pack(fill=tk.X, pady=(0, 10))
+        self.playlist_display_lbl.pack(fill=tk.X, padx=7, pady=(4, 0))
 
-        # Now playing — same surface, no inset box
-        track_info_row = ctk.CTkFrame(console, fg_color="transparent", corner_radius=0)
-        track_info_row.pack(fill=tk.X, pady=(0, 6))
-
-        art_wrap = ctk.CTkFrame(
-            track_info_row, fg_color=SURFACE3, width=56, height=56,
-            corner_radius=RADIUS_SM, border_width=0,
+        cassette = tk.Canvas(
+            cart_label, height=28, width=1, bg=NIGHT, highlightthickness=0,
         )
-        art_wrap.pack(side=tk.LEFT, padx=(0, 12))
-        art_wrap.pack_propagate(False)
-
-        self.art_holder = art_wrap
-        self.art_label = tk.Label(
-            art_wrap, text="\u266a", bg=SURFACE3, fg=ACCENT,
-            bd=0, highlightthickness=0, font=(F_UI, 22, "bold"),
+        cassette.pack(fill=tk.X, padx=7, pady=(6, 6))
+        cassette.bind(
+            "<Configure>",
+            lambda e: self._draw_cart_cassette(cassette),
         )
-        self.art_label.pack(fill=tk.BOTH, expand=True)
+        self._cart_canvas = cassette
 
-        labels_col = ctk.CTkFrame(track_info_row, fg_color="transparent", corner_radius=0)
-        labels_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self.track_lbl = ctk.CTkLabel(
-            labels_col, text="Nothing playing", fg_color="transparent",
-            text_color=TEXT, font=T.ctk_font(16, "bold"),
-            anchor="w", justify=tk.LEFT,
+        # ── Display ──────────────────────────────────────────────────────────
+        disp = ctk.CTkFrame(
+            body, fg_color=NIGHT, corner_radius=0,
+            border_width=2, border_color=WOOD,
         )
-        self.track_lbl.pack(fill=tk.X)
+        disp.grid(row=0, column=1, sticky="nsew")
 
-        self.artist_lbl = ctk.CTkLabel(
-            labels_col, text="Connect Spotify in Settings",
-            fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.ctk_font(13), anchor="w", justify=tk.LEFT,
+        inner = ctk.CTkFrame(disp, fg_color=NIGHT, corner_radius=0)
+        inner.pack(fill=tk.BOTH, expand=True, padx=10, pady=7)
+
+        status_row = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        status_row.pack(fill=tk.X)
+
+        self.deck_status_lbl = ctk.CTkLabel(
+            status_row, text="\u25cb  STANDING BY", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(8, "bold"),
         )
-        self.artist_lbl.pack(fill=tk.X, pady=(2, 0))
-
-        self.status_log_lbl = T.info_banner(console, text="GameBeats ready.")
-        self.status_log_lbl.pack(fill=tk.X, pady=(4, 10))
-
-        # Transport — compact, no pill container
-        ctrl_row = ctk.CTkFrame(console, fg_color="transparent", corner_radius=0)
-        ctrl_row.pack(pady=(0, 10))
-
-        self.prev_btn = CircleBtn(
-            ctrl_row, "\u23ee", command=self._prev,
-            size=38, font_size=13, canvas_bg=SURFACE,
-        )
-        self.prev_btn.pack(side=tk.LEFT, padx=8)
-
-        self.play_btn = CircleBtn(
-            ctrl_row, "\u25b6", command=self._play_pause_toggle,
-            size=52, bg=ACCENT, fg="#ffffff", font_size=18,
-            canvas_bg=SURFACE, accent=True,
-        )
-        self.play_btn.pack(side=tk.LEFT, padx=8)
-
-        self.next_btn = CircleBtn(
-            ctrl_row, "\u23ed", command=self._next,
-            size=38, font_size=13, canvas_bg=SURFACE,
-        )
-        self.next_btn.pack(side=tk.LEFT, padx=8)
-
-        # Keep music playing — inline row
-        seamless_row = ctk.CTkFrame(console, fg_color="transparent", corner_radius=0)
-        seamless_row.pack(fill=tk.X, pady=(0, 10))
-
-        seamless_copy = ctk.CTkFrame(seamless_row, fg_color="transparent", corner_radius=0)
-        seamless_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.deck_status_lbl.pack(side=tk.LEFT)
 
         ctk.CTkLabel(
-            seamless_copy, text="Keep music playing",
-            fg_color="transparent", text_color=TEXT,
-            font=T.ctk_font(13, "bold"), anchor="w",
-        ).pack(fill=tk.X)
+            status_row, text="SIDE A / AUTO", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(7),
+        ).pack(side=tk.RIGHT)
 
-        self._seamless_desc_lbl = ctk.CTkLabel(
-            seamless_copy,
-            text="Do not auto-pause Spotify when game audio is detected.",
-            fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.ctk_font(12), anchor="w", justify=tk.LEFT,
+        self.track_lbl = ctk.CTkLabel(
+            inner, text="Nothing playing", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(22),
+            anchor="w", justify=tk.LEFT,
         )
-        self._seamless_desc_lbl.pack(fill=tk.X, pady=(1, 0))
+        self.track_lbl.pack(fill=tk.X, pady=(2, 0))
 
+        self.deck_artist_lbl = ctk.CTkLabel(
+            inner, text="Connect Spotify in Control Panel", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.retro_font(14),
+            anchor="w", justify=tk.LEFT,
+        )
+        self.deck_artist_lbl.pack(fill=tk.X, pady=(0, 1))
+
+        # Hidden compatibility labels used by _update_np / _load_art.
+        self.artist_lbl = ctk.CTkLabel(inner, text="", fg_color="transparent")
+        self.art_holder = ctk.CTkFrame(mp, width=1, height=1)
+        self.art_holder.place(x=-40, y=-40)
+        self.art_label = tk.Label(self.art_holder, text="", bg=NIGHT)
+
+        vu_row = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        vu_row.pack(fill=tk.X, pady=(3, 0))
+
+        ctrl = ctk.CTkFrame(vu_row, fg_color="transparent", corner_radius=0)
+        ctrl.pack(side=tk.RIGHT)
+
+        self._vu_canvas = tk.Canvas(
+            vu_row, height=18, bg=NIGHT, highlightthickness=0, bd=0,
+        )
+        self._vu_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
+        self._vu_canvas.bind("<Configure>", lambda e: self._draw_vu())
+
+        self.prev_btn = CircleBtn(
+            ctrl, "\u23ee", command=self._prev, size=30, font_size=13,
+            bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT,
+        )
+        self.prev_btn.pack(side=tk.LEFT, padx=3)
+
+        self.play_btn = CircleBtn(
+            ctrl, "\u25b6", command=self._play_pause_toggle,
+            size=40, bg=GOLD, fg=BG, font_size=17,
+            canvas_bg=NIGHT, accent=True,
+        )
+        self.play_btn.pack(side=tk.LEFT, padx=3)
+
+        self.next_btn = CircleBtn(
+            ctrl, "\u23ed", command=self._next, size=30, font_size=13,
+            bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT,
+        )
+        self.next_btn.pack(side=tk.LEFT, padx=3)
+
+        self.status_log_lbl = ctk.CTkLabel(
+            inner, text="GameBeats ready.", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.retro_font(12),
+            anchor="w", justify=tk.LEFT,
+        )
+        self.status_log_lbl.pack(fill=tk.X, pady=(3, 0))
+
+        # ── Deck bottom ─────────────────────────────────────────────────────
+        bottom = ctk.CTkFrame(self._deck, fg_color=DECK, height=34, corner_radius=0)
+        bottom.pack(fill=tk.X, side=tk.BOTTOM, padx=9, pady=(0, 7))
+        bottom.pack_propagate(False)
+
+        auto = ctk.CTkFrame(bottom, fg_color="transparent", corner_radius=0)
+        auto.pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            auto, text="AUTO", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(7),
+        ).pack(side=tk.LEFT, padx=(0, 4))
         ctk.CTkSwitch(
-            seamless_row, variable=self.seamless_music_var,
-            command=self._save_player_settings, text="",
-            fg_color=SURFACE4, progress_color=ACCENT,
-            button_color="#ffffff", button_hover_color=SURFACE3,
-            width=40, height=20,
-        ).pack(side=tk.RIGHT, padx=(12, 0))
+            auto, variable=self.auto_mode, text="", width=34, height=17,
+            fg_color=SURFACE4, progress_color=MINT,
+            button_color=CREAM, button_hover_color=GOLD,
+            border_width=0, corner_radius=9,
+            command=lambda: self._log(
+                "Auto-play " + ("on" if self.auto_mode.get() else "off")
+            ),
+        ).pack(side=tk.LEFT)
 
-        # Actions
-        actions = ctk.CTkFrame(console, fg_color="transparent", corner_radius=0)
-        actions.pack(fill=tk.X)
-        actions.columnconfigure(0, weight=1)
-        actions.columnconfigure(1, weight=1)
+        seamless = ctk.CTkFrame(bottom, fg_color="transparent", corner_radius=0)
+        seamless.pack(side=tk.LEFT, padx=(14, 0))
+        ctk.CTkLabel(
+            seamless, text="KEEP MUSIC", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(7),
+        ).pack(side=tk.LEFT, padx=(0, 4))
+        ctk.CTkSwitch(
+            seamless, variable=self.seamless_music_var,
+            command=self._save_player_settings, text="", width=34, height=17,
+            fg_color=SURFACE4, progress_color=MINT,
+            button_color=CREAM, button_hover_color=GOLD,
+            border_width=0, corner_radius=9,
+        ).pack(side=tk.LEFT)
 
-        self.block_pl_btn = RoundedButton(
-            actions, text="\u2205  Block playlist",
-            command=self._block_current_playlist,
-            width=140, height=36, bg=SURFACE3, fg=AMBER,
-            font_size=12, canvas_bg=SURFACE, border_color="",
-            radius=RADIUS_SM,
+        self.block_pl_btn = T.pixel_button(
+            bottom, text="\u2298  BLOCK", command=self._block_current_playlist,
+            width=82, height=27,
         )
-        self.block_pl_btn.grid(row=0, column=0, padx=(0, 6), sticky="ew")
+        self.block_pl_btn.pack(side=tk.RIGHT, padx=(5, 0))
 
-        RoundedButton(
-            actions, text="\u21ba  Try another",
-            command=self._try_another_playlist,
-            width=140, height=36, bg=ACCENT, fg="#ffffff",
-            font_size=12, canvas_bg=SURFACE, border_color="",
-            radius=RADIUS_SM,
-        ).grid(row=0, column=1, padx=(6, 0), sticky="ew")
+        T.pixel_button(
+            bottom, text="\u21ba  TRY ANOTHER", command=self._try_another_playlist,
+            width=128, height=27,
+        ).pack(side=tk.RIGHT)
+
+        # Keep the bottom rail reserved before the flexible body claims space.
+        body.pack_forget()
+        body.pack(fill=tk.BOTH, expand=True, padx=9, pady=(7, 4))
+
+        self.root.after(80, self._redraw_room)
+
+    # ── DEN CANVAS ────────────────────────────────────────────────────────────
+
+    def _time_of_day(self):
+        try:
+            hour = time.localtime().tm_hour
+        except Exception:
+            return "evening"
+        if hour < 12:
+            return "morning"
+        if hour < 18:
+            return "afternoon"
+        return "evening"
+
+    def _schedule_room_redraw(self, delay_ms: int = 0):
+        """Coalesce room repaints so rapid state changes stay cheap."""
+        try:
+            if self._room_redraw_job:
+                self.root.after_cancel(self._room_redraw_job)
+        except Exception:
+            pass
+        try:
+            self._room_redraw_job = self.root.after(
+                max(0, int(delay_ms)), self._redraw_room
+            )
+        except Exception:
+            self._room_redraw_job = None
+
+    def _on_room_canvas_configure(self, _event=None):
+        self._schedule_room_redraw(55)
+
+    def _puppy_image_for(self, name, size):
+        sprite = getattr(self, "_puppy_sprites", {}).get(name)
+        if sprite is None:
+            return None
+        key = (name, int(size[0]), int(size[1]))
+        cached = self._puppy_photo_cache.get(key)
+        if cached is not None:
+            return cached
+        try:
+            resampling = getattr(Image, "Resampling", Image)
+            scaled = sprite.resize((int(size[0]), int(size[1])), resampling.NEAREST)
+            self._puppy_photo_cache[key] = scaled
+            return scaled
+        except Exception:
+            return None
+
+    @staticmethod
+    def _game_label(game):
+        """Return a clean display name for a detector record or plain string."""
+        if isinstance(game, dict):
+            return str(
+                game.get("name")
+                or game.get("display_name")
+                or game.get("proc")
+                or game.get("exe")
+                or "GAME"
+            )
+        return str(game or "GAME")
+
+    def _redraw_room(self):
+        canvas = getattr(self, "_room_canvas", None)
+        self._room_redraw_job = None
+        if canvas is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+        except Exception:
+            return
+
+        w = max(1, canvas.winfo_width())
+        h = max(1, canvas.winfo_height())
+        if w < 80 or h < 80:
+            return
+
+        if self._room_pil is None or not HAS_PIL:
+            try:
+                canvas.delete("all")
+                canvas.configure(bg=BG)
+                canvas.create_text(
+                    w // 2, h // 2, text="GAMEBEATS / THE DEN",
+                    font=(F_PIXEL, -18, "bold"), fill=CREAM,
+                )
+            except Exception:
+                pass
+            return
+
+        try:
+            resampling = getattr(Image, "Resampling", Image)
+            key = (w, h)
+            if self._room_base_cache is None or self._room_base_key != key:
+                self._room_base_cache = ImageOps.fit(
+                    self._room_pil, (w, h), method=resampling.NEAREST,
+                    centering=(0.5, 0.5),
+                ).convert("RGBA")
+                self._room_base_key = key
+            base = self._room_base_cache.copy()
+        except Exception:
+            return
+
+        now = time.time()
+        playing = bool(
+            getattr(self, "_is_playing", False)
+            or getattr(self, "_spotify_audio_active", False)
+        )
+        if playing:
+            beat = int(now * 2.0) % 4
+            sprite_name = "sing" if beat < 2 else "mic"
+            bob = (0, 2, 3, 1)[beat]
+        elif getattr(self, "current_game", None):
+            sprite_name = "mic"
+            bob = int(round(1.5 + 1.5 * math.sin(now * 1.7)))
+        else:
+            sprite_name = "idle"
+            bob = int(round(1.5 + 1.5 * math.sin(now * 1.6)))
+
+        pw = max(80, int(w * 0.140))
+        ph = int(pw * 144 / 128)
+        px = int(w * 0.390)
+        py = int(h * 0.355) + bob
+        px = max(0, min(px, w - pw - 4))
+        py = max(0, min(py, h - ph - 8))
+        self._puppy_bbox = (px, py, px + pw, py + ph)
+
+        sprite = self._puppy_image_for(sprite_name, (pw, ph))
+        if sprite is not None:
+            try:
+                base.alpha_composite(sprite, (px, py))
+            except Exception:
+                pass
+
+        try:
+            photo = ImageTk.PhotoImage(base.convert("RGB"))
+            self._room_photo = photo
+            if self._room_image_item is None:
+                self._room_image_item = canvas.create_image(
+                    0, 0, anchor="nw", image=photo, tags=("room_bg",)
+                )
+            else:
+                canvas.itemconfigure(self._room_image_item, image=photo)
+            canvas.tag_lower("room_bg")
+            canvas.delete("overlay")
+        except Exception:
+            return
+
+        # Greeting
+        gx = int(w * 0.068)
+        gy = int(h * 0.062)
+        headline_size = max(25, int(w * 0.028))
+        eyebrow_size = max(8, int(w * 0.0058))
+        sub_size = max(14, int(w * 0.0110))
+        headline = f"Good {self._time_of_day()}, Player 1 \u266a"
+        try:
+            canvas.create_rectangle(
+                gx - eyebrow_size - 4, gy + 3,
+                gx - eyebrow_size + 1, gy + 8,
+                fill=MINT, outline="", tags=("overlay",),
+            )
+            canvas.create_text(
+                gx + 1, gy + 1, text="A SOUNDTRACK FOR YOUR SIDE QUESTS",
+                anchor="nw", font=(F_PIXEL, -eyebrow_size),
+                fill=NIGHT, tags=("overlay",),
+            )
+            canvas.create_text(
+                gx, gy, text="A SOUNDTRACK FOR YOUR SIDE QUESTS",
+                anchor="nw", font=(F_PIXEL, -eyebrow_size),
+                fill=ROSE, tags=("overlay",),
+            )
+            headline_y = gy + 18
+            canvas.create_text(
+                gx + 2, headline_y + 2, text=headline, anchor="nw",
+                font=(F_SERIF, -headline_size, "italic"), fill=NIGHT,
+                tags=("overlay",),
+            )
+            canvas.create_text(
+                gx, headline_y, text=headline, anchor="nw",
+                font=(F_SERIF, -headline_size, "italic"), fill=CREAM,
+                tags=("overlay",),
+            )
+            sub_y = headline_y + headline_size + 11
+            canvas.create_text(
+                gx + 1, sub_y + 1,
+                text="The world can wait. Stay for one more song.",
+                anchor="nw", font=(F_RETRO, -sub_size),
+                fill=NIGHT, tags=("overlay",),
+            )
+            canvas.create_text(
+                gx, sub_y, text="The world can wait. Stay for one more song.",
+                anchor="nw", font=(F_RETRO, -sub_size),
+                fill=ROSE, tags=("overlay",),
+            )
+        except Exception:
+            pass
+
+        # Room object labels
+        label_x = int(w * 0.79)
+        self._draw_room_label(canvas, label_x, int(h * 0.36),
+                              "THE GAME SHELF", "lbl_shelf",
+                              lambda: self._nav("games"))
+        self._draw_room_label(canvas, label_x, int(h * 0.60),
+                              "TWEAK A LITTLE", "lbl_board",
+                              lambda: self._nav("settings"))
+        self._draw_room_label(canvas, int(w * 0.78), int(h * 0.845),
+                              "DIG FOR A VIBE", "lbl_crate",
+                              lambda: self._nav("playlists"))
+
+        # Puppy caption + pet heart
+        try:
+            if playing:
+                canvas.create_text(
+                    px + pw // 2, py - 8, text="\u266a  that's my jam",
+                    anchor="s", font=(F_RETRO, -max(12, int(w * 0.009))),
+                    fill=GOLD, tags=("overlay",),
+                )
+                # Floating notes drift up beside the puppy while music plays.
+                note_size = max(12, int(w * 0.010))
+                for i in range(3):
+                    drift = int((now * 26 + i * 17) % 52)
+                    nx = px + pw + 2 + int(7 * math.sin(now * 2.1 + i * 1.7))
+                    ny = py + ph * 0.52 - drift
+                    if ny < py - 30:
+                        ny = py + ph * 0.52
+                    canvas.create_text(
+                        nx, ny, text="\u266a", anchor="w",
+                        font=(F_RETRO, -note_size),
+                        fill=(GOLD, ROSE, MINT)[i],
+                        tags=("overlay",),
+                    )
+            if time.time() < getattr(self, "_heart_until", 0.0):
+                canvas.create_text(
+                    px + pw // 2, py - 26, text="\u2665",
+                    anchor="s", font=(F_RETRO, -max(20, int(w * 0.015))),
+                    fill=ORANGE, tags=("overlay",),
+                )
+        except Exception:
+            pass
+
+        # Game status caption (real detector state)
+        try:
+            cap_x = int(w * 0.665)
+            cap_y = int(h * 0.935)
+            game = getattr(self, "current_game", None)
+            if game:
+                line, color = f"\u25cf {self._game_label(game).upper()} DETECTED", MINT
+            else:
+                line, color = "\u25cb NO GAME RUNNING", TEXT_MUTED
+            cap_size = max(8, int(w * 0.0052))
+            canvas.create_text(
+                cap_x, cap_y, text=line, anchor="nw",
+                font=(F_PIXEL, -cap_size), fill=color, tags=("overlay",),
+            )
+            canvas.create_text(
+                cap_x, cap_y + int(cap_size * 1.7),
+                text="YOU PLAY. WE PRESS PLAY.",
+                anchor="nw", font=(F_PIXEL, -max(7, cap_size - 1)),
+                fill=WOOD, tags=("overlay",),
+            )
+        except Exception:
+            pass
+
+    def _draw_room_label(self, canvas, x, y, text, tag, command):
+        try:
+            fs = max(8, int(canvas.winfo_width() * 0.0056))
+            pad = max(8, int(fs * 1.1))
+            box_h = max(24, int(fs * 2.6))
+            txt = canvas.create_text(
+                x + pad, y + (box_h - fs) // 2 - 1, text=text, anchor="nw",
+                font=(F_PIXEL, -fs), fill=GOLD, tags=("overlay", f"{tag}_txt"),
+            )
+            bbox = canvas.bbox(txt)
+            if not bbox:
+                return
+            box_w = (bbox[2] - bbox[0]) + pad * 2 + int(fs * 1.8)
+            box = canvas.create_rectangle(
+                x, y, x + box_w, y + box_h, fill=NIGHT, outline=WOOD,
+                width=max(2, int(fs * 0.22)), tags=("overlay", f"{tag}_box"),
+            )
+            canvas.tag_raise(txt, box)
+            canvas.create_text(
+                x + box_w - pad, y + box_h // 2, text="\u2197", anchor="e",
+                font=(F_RETRO, -max(12, int(fs * 1.5))), fill=CREAM,
+                tags=("overlay", f"{tag}_arrow"),
+            )
+            for part in (f"{tag}_txt", f"{tag}_box", f"{tag}_arrow"):
+                canvas.tag_bind(part, "<Button-1>", lambda e, c=command: c())
+                canvas.tag_bind(
+                    part, "<Enter>",
+                    lambda e, t=tag: self._label_hover(canvas, t, True),
+                )
+                canvas.tag_bind(
+                    part, "<Leave>",
+                    lambda e, t=tag: self._label_hover(canvas, t, False),
+                )
+        except Exception:
+            pass
+
+    def _label_hover(self, canvas, tag, entering):
+        try:
+            if entering:
+                canvas.itemconfigure(f"{tag}_box", fill=ACCENT, outline=T.ACCENT_HOV)
+                canvas.itemconfigure(f"{tag}_txt", fill=BG)
+                canvas.itemconfigure(f"{tag}_arrow", fill=BG)
+                canvas.configure(cursor="hand2")
+            else:
+                canvas.itemconfigure(f"{tag}_box", fill=NIGHT, outline=WOOD)
+                canvas.itemconfigure(f"{tag}_txt", fill=GOLD)
+                canvas.itemconfigure(f"{tag}_arrow", fill=CREAM)
+                canvas.configure(cursor="")
+        except Exception:
+            pass
+
+    def _on_room_canvas_click(self, event):
+        try:
+            x0, y0, x1, y1 = self._puppy_bbox
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                self._pet_puppy()
+        except Exception:
+            pass
+
+    def _pet_puppy(self):
+        self._heart_until = time.time() + 1.2
+        if hasattr(self, "status_log_lbl"):
+            self.status_log_lbl.configure(text="Puppy says hi.", text_color=GOLD)
+        self._redraw_room()
+        try:
+            self.root.after(1250, self._redraw_room)
+        except Exception:
+            pass
+
+    def _draw_cart_cassette(self, canvas):
+        if canvas is None:
+            return
+        try:
+            canvas.delete("all")
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w < 20 or h < 10:
+                return
+            canvas.create_rectangle(0, 0, w, h, fill=NIGHT, outline="")
+            canvas.create_line(4, 4, w - 4, 4, fill=WOOD)
+            canvas.create_line(4, h - 4, w - 4, h - 4, fill=WOOD)
+            cy = h // 2
+            playing = bool(
+                getattr(self, "_is_playing", False)
+                or getattr(self, "_spotify_audio_active", False)
+            )
+            phase = time.time() * 5.2 if playing else 0.0
+            for idx, cx in enumerate((int(w * 0.30), int(w * 0.70))):
+                canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7,
+                                   fill=GOLD, outline=WOOD)
+                # Three little spokes make the reels visibly rotate while
+                # music is playing. Static when paused.
+                a0 = phase + idx * 0.7
+                for k in range(3):
+                    a = a0 + k * (2 * math.pi / 3)
+                    canvas.create_line(
+                        cx, cy,
+                        cx + 5 * math.cos(a), cy + 5 * math.sin(a),
+                        fill=WOOD, width=1,
+                    )
+                canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
+                                   fill=NIGHT, outline="")
+            canvas.create_line(6, cy, w - 6, cy, fill=WOOD)
+        except Exception:
+            pass
+
+    # ── Puppy + VU animation ─────────────────────────────────────────────────
+
+    def _start_puppy_animation(self):
+        if getattr(self, "_puppy_job", None) is not None:
+            return
+        try:
+            self._puppy_job = self.root.after(380, self._animate_puppy)
+        except Exception:
+            self._puppy_job = None
+
+    def _stop_puppy_animation(self):
+        try:
+            if getattr(self, "_puppy_job", None):
+                self.root.after_cancel(self._puppy_job)
+        except Exception:
+            pass
+        self._puppy_job = None
+
+    def _animate_puppy(self):
+        self._puppy_job = None
+        if getattr(self, "_closing", False):
+            return
+        if getattr(self, "_current_page", "") != "main":
+            return
+        playing = bool(
+            getattr(self, "_is_playing", False)
+            or getattr(self, "_spotify_audio_active", False)
+        )
+        self._redraw_room()
+        try:
+            self._puppy_job = self.root.after(
+                440 if playing else 760, self._animate_puppy
+            )
+        except Exception:
+            self._puppy_job = None
+
+    def _start_vu_animation(self):
+        if getattr(self, "_vu_job", None) is not None:
+            return
+        try:
+            self._vu_job = self.root.after(120, self._animate_vu)
+        except Exception:
+            self._vu_job = None
+
+    def _stop_vu_animation(self):
+        try:
+            if getattr(self, "_vu_job", None):
+                self.root.after_cancel(self._vu_job)
+        except Exception:
+            pass
+        self._vu_job = None
+
+    def _animate_vu(self):
+        self._vu_job = None
+        if getattr(self, "_closing", False):
+            return
+        if getattr(self, "_current_page", "") != "main":
+            return
+        playing = bool(getattr(self, "_is_playing", False))
+        peak = float(getattr(self, "_last_spotify_peak", 0.0) or 0.0)
+        target = min(1.0, peak / 0.18) if playing else 0.0
+        self._vu_level = getattr(self, "_vu_level", 0.0) * 0.55 + target * 0.45
+        self._draw_vu()
+        # Spin the cassette reels at a modest rate (every other VU frame).
+        self._vu_frame = (getattr(self, "_vu_frame", 0) + 1) % 2
+        if self._vu_frame == 0 or not playing:
+            self._draw_cart_cassette(getattr(self, "_cart_canvas", None))
+        try:
+            self._vu_job = self.root.after(
+                120 if playing else 480, self._animate_vu
+            )
+        except Exception:
+            self._vu_job = None
+
+    def _draw_vu(self):
+        canvas = getattr(self, "_vu_canvas", None)
+        if canvas is None:
+            return
+        try:
+            w = canvas.winfo_width()
+            h = canvas.winfo_height()
+            if w < 20 or h < 6:
+                return
+            canvas.delete("all")
+            bars = 21
+            gap = 2
+            bw = max(2, (w - (bars - 1) * gap) // bars)
+            level = max(0.0, min(1.0, getattr(self, "_vu_level", 0.0)))
+            for i in range(bars):
+                frac = i / max(1, bars - 1)
+                lit = frac <= level
+                bh = 3 + int((h - 4) * (0.35 + 0.65 * frac)) if lit else 3
+                if not lit:
+                    color = SURFACE4
+                elif frac < 0.60:
+                    color = MINT
+                elif frac < 0.85:
+                    color = GOLD
+                else:
+                    color = ORANGE
+                x = i * (bw + gap)
+                canvas.create_rectangle(
+                    x, h - bh, x + bw, h, fill=color, outline="",
+                )
+        except Exception:
+            pass
+
+    def _update_deck_status(self):
+        try:
+            if getattr(self, "_is_playing", False):
+                text, color = "\u25b6  NOW PLAYING", MINT
+            elif getattr(self, "current_game", None):
+                text, color = "\u2161  LISTENING TO YOUR GAME", GOLD
+            else:
+                text, color = "\u25cb  STANDING BY", TEXT_MUTED
+            self.deck_status_lbl.configure(text=text, text_color=color)
+        except Exception:
+            pass
 
     # ── PLAYLISTS PAGE ────────────────────────────────────────────────────────
 
     def _build_playlists_page(self):
-        p = self._page_playlists
+        p = self._make_page_body(self._page_playlists)
 
-        hdr = ctk.CTkFrame(p, fg_color="transparent", corner_radius=0)
-        hdr.pack(fill=tk.X, pady=(4, 10))
-        
-        ctk.CTkLabel(
-            hdr, text="Your Playlists", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=16, weight="bold")
-        ).pack(side=tk.LEFT)
-        
+        hdr = T.object_header(
+            p, "THE DEN / A LITTLE DISCOVERY", "Go on. Dig a little.",
+            "Pick a playlist for the next side quest.",
+            on_back=lambda: self._nav("main"),
+        )
+
         btn_row = ctk.CTkFrame(hdr, fg_color="transparent", corner_radius=0)
-        btn_row.pack(side=tk.RIGHT, padx=(0, 4))
-        
-        self.pl_add_btn = RoundedButton(
-            btn_row, text="+ Add link", command=self._add_playlist_link,
-            width=120, height=36, bg=SURFACE2, fg=TEXT_SEC,
-            font_size=10, canvas_bg=BG, border_color=BORDER2)
+        btn_row.pack(side=tk.RIGHT, anchor="n", padx=(10, 0))
+
+        self.pl_add_btn = T.primary_button(
+            btn_row, "+ ADD LINK", command=self._add_playlist_link,
+            width=116, height=34,
+        )
         self.pl_add_btn.pack(side=tk.RIGHT, padx=(6, 0))
-        
-        RoundedButton(btn_row, text="\u21ba Refresh", command=self._load_playlists,
-                      width=120, height=36, bg=SURFACE2, fg=TEXT_SEC,
-                      font_size=10, canvas_bg=BG, border_color=BORDER2).pack(side=tk.RIGHT)
+
+        T.ghost_button(
+            btn_row, "\u21ba REFRESH", command=self._load_playlists,
+            width=108, height=34,
+        ).pack(side=tk.RIGHT)
 
         self.pl_status_lbl = ctk.CTkLabel(
-            p, text="Connect Spotify in Settings to load playlists.",
+            p, text="Connect Spotify in Control Panel to load playlists.",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=ctk.CTkFont(family=F_UI, size=10),
-            wraplength=400, justify=tk.LEFT
+            font=T.retro_font(14), wraplength=620, justify=tk.LEFT, anchor="w",
         )
-        self.pl_status_lbl.pack(fill=tk.X, pady=(0, 14))
+        self.pl_status_lbl.pack(fill=tk.X, pady=(0, 10))
 
-        self.pl_inner = ctk.CTkScrollableFrame(p, fg_color="transparent", corner_radius=0)
+        self.pl_inner = ctk.CTkScrollableFrame(
+            p, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
+        )
         self.pl_inner.pack(fill=tk.BOTH, expand=True)
 
     # ── GAMES PAGE ───────────────────────────────────────────────────────
 
     def _build_games_page(self):
+        p = self._make_page_body(self._page_games)
         GamesPage(
-            self._page_games,
+            p,
             on_games_changed=lambda: self._log("Game list updated."),
+            on_back=lambda: self._nav("main"),
         ).pack(fill=tk.BOTH, expand=True)
 
     # ── BLOCKED PAGE ──────────────────────────────────────────────────────────
 
     def _build_blocked_page(self):
-        p = self._page_blocked
+        p = self._make_page_body(self._page_blocked)
 
-        hdr = ctk.CTkFrame(p, fg_color="transparent", corner_radius=0)
-        hdr.pack(fill=tk.X, pady=(4, 16))
-        
-        ctk.CTkLabel(
-            hdr, text="Blocked Playlists", fg_color="transparent", text_color=TEXT,
-            font=T.ctk_font(22, "bold")
-        ).pack(side=tk.LEFT)
-        
-        T.ghost_button(hdr, text="\u21ba  Refresh", command=self._refresh_blocked_page,
-                       width=100, height=36).pack(side=tk.RIGHT, padx=(0, 4))
+        hdr = T.object_header(
+            p, "THE DEN / NOT TODAY", "Tapes on the naughty shelf.",
+            "Blocked playlists stay here until you give them another chance.",
+            on_back=lambda: self._nav("main"),
+        )
+        T.ghost_button(
+            hdr, "\u21ba  REFRESH", command=self._refresh_blocked_page,
+            width=108, height=34,
+        ).pack(side=tk.RIGHT, anchor="n", padx=(10, 0))
 
         self.blocked_status_lbl = ctk.CTkLabel(
             p, text="Playlists blocked from auto-play appear here.",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=ctk.CTkFont(family=F_UI, size=10),
-            wraplength=400, justify=tk.LEFT
+            font=T.retro_font(14), wraplength=620, justify=tk.LEFT, anchor="w",
         )
-        self.blocked_status_lbl.pack(fill=tk.X, pady=(0, 14))
+        self.blocked_status_lbl.pack(fill=tk.X, pady=(0, 10))
 
-        self.blocked_inner = ctk.CTkScrollableFrame(p, fg_color="transparent", corner_radius=0)
+        self.blocked_inner = ctk.CTkScrollableFrame(
+            p, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
+        )
         self.blocked_inner.pack(fill=tk.BOTH, expand=True)
 
     def _refresh_blocked_page(self):
@@ -1579,13 +2474,32 @@ class GameBeatsApp:
         blocked = self._blocked_playlists()
         if not blocked:
             self.blocked_status_lbl.configure(
-                text="No blocked playlists \u2014 block one from the Player page.",
+                text="No blocked playlists \u2014 your crate is clear.",
                 text_color=TEXT_MUTED)
+            empty = ctk.CTkFrame(
+                self.blocked_inner, fg_color=SURFACE2, corner_radius=0,
+                border_width=2, border_color=WOOD,
+            )
+            empty.pack(fill=tk.X, pady=(6, 4), padx=(0, 4))
+            ctk.CTkLabel(
+                empty, text="\u2205", fg_color="transparent", text_color=GOLD,
+                font=T.retro_font(44),
+            ).pack(pady=(22, 4))
+            ctk.CTkLabel(
+                empty, text="Nothing blocked. Yet.", fg_color="transparent",
+                text_color=TEXT, font=T.serif_font(24, "italic"),
+            ).pack()
+            ctk.CTkLabel(
+                empty,
+                text="Use BLOCK on the deck when a mix is not the vibe. It will wait here.",
+                fg_color="transparent", text_color=TEXT_MUTED,
+                font=T.retro_font(16),
+            ).pack(pady=(4, 24))
             return
 
         count = len(blocked)
         self.blocked_status_lbl.configure(
-            text=f"{count} blocked playlist{'s' if count != 1 else ''}",
+            text=f"{count} blocked playlist{'s' if count != 1 else ''} \u00b7 unblock to give it another chance",
             text_color=TEXT_SEC)
 
         for item in blocked:
@@ -1593,130 +2507,258 @@ class GameBeatsApp:
             name = item.get("name") or uri.split(":")[-1] or "Blocked playlist"
             query = item.get("query", "")
 
-            row = ctk.CTkFrame(self.blocked_inner, fg_color=SURFACE, corner_radius=RADIUS_MD,
-                               border_width=1, border_color=BORDER)
-            row.pack(fill=tk.X, pady=4, padx=(0, 4))
+            row = ctk.CTkFrame(
+                self.blocked_inner, fg_color=SURFACE2, corner_radius=0,
+                border_width=2, border_color=NIGHT,
+            )
+            row.pack(fill=tk.X, pady=5, padx=(0, 4))
 
-            badge = ctk.CTkFrame(row, fg_color=ACCENT_BG, width=44, height=44, corner_radius=22)
-            badge.pack(side=tk.LEFT, padx=(12, 6), pady=12)
+            badge = ctk.CTkFrame(row, fg_color="#3A1A10", width=52, height=52, corner_radius=0)
+            badge.pack(side=tk.LEFT, padx=(12, 12), pady=12)
             badge.pack_propagate(False)
             ctk.CTkLabel(badge, text="\u2205", fg_color="transparent", text_color=AMBER,
-                         font=T.ctk_font(14)).pack(expand=True)
+                         font=T.retro_font(24)).pack(expand=True)
 
             col = ctk.CTkFrame(row, fg_color="transparent", corner_radius=0)
-            col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=12)
+            col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 8), pady=14)
 
             ctk.CTkLabel(
                 col, text=name, fg_color="transparent", text_color=TEXT,
-                font=ctk.CTkFont(family="Segoe UI", size=13, weight="bold"), anchor="w", justify=tk.LEFT,
-                wraplength=350
+                font=T.retro_font(20, "bold"), anchor="w", justify=tk.LEFT,
+                wraplength=620,
             ).pack(anchor="w", fill=tk.X)
 
-            detail = (query or uri)[:80]
+            detail = (query or uri)[:100]
             ctk.CTkLabel(
                 col, text=detail, fg_color="transparent", text_color=TEXT_MUTED,
-                font=ctk.CTkFont(family="Segoe UI", size=9), anchor="w", justify=tk.LEFT,
-                wraplength=350
-            ).pack(anchor="w", fill=tk.X)
+                font=T.retro_font(16), anchor="w", justify=tk.LEFT,
+                wraplength=620,
+            ).pack(anchor="w", fill=tk.X, pady=(2, 0))
 
-            ctk.CTkButton(
-                row, text="Unblock",
-                fg_color="transparent", text_color=ACCENT, hover_color=SURFACE3,
-                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
-                width=72, height=32, corner_radius=RADIUS_SM,
+            T.pixel_button(
+                row, text="UNBLOCK",
                 command=lambda u=uri: (
                     self._unblock_playlist(u),
                     self._refresh_blocked_page(),
                 ),
+                width=104, height=32,
             ).pack(side=tk.RIGHT, padx=(0, 12), pady=12)
 
     # ── SETTINGS PAGE ─────────────────────────────────────────────────────────
 
     def _build_settings_page(self):
-        p = self._page_settings
+        p = self._make_page_body(self._page_settings)
+
+        T.object_header(
+            p, "THE DEN / MAKE IT YOURS", "Fine-tune your corner.",
+            "The real knobs behind your side quests.",
+            on_back=lambda: self._nav("main"),
+        )
+
+        inner = ctk.CTkScrollableFrame(
+            p, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
+        )
+        inner.pack(fill=tk.BOTH, expand=True)
+
+        board = ctk.CTkFrame(
+            inner, fg_color=SURFACE2, corner_radius=0,
+            border_width=3, border_color=WOOD,
+        )
+        board.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+        board_head = ctk.CTkFrame(board, fg_color="transparent", corner_radius=0)
+        board_head.pack(fill=tk.X, padx=18, pady=(14, 0))
+        ctk.CTkLabel(
+            board_head, text="CONTROL PANEL  /  EVERYTHING SAVES INSTANTLY",
+            fg_color="transparent", text_color=GOLD,
+            font=T.pixel_font(10, "bold"), anchor="w",
+        ).pack(side=tk.LEFT)
+        ctk.CTkLabel(
+            board_head, text="\u25cf  LIVE", fg_color="transparent",
+            text_color=MINT, font=T.pixel_font(11, "bold"), anchor="e",
+        ).pack(side=tk.RIGHT)
+
+        content = ctk.CTkFrame(board, fg_color="transparent", corner_radius=0)
+        content.pack(fill=tk.BOTH, expand=True, padx=16, pady=(8, 16))
 
         # ── Auto Playlists ────────────────────────────────────────────────────
-        self._section_lbl(p, "Auto playlists")
-        ap = self._card(p, pady=0)
+        T.section_header(content, "01 / AUTO PLAYLISTS")
+        ap = self._card(content)
+
+        ctk.CTkLabel(
+            ap,
+            text="How many of your Spotify playlists GameBeats can choose from when a game starts.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(16), anchor="w", justify=tk.LEFT,
+            wraplength=760,
+        ).pack(fill=tk.X, pady=(0, 8))
 
         pick_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
-        pick_row.pack(fill=tk.X, pady=(0, 6))
-        
+        pick_row.pack(fill=tk.X, pady=(0, 8))
+
         ctk.CTkLabel(
-            pick_row, text="Playlists to consider", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10)
+            pick_row, text="Playlists to consider", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(16),
         ).pack(side=tk.LEFT)
-        
-        pick_spin_frame = ctk.CTkFrame(pick_row, fg_color="transparent", corner_radius=0)
-        pick_spin_frame.pack(side=tk.RIGHT)
-        
-        pick_spin_entry = ctk.CTkEntry(
-            pick_spin_frame, width=40, height=28, textvariable=self.playlist_limit_var,
-            fg_color=SURFACE3, border_color=BORDER2, corner_radius=6, justify="center"
-        )
-        pick_spin_entry.pack(side=tk.LEFT, padx=2)
-        
+
+        pick_spin = ctk.CTkFrame(pick_row, fg_color="transparent", corner_radius=0)
+        pick_spin.pack(side=tk.RIGHT)
+
+        ctk.CTkEntry(
+            pick_spin, width=42, height=28, textvariable=self.playlist_limit_var,
+            fg_color=NIGHT, border_color=WOOD, corner_radius=0, justify="center",
+            text_color=TEXT, font=T.retro_font(16),
+        ).pack(side=tk.LEFT, padx=2)
+
         def _pick_dec():
             val = max(1, self.playlist_limit_var.get() - 1)
             self.playlist_limit_var.set(val)
             self._save_auto_playlist_settings()
-            
+
         def _pick_inc():
             val = min(20, self.playlist_limit_var.get() + 1)
             self.playlist_limit_var.set(val)
             self._save_auto_playlist_settings()
-            
-        ctk.CTkButton(
-            pick_spin_frame, text="-", width=20, height=28, fg_color=SURFACE3, hover_color=SURFACE4,
-            text_color=TEXT, corner_radius=6, command=_pick_dec
-        ).pack(side=tk.LEFT, padx=1)
-        
-        ctk.CTkButton(
-            pick_spin_frame, text="+", width=20, height=28, fg_color=SURFACE3, hover_color=SURFACE4,
-            text_color=TEXT, corner_radius=6, command=_pick_inc
-        ).pack(side=tk.LEFT, padx=1)
+
+        T.pixel_button(pick_spin, "-", command=_pick_dec, width=26, height=28).pack(
+            side=tk.LEFT, padx=1)
+        T.pixel_button(pick_spin, "+", command=_pick_inc, width=26, height=28).pack(
+            side=tk.LEFT, padx=1)
+
+        T.rule(ap, color=BORDER, pady=(2, 8))
+
+        ctk.CTkLabel(
+            ap,
+            text="How long to wait before pausing or resuming after the game gets loud or quiet.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(16), anchor="w", justify=tk.LEFT,
+            wraplength=760,
+        ).pack(fill=tk.X, pady=(0, 6))
 
         resume_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
         resume_row.pack(fill=tk.X)
-        
+
         ctk.CTkLabel(
-            resume_row, text="Resume / end-check delay", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10)
+            resume_row, text="Pause / resume delay", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(17),
         ).pack(side=tk.LEFT)
-        
-        resume_spin_frame = ctk.CTkFrame(resume_row, fg_color="transparent", corner_radius=0)
-        resume_spin_frame.pack(side=tk.RIGHT)
-        
-        resume_spin_entry = ctk.CTkEntry(
-            resume_spin_frame, width=40, height=28, textvariable=self.resume_delay_var,
-            fg_color=SURFACE3, border_color=BORDER2, corner_radius=6, justify="center"
-        )
-        resume_spin_entry.pack(side=tk.LEFT, padx=2)
-        
+
+        resume_spin = ctk.CTkFrame(resume_row, fg_color="transparent", corner_radius=0)
+        resume_spin.pack(side=tk.RIGHT)
+
+        ctk.CTkEntry(
+            resume_spin, width=42, height=28, textvariable=self.resume_delay_var,
+            fg_color=NIGHT, border_color=WOOD, corner_radius=0, justify="center",
+            text_color=TEXT, font=T.retro_font(16),
+        ).pack(side=tk.LEFT, padx=2)
+
         def _resume_dec():
             val = max(1, self.resume_delay_var.get() - 1)
             self.resume_delay_var.set(val)
             self._save_audio_settings()
-            
+
         def _resume_inc():
             val = min(30, self.resume_delay_var.get() + 1)
             self.resume_delay_var.set(val)
             self._save_audio_settings()
-            
-        ctk.CTkButton(
-            resume_spin_frame, text="-", width=20, height=28, fg_color=SURFACE3, hover_color=SURFACE4,
-            text_color=TEXT, corner_radius=6, command=_resume_dec
-        ).pack(side=tk.LEFT, padx=1)
-        
-        ctk.CTkButton(
-            resume_spin_frame, text="+", width=20, height=28, fg_color=SURFACE3, hover_color=SURFACE4,
-            text_color=TEXT, corner_radius=6, command=_resume_inc
-        ).pack(side=tk.LEFT, padx=1)
-        
+
+        T.pixel_button(resume_spin, "-", command=_resume_dec, width=26, height=28).pack(
+            side=tk.LEFT, padx=1)
+        T.pixel_button(resume_spin, "+", command=_resume_inc, width=26, height=28).pack(
+            side=tk.LEFT, padx=1)
+
         ctk.CTkLabel(
             resume_row, text="sec", fg_color="transparent", text_color=TEXT_MUTED,
-            font=ctk.CTkFont(family=F_UI, size=9)
-        ).pack(side=tk.RIGHT, padx=(0, 8))
+            font=T.retro_font(13),
+        ).pack(side=tk.RIGHT, padx=(0, 6))
+
+        if HAS_WINREG:
+            T.rule(ap, color=BORDER, pady=(10, 8))
+            startup_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
+            startup_row.pack(fill=tk.X)
+            ctk.CTkLabel(
+                startup_row, text="Start GameBeats with Windows", fg_color="transparent",
+                text_color=TEXT, font=T.retro_font(17),
+            ).pack(side=tk.LEFT)
+            ctk.CTkSwitch(
+                startup_row, variable=self.startup_var, text="",
+                command=self._toggle_startup, width=38, height=19,
+                fg_color=SURFACE4, progress_color=MINT,
+                button_color=CREAM, button_hover_color=GOLD,
+                border_width=0, corner_radius=10,
+            ).pack(side=tk.RIGHT, padx=2)
+
+        # ── Puppy Overlay ─────────────────────────────────────────────────────
+        T.section_header(content, "02 / PUPPY OVERLAY", pady=(14, 6))
+        ov = self._card(content)
+
+        ov_row = ctk.CTkFrame(ov, fg_color="transparent", corner_radius=0)
+        ov_row.pack(fill=tk.X)
+
+        puppy_path = _design_asset_path("puppy_design", "encore.png")
+        if puppy_path and HAS_PIL:
+            try:
+                pil = Image.open(puppy_path).convert("RGBA")
+                photo = ctk.CTkImage(light_image=pil, dark_image=pil, size=(88, 99))
+                self._settings_puppy_img = photo
+                ctk.CTkLabel(ov_row, image=photo, text="").pack(
+                    side=tk.LEFT, padx=(0, 16))
+            except Exception:
+                pass
+
+        ov_copy = ctk.CTkFrame(ov_row, fg_color="transparent", corner_radius=0)
+        ov_copy.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ctk.CTkLabel(
+            ov_copy, text="Your player two, always on your side.", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(19), anchor="w",
+        ).pack(fill=tk.X)
+        ctk.CTkLabel(
+            ov_copy,
+            text="A small controller appears during games for manual pause, resume, skip, and playlist rescue. Drag it anywhere.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=600,
+        ).pack(fill=tk.X, pady=(3, 8))
+
+        T.primary_button(
+            ov_copy, "\u25a3  OPEN OVERLAY", command=self._show_control_overlay,
+            width=160, height=32,
+        ).pack(anchor="w")
+
+        # ── Keep Music Playing ────────────────────────────────────────────────
+        T.section_header(content, "03 / KEEP MUSIC PLAYING", pady=(14, 6))
+        km = self._card(content)
+
+        km_row = ctk.CTkFrame(km, fg_color="transparent", corner_radius=0)
+        km_row.pack(fill=tk.X)
+
+        km_copy = ctk.CTkFrame(km_row, fg_color="transparent", corner_radius=0)
+        km_copy.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        ctk.CTkLabel(
+            km_copy, text="Don't pause for game audio", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(19), anchor="w",
+        ).pack(fill=tk.X)
+        ctk.CTkLabel(
+            km_copy,
+            text="Keep Spotify playing even when the game gets loud. Calls, videos, and other PC audio still pause it.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=600,
+        ).pack(fill=tk.X, pady=(3, 0))
+
+        ctk.CTkSwitch(
+            km_row, variable=self.seamless_music_var,
+            command=self._save_player_settings, text="",
+            fg_color=SURFACE4, progress_color=MINT,
+            button_color=CREAM, button_hover_color=GOLD,
+            width=38, height=19, border_width=0, corner_radius=10,
+        ).pack(side=tk.RIGHT, padx=(14, 2))
+
+        T.info_banner(
+            content,
+            "Your settings and Spotify login live in AppData and are kept across updates.",
+            fg=ROSE,
+        ).pack(fill=tk.X, pady=(12, 4))
 
 
     # ── LOGIC ─────────────────────────────────────────────────────────────────
@@ -1726,6 +2768,20 @@ class GameBeatsApp:
         if not text:
             return None
         low = text.lower()
+
+        if any(k in low for k in (
+            "audio monitor", "stealth mode", "using installed",
+            "spotify_web_profile", "login window opened",
+        )):
+            return None
+        if "silent login check" in low and "logged in" in low:
+            return "Spotify ready."
+        if "session expired" in low:
+            return "Spotify session expired \u2014 log in again."
+        if "browser kept warm" in low:
+            return "Web player ready."
+        if "spotify connected" in low:
+            return "Music ready."
 
         if low.startswith("game running:"):
             return text
@@ -1747,6 +2803,10 @@ class GameBeatsApp:
             return text.replace("\u25b6 ", "", 1)
         if "start a saved game first" in low:
             return "Start a saved game first."
+        if "other audio detected" in low and "paused" in low:
+            return "Other audio detected - music paused."
+        if "other audio quiet" in low and "resumed" in low:
+            return "Other audio quiet - music resumed."
         if "game audio detected" in low and "paused" in low:
             return "Game audio detected - music paused."
         if "game audio quiet" in low and "resumed" in low:
@@ -1827,6 +2887,7 @@ class GameBeatsApp:
     def _set_status(self, text, color=TEXT_SEC):
         self.status_pill.configure(text=text, text_color=color)
         self.status_dot.configure(text_color=color)
+        self._refresh_connection_ui()
 
     def _animate_play_effect(self):
         # Animation removed - using cleaner UI without visualization
@@ -1847,6 +2908,21 @@ class GameBeatsApp:
         self._load_playlists()
         self._start_track_poll()
         self._start_background_detection()
+        self._refresh_connection_ui()
+        try:
+            if hasattr(self, "deck_artist_lbl"):
+                self.deck_artist_lbl.configure(text="Spotify ready \u00b7 waiting for a track")
+        except Exception:
+            pass
+        # If the game detector already found a game before the web player
+        # finished starting, the first auto-play attempt was skipped. Retry
+        # once the player is ready.
+        game = getattr(self, "current_game", None)
+        if game:
+            self.root.after(800, lambda g=game: self._autoplay_for_game(g))
+            # The detector may have fired before the player existed. Make
+            # sure other-app audio monitoring is running now that it does.
+            self.root.after(900, lambda g=game: self._ensure_audio_monitor(g))
 
     def _update_playlist_ui_mode(self):
         if not hasattr(self, "pl_add_btn"):
@@ -1916,17 +2992,18 @@ class GameBeatsApp:
         self.auth.start_auth_flow(on_complete=lambda s: self.root.after(0, lambda: done(s)))
 
     def _build_faq_page(self):
-        p = self._page_faq
+        p = self._make_page_body(self._page_faq)
 
-        hdr = ctk.CTkFrame(p, fg_color="transparent", corner_radius=0)
-        hdr.pack(fill=tk.X, pady=(4, 10))
-        
-        ctk.CTkLabel(
-            hdr, text="FAQ & Help", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=16, weight="bold")
-        ).pack(side=tk.LEFT)
+        T.object_header(
+            p, "THE DEN / FIELD NOTES", "A little help for the side quest.",
+            "Everything you need to keep the music playing.",
+            on_back=lambda: self._nav("main"),
+        )
 
-        inner = ctk.CTkScrollableFrame(p, fg_color="transparent", corner_radius=0)
+        inner = ctk.CTkScrollableFrame(
+            p, fg_color="transparent", corner_radius=0,
+            scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
+        )
         inner.pack(fill=tk.BOTH, expand=True)
 
         # Content Cards
@@ -1935,24 +3012,24 @@ class GameBeatsApp:
         
         ctk.CTkLabel(
             c1, text="Not a Spotify Replacement", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=13, weight="bold"), anchor="w"
+            font=T.pixel_font(10, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
             c1, text="GameBeats is a companion tool designed to seamlessly integrate with your existing setup. It is not a standalone player; you must have the official Spotify client installed and running to use this application.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
             c1, text="Spotify Free Users", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=13, weight="bold"), anchor="w"
+            font=T.pixel_font(10, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
             c1, text="Supporting free Spotify accounts required overcoming significant technical limitations, but we made it happen. Please note that on first start, the free-tier desktop client might be a bit clunky to connect to. We apologize for any inconvenience, but it should work smoothly most of the time.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
 
         self._section_lbl(inner, "Important Setup Steps")
@@ -1960,35 +3037,35 @@ class GameBeatsApp:
         
         ctk.CTkLabel(
             c_web, text="1. One-Time Login Window", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c_web, text="On your first run, a secondary Spotify window will open. You MUST log in to Spotify here to establish the connection. Crucially, make sure you log in using the exact same Spotify account that is currently active on your main Spotify Desktop app.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
 
         ctk.CTkLabel(
             c_web, text="2. Do Not Close the Helper Window", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c_web, text="While a game is running, you may notice this helper window remain open in the background. Please DO NOT close this window manually! It is required to maintain the connection. If you close it, your music will stop syncing.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
 
         ctk.CTkLabel(
             c_web, text="3. Desktop App Required", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c_web, text="Even with the helper window open, you must always have the official Spotify Desktop application running on your PC for the app to route audio and detect playback correctly.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
 
         self._section_lbl(inner, "Best Practices")
@@ -1996,46 +3073,46 @@ class GameBeatsApp:
         
         ctk.CTkLabel(
             c2, text="1. Official Spotify Client Only", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c2, text="Please ensure you are using the Spotify Desktop client downloaded directly from the official Spotify website (.exe). GameBeats does not support the Microsoft Store version.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
             c2, text="2. Dedicated Playback Device", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c2, text="For the best experience, ensure your Spotify account is actively playing only on your local desktop client. Remote playback from other devices may interrupt the application's tracking.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
 
         ctk.CTkLabel(
             c2, text="3. Adding Games Correctly", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c2, text="When adding games to your library, please select the actual game executable (.exe) from your installation folder. Avoid using desktop shortcuts or Steam URL links, as these cannot be properly tracked.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
 
         ctk.CTkLabel(
             c2, text="4. Audio Capture & Muting", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"), anchor="w"
+            font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
             c2, text="GameBeats listens to your game's audio to automatically pause and resume music. Do not mute your games or Spotify in the Windows Volume Mixer, otherwise the detection will not work.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=9),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
 
         self._section_lbl(inner, "Support & Contact")
@@ -2043,8 +3120,8 @@ class GameBeatsApp:
         
         ctk.CTkLabel(
             c3, text="If something isn't working... have you tried turning it off and on again? Restarting the app fixes most issues!\n\nJokes aside, if you need further assistance or have recommendations, feel free to contact me at amongkencod10@gmail.com.\n\nThank you for your purchase, and have fun!",
-            fg_color="transparent", text_color=TEXT, font=ctk.CTkFont(family=F_UI, size=10, slant="italic"),
-            wraplength=450, justify=tk.LEFT, anchor="w"
+            fg_color="transparent", text_color=TEXT, font=T.retro_font(16, slant="italic"),
+            wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
 
     def _start_background_detection(self):
@@ -2118,59 +3195,79 @@ class GameBeatsApp:
     def _on_game_found(self, info):
         self.current_game = info
         self._game_pid = info.get("pid") or get_pid_for_proc(info.get("proc", ""))
+        # Start the audio monitor for *every* detected game, even if music is
+        # already playing. Previously this only happened inside the auto-play
+        # success path, so if the app had already started a playlist (or the
+        # user pressed Play first), other-app audio was never watched and
+        # music no longer paused. This is the core auto-pause regression.
+        self.root.after(0, lambda g=info: self._ensure_audio_monitor(g))
         mood_info = MOOD_TO_PLAYLIST.get(info["mood"], {})
         color = mood_info.get("color", ACCENT)
         self.root.after(0, lambda: (
-            self.game_banner.configure(text=info["name"], text_color=color),
+            self.game_banner.configure(text=str(info["name"]).upper(), text_color=color),
             self.mood_lbl.configure(
-                text=f"Mood → {mood_info.get('name', info['mood'])}  ·  loud game audio pauses music…"),
+                text=f"Mood: {mood_info.get('name', info['mood'])}  \u00b7  loud game audio pauses music\u2026"),
             self._set_status(info["name"], color),
             self._log(f"Game running: {info['name']}"),
             self._set_game_icon(info),
+            self._update_deck_status(),
+            self._redraw_room(),
         ))
-        if self.auto_mode.get() and self.spotify:
-            # Check if game has a custom Spotify playlist assigned
-            custom_uri = info.get("spotify_playlist_uri", "")
-            if custom_uri:
-                self.root.after(0, lambda: self._log(
-                    f"Auto-play: playing assigned playlist for {info['name']}…"))
-                def _play_custom_after_silent():
-                    # Block auto-pause/resume for the entire automation window
-                    # (silent track launch + browser open + playlist start).
-                    # Silent track launch is needed for Spotify desktop detection.
-                    # The playlist itself is NOT opened in the desktop client
-                    # (it's hidden) — only the browser handles playback.
-                    self._automation_in_progress = True
-                    try:
-                        self._launch_spotify_with_silent_track()
-                        self._play_custom_playlist_for_game(info, custom_uri)
-                    finally:
-                        self._automation_in_progress = False
+        # The detector runs in its own thread.  Do the auto-play decision on
+        # the Tk thread: reading Tk variables (auto_mode) from the detector
+        # thread can fail before the main loop starts, leaving startup with a
+        # detected game but no music.
+        self.root.after(0, lambda: self._autoplay_for_game(info))
 
-                threading.Thread(
-                    target=_play_custom_after_silent,
-                    daemon=True,
-                ).start()
-            else:
-                self.root.after(0, lambda: self._log(
-                    f"Auto-play: sending music to Spotify web player for {info['name']}…"))
-                def _play_query_after_silent():
-                    # Block auto-pause/resume for the entire automation window
-                    # (silent track launch + browser open + playlist start).
-                    # Silent track launch is needed for Spotify desktop detection.
-                    # The playlist itself is NOT opened in the desktop client
-                    # (it's hidden) — only the browser handles playback.
-                    self._automation_in_progress = True
-                    try:
-                        self._launch_spotify_with_silent_track()
-                        self._play_query_for_game(info, force_new=True)
-                    finally:
-                        self._automation_in_progress = False
+    def _autoplay_for_game(self, info):
+        """Start music for a detected game on the Tk thread."""
+        if not info or not self.spotify:
+            return
+        if getattr(self, "_autoplay_pending", False):
+            return
+        if getattr(self, "_spotify_started_by_us", False):
+            return
+        if getattr(self, "_play_in_progress", False):
+            return
+        try:
+            if not self.auto_mode.get():
+                return
+        except Exception:
+            return
 
-                threading.Thread(
-                    target=_play_query_after_silent,
-                    daemon=True,
-                ).start()
+        self._autoplay_pending = True
+        custom_uri = info.get("spotify_playlist_uri", "")
+        if custom_uri:
+            self._log(f"Auto-play: playing assigned playlist for {info['name']}…")
+
+            def _play_custom_after_silent():
+                # Block auto-pause/resume for the entire automation window
+                # (silent track launch + browser open + playlist start).
+                self._automation_in_progress = True
+                try:
+                    self._launch_spotify_with_silent_track()
+                    self._play_custom_playlist_for_game(info, custom_uri)
+                finally:
+                    self._automation_in_progress = False
+                    self._autoplay_pending = False
+
+            threading.Thread(target=_play_custom_after_silent, daemon=True).start()
+            return
+
+        self._log(f"Auto-play: sending music to Spotify web player for {info['name']}…")
+
+        def _play_query_after_silent():
+            # Block auto-pause/resume for the entire automation window
+            # (silent track launch + browser open + playlist start).
+            self._automation_in_progress = True
+            try:
+                self._launch_spotify_with_silent_track()
+                self._play_query_for_game(info, force_new=True)
+            finally:
+                self._automation_in_progress = False
+                self._autoplay_pending = False
+
+        threading.Thread(target=_play_query_after_silent, daemon=True).start()
 
     SILENT_TRACK_URI = "spotify:track:2bNCdW4rLnCTzgqUXTTDO1"
 
@@ -2294,12 +3391,16 @@ class GameBeatsApp:
             self.spotify.reset_session()
         self._spotify_started_by_us = False
         self.root.after(0, lambda: (
-            self.game_banner.configure(text="No saved game running", text_color=TEXT_MUTED),
-            self.mood_lbl.configure(text="Add games in My Games — music starts when they run"),
-            self.playlist_display_lbl.configure(text="Playlist: —"),
+            self.game_banner.configure(text="NO SAVED GAME RUNNING", text_color=TEXT_MUTED),
+            self.mood_lbl.configure(text="Waiting for a game"),
+            self.playlist_display_lbl.configure(text="PLAYLIST: \u2014"),
+            self.track_lbl.configure(text="Nothing playing"),
+            self.deck_artist_lbl.configure(text="Connect Spotify in Control Panel"),
             self._set_status("Watching games", ACCENT),
             self._clear_game_icon(),
-            self._log("Game closed — music paused."),
+            self._log("Game closed \u2014 music paused."),
+            self._update_deck_status(),
+            self._redraw_room(),
         ))
 
     def _play_query_for_game(self, info, force_new=False, exclude_uris=None, reason="Playing", one_shot: bool = False):
@@ -2396,7 +3497,10 @@ class GameBeatsApp:
             def _on_ok():
                 try:
                     self._spotify_started_by_us = True
-                    self._remember_current_playlist(picked_uri, picked_name, picked_query)
+                    # Explicit successful start: show the pause icon. Audio
+                    # meter ticks must never do this on their own.
+                    self._set_play_btn_icon(True, force_btn=True)
+                    self._remember_current_playlist(picked_uri, picked_name, picked_query, reset_pause_flags=True)
                     if self.current_game and not self._audio_monitor_running:
                         self._start_audio_monitor(self.current_game)
                     via = getattr(self.spotify, "_last_play_method", "") or "open"
@@ -2411,36 +3515,66 @@ class GameBeatsApp:
             self.root.after(0, _on_ok)
             return
         else:
-            # Playback did not start or verification failed.
-            # In desktop mode, mark the attempted playlist as tried and automatically
-            # try another playlist to avoid repeatedly starting the same (bad) URI.
+            # Do NOT auto-start a different playlist here. A slow web player,
+            # DRM hiccup, or a single failed verification used to make the app
+            # jump to another mix, which users experienced as "it starts
+            # another playlist" after pause/resume. Report the failure and let
+            # the user press "Try another" explicitly.
             try:
                 failed_uri = getattr(self.spotify, "_last_uri", "") if self.spotify else ""
-                if self._is_desktop_mode() and failed_uri:
-                    if failed_uri not in self._tried_playlist_uris:
-                        self._tried_playlist_uris.append(failed_uri)
-                    # Avoid infinite retry loops by bounding tries implicitly via tried list
-                    self._log("⚠ Loading connection failed — trying another playlist...")
-                    threading.Thread(
-                        target=lambda: self._play_query_for_game(
-                            self.current_game,
-                            force_new=True,
-                            exclude_uris=set(self._tried_playlist_uris),
-                            reason="Verification failed - picking another",
-                        ),
-                        daemon=True,
-                    ).start()
-                    return
+                if failed_uri and failed_uri not in self._tried_playlist_uris:
+                    self._tried_playlist_uris.append(failed_uri)
             except Exception:
                 pass
 
             self._playlist_end_pending = False
             err = getattr(self.spotify, "_last_error", "") or "No playlist found"
-            self._log(f"⚠ {err[:100]}  (log in to Spotify in the web player, then retry)")
+            self._log(f"⚠ Playlist did not start: {err[:100]}")
+            self._log("No playlist was switched automatically — use Try another if needed.")
+
+    def _auto_pause_allowed(self, spotify_loud: bool = False) -> bool:
+        """True when game/other audio should pause Spotify.
+
+        Requires that music is actually playing, but deliberately does *not*
+        require that GameBeats started the playlist. Otherwise music that was
+        already playing (or whose autoplay failed) would never pause for a
+        game or another app's audio.
+        """
+        music_active = bool(
+            getattr(self, "_is_playing", False)
+            or getattr(self, "_spotify_audio_active", False)
+            or spotify_loud
+            # If we started the playlist, trust that over a temporarily blind
+            # audio meter (e.g. the desktop sidecar is the audible source).
+            or getattr(self, "_spotify_started_by_us", False)
+        )
+        return bool(
+            self.spotify
+            and self.auto_mode.get()
+            and not self._seamless_music_enabled()
+            and music_active
+            and not getattr(self, "_manual_paused", False)
+            and not getattr(self, "_user_paused_flag", False)
+        )
+
+    def _ensure_audio_monitor(self, info=None):
+        """Make sure game/other-audio monitoring is running for this game."""
+        info = info or getattr(self, "current_game", None)
+        if not info or not self.spotify:
+            return
+        if getattr(self, "_audio_monitor_running", False):
+            return
+        try:
+            self._start_audio_monitor(info)
+        except Exception as ex:
+            try:
+                self._log(f"Could not start audio monitor: {ex}")
+            except Exception:
+                pass
 
     def _start_audio_monitor(self, info):
         self._stop_audio_monitor()
-        if not HAS_PROCESS_LOOPBACK:
+        if not HAS_PROCESS_LOOPBACK and not HAS_PYCAW:
             self.root.after(0, lambda: self._log(
                 "Install process-audio-capture for game-audio pause."))
             return
@@ -2455,6 +3589,9 @@ class GameBeatsApp:
         self._last_spotify_peak = 0.0
         self._tried_playlist_uris = []  # Reset tried playlists for this game session
         self._spotify_audio_status_logged = False
+        self._audio_source_refresh_ts = time.time()
+        self._playlist_audio_armed = False
+        self._spotify_loud_streak = 0
         # Clear stale pause state from the previous game session.
         self._paused_by_game_flag = False
         self._manual_paused = False
@@ -2466,18 +3603,24 @@ class GameBeatsApp:
             "loopback+pycaw" if HAS_PYAUDIO_WP else "pycaw only"
         )
         self.root.after(0, lambda: self._log("Audio monitor active"))
-        # Force audio monitor to listen to Spotify desktop (not browser)
+        self.root.after(0, lambda b=backend: self._log(
+            f"Audio monitor: {b}; other-audio meter "
+            f"{'ready' if HAS_PYCAW else 'unavailable'}"))
+        # Point the monitor at the component that actually produces music.
+        # In web mode that is the automated browser, not spotify.exe (which may
+        # only be a silent sidecar). Listening to the sidecar made GameBeats
+        # believe a playing playlist had finished after a few seconds.
         try:
-            from core.audio_monitor import set_browser_audio_only, register_music_player_pids
-            try:
+            if self._is_web_mode() and hasattr(self.spotify, "refresh_audio_source"):
+                self.spotify.refresh_audio_source()
+                self.root.after(0, lambda: self._log(
+                    "Audio monitor: listening to web-player browser"))
+            else:
+                from core.audio_monitor import set_browser_audio_only, register_music_player_pids
                 set_browser_audio_only(False)
-            except Exception:
-                pass
-            try:
                 register_music_player_pids([])
-            except Exception:
-                pass
-            self.root.after(0, lambda: self._log("Audio monitor: forced to Spotify desktop audio for game session"))
+                self.root.after(0, lambda: self._log(
+                    "Audio monitor: listening to Spotify desktop"))
         except Exception:
             pass
 
@@ -2492,6 +3635,17 @@ class GameBeatsApp:
             try:
                 while self._audio_monitor_running and self.current_game:
                     now = time.time()
+
+                    # Browsers spawn/replace renderer processes; re-scan the
+                    # web-player PIDs periodically so loopback keeps working.
+                    if (self._is_web_mode()
+                            and now - getattr(self, "_audio_source_refresh_ts", 0.0) >= 10.0):
+                        self._audio_source_refresh_ts = now
+                        try:
+                            if self.spotify and hasattr(self.spotify, "refresh_audio_source"):
+                                self.spotify.refresh_audio_source()
+                        except Exception:
+                            pass
 
                     # ── Update game audio detector ────────────────────────
                     if not self._game_pid:
@@ -2522,10 +3676,20 @@ class GameBeatsApp:
                         spotify_loud = False
 
                     game_loud = self._game_audio.is_loud
+                    other_loud = bool(getattr(self._game_audio, "other_loud", False))
+                    other_peak = float(getattr(self._game_audio, "other_peak", 0.0) or 0.0)
 
                     # ── Update shared timestamps (used elsewhere in app) ──
                     if spotify_loud:
                         self._last_spotify_loud_ts = now
+                        self._spotify_loud_streak = int(
+                            getattr(self, "_spotify_loud_streak", 0)
+                        ) + 1
+                        # Require ~1.5s of sustained audio before re-arming
+                        # the end-of-playlist check. A single residual blip
+                        # after an auto-resume must not count as a playlist.
+                        if self._spotify_loud_streak >= 3:
+                            self._playlist_audio_armed = True
                         intentional_pause = bool(
                             getattr(self, "_manual_paused", False)
                             or getattr(self, "_user_paused_flag", False)
@@ -2536,19 +3700,14 @@ class GameBeatsApp:
                             self.root.after(0, lambda: self._set_play_btn_icon(True))
                             self._remove_pause_reason("user")
                             self._remove_pause_reason("auto")
+                    else:
+                        self._spotify_loud_streak = 0
                     if game_loud:
                         self._last_game_loud_ts = now
                     if spotify_loud or game_loud:
                         self._restore_playlist_end_prompt_delay_after_audio()
 
-                    auto_pause_allowed = (
-                        bool(self.spotify)
-                        and bool(self.auto_mode.get())
-                        and not self._seamless_music_enabled()
-                        and bool(getattr(self, "_spotify_started_by_us", False))
-                        and not bool(getattr(self, "_manual_paused", False))
-                        and not bool(getattr(self, "_user_paused_flag", False))
-                    )
+                    auto_pause_allowed = self._auto_pause_allowed(spotify_loud)
                     if self._seamless_music_enabled() and self._paused_by_game_flag:
                         self._resume_spotify_after_game_quiet()
                     elif auto_pause_allowed and game_loud:
@@ -2558,7 +3717,9 @@ class GameBeatsApp:
                             self._pause_spotify_for_game_audio(self._game_audio.current_peak)
                     elif self._paused_by_game_flag and not game_loud:
                         last_game_loud = self._last_game_loud_ts or now
-                        if now - last_game_loud >= self._resume_delay_seconds():
+                        last_resume_try = float(getattr(self, "_last_game_resume_attempt_ts", 0.0) or 0.0)
+                        if (now - last_game_loud >= self._resume_delay_seconds()) and (now - last_resume_try >= 1.5):
+                            self._last_game_resume_attempt_ts = now
                             self._resume_spotify_after_game_quiet()
 
                     # ── Transition logs ───────────────────────────────────
@@ -2570,9 +3731,13 @@ class GameBeatsApp:
                             "Spotify audio silent — watching for playlist end"))
 
                     if game_loud and not _prev_game_loud:
-                        self.root.after(0, lambda: self._log("Game audio resumed"))
+                        if other_loud:
+                            self.root.after(0, lambda p=other_peak: self._log(
+                                f"Other audio detected (peak={p:.4f})"))
+                        else:
+                            self.root.after(0, lambda: self._log("Game audio resumed"))
                     elif not game_loud and _prev_game_loud:
-                        self.root.after(0, lambda: self._log("Game audio silent"))
+                        self.root.after(0, lambda: self._log("Game/other audio silent"))
 
                     _prev_spotify_loud = spotify_loud
                     _prev_game_loud    = game_loud
@@ -2616,6 +3781,12 @@ class GameBeatsApp:
                             and self._playlist_end_prompt_allowed(now)
                             and self._mascot_notifier is None
                             and not self._playlist_end_pending
+                            and not self._intentional_pause_active()
+                            and not self._player_is_playing_cached()
+                            and (
+                                not getattr(self, "_audio_monitor_running", False)
+                                or getattr(self, "_playlist_audio_armed", False)
+                            )
                         ):
                             self._playlist_end_pending = True
                             _notifier_up = True
@@ -2640,14 +3811,16 @@ class GameBeatsApp:
                     time.sleep(TICK_SEC)
 
             finally:
-                # Restore audio monitor preference after game session ends
+                # Restore the audio source preference after the game session.
                 try:
-                    from core.audio_monitor import set_browser_audio_only
-                    try:
-                        if hasattr(self, "spotify") and getattr(self, "spotify", None) is not None:
-                            set_browser_audio_only(self.spotify._uses_browser_player())
-                    except Exception:
-                        pass
+                    if hasattr(self, "spotify") and getattr(self, "spotify", None) is not None:
+                        if hasattr(self.spotify, "refresh_audio_source"):
+                            self.spotify.refresh_audio_source()
+                        else:
+                            from core.audio_monitor import set_browser_audio_only
+                            set_browser_audio_only(
+                                not self.spotify._uses_desktop_player()
+                            )
                 except Exception:
                     pass
                 try:
@@ -2659,11 +3832,22 @@ class GameBeatsApp:
         threading.Thread(target=_loop, daemon=True).start()
 
     def _set_puppy_singing_visible(self, visible: bool):
+        """Show the floating singing puppy while music is actually playing.
+
+        It used to require a detected game, which meant it never appeared for
+        plain Spotify playback. The puppy is a music companion, not a game
+        HUD, so only an intentional pause (or the playlist-end notifier)
+        should hide it.
+        """
         overlay = getattr(self, "_puppy_singing_overlay", None)
         if overlay is None:
             return
         try:
-            if visible and self.current_game and self._mascot_notifier is None:
+            if (
+                visible
+                and getattr(self, "_mascot_notifier", None) is None
+                and not self._intentional_pause_active()
+            ):
                 overlay.show()
             else:
                 overlay.hide()
@@ -2733,16 +3917,21 @@ class GameBeatsApp:
         ok = False
         try:
             if hasattr(self.spotify, "ensure_paused"):
-                ok = bool(self.spotify.ensure_paused())
+                try:
+                    ok = bool(self.spotify.ensure_paused(paused_by_game=True))
+                except TypeError:
+                    ok = bool(self.spotify.ensure_paused())
             else:
                 ok = bool(self.spotify.media_stop())
         except Exception as ex:
-            self.root.after(0, lambda e=ex: self._log(f"Game-audio pause failed: {e}"))
+            self.root.after(0, lambda e=ex: self._log(f"Other-audio pause failed: {e}"))
 
         if ok:
             self._paused_by_game_flag = True
             self._playlist_end_pending = False
             self._music_missing_since = 0.0
+            self._playlist_audio_armed = False
+            self._spotify_loud_streak = 0
             self._add_pause_reason("auto")
             self._is_playing = False
             if already_paused_by_game:
@@ -2754,19 +3943,22 @@ class GameBeatsApp:
                 self.root.after(0, lambda p=peak: (
                     self._set_play_btn_icon(False, force_btn=True),
                     self._set_puppy_singing_visible(False),
-                    self._log(f"Game audio detected - paused Spotify (peak={p:.4f})"),
+                    self._log(f"Other audio detected - paused Spotify (peak={p:.4f})"),
                 ))
         else:
             self._paused_by_game_flag = False
             self._clear_spotify_game_pause_claim()
             self._remove_pause_reason("auto")
-            self.root.after(0, lambda: self._log("Game audio detected, but Spotify pause did not confirm."))
+            self.root.after(0, lambda: self._log("Other audio detected, but Spotify pause did not confirm."))
 
     def _resume_spotify_after_game_quiet(self):
         if not self.spotify or not self._paused_by_game_flag:
             return
         if self._manual_paused or self._user_paused_flag:
             return
+        # Wait for real audio before re-arming the end-of-playlist prompt.
+        self._playlist_audio_armed = False
+        self._spotify_loud_streak = 0
 
         # Check if Spotify is ALREADY loud. If so, don't risk a toggle inversion.
         try:
@@ -2793,7 +3985,7 @@ class GameBeatsApp:
             else:
                 ok = bool(self.spotify.media_play_pause())
         except Exception as ex:
-            self.root.after(0, lambda e=ex: self._log(f"Game-audio resume failed: {e}"))
+            self.root.after(0, lambda e=ex: self._log(f"Other-audio resume failed: {e}"))
 
         if ok:
             self._paused_by_game_flag = False
@@ -2803,7 +3995,7 @@ class GameBeatsApp:
             self._last_spotify_loud_ts = time.time()
             self.root.after(0, lambda: (
                 self._set_play_btn_icon(True, force_btn=True),
-                self._log("Game audio quiet - resumed Spotify"),
+                self._log("Other audio quiet - resumed Spotify"),
             ))
 
     def _stop_audio_monitor(self):
@@ -2813,14 +4005,14 @@ class GameBeatsApp:
                 self._game_audio.shutdown()
             except Exception:
                 pass
-        # Restore audio monitor browser preference when monitor stops
+        # Restore the audio source preference when the monitor stops.
         try:
-            from core.audio_monitor import set_browser_audio_only
-            try:
-                if hasattr(self, "spotify") and getattr(self, "spotify", None) is not None:
-                    set_browser_audio_only(self.spotify._uses_browser_player())
-            except Exception:
-                pass
+            if hasattr(self, "spotify") and getattr(self, "spotify", None) is not None:
+                if hasattr(self.spotify, "refresh_audio_source"):
+                    self.spotify.refresh_audio_source()
+                else:
+                    from core.audio_monitor import set_browser_audio_only
+                    set_browser_audio_only(not self.spotify._uses_desktop_player())
         except Exception:
             pass
         _clear_spotify_mixer_mute()
@@ -2828,22 +4020,28 @@ class GameBeatsApp:
         if self._mascot_notifier is not None:
             self._mascot_notifier.close()
             self._mascot_notifier = None
-        self._set_puppy_singing_visible(False)
+        # Keep the puppy visible if music is still playing after the game
+        # session ends; only hide it when playback actually stopped.
+        if not getattr(self, "_is_playing", False):
+            self._set_puppy_singing_visible(False)
 
     # ── PLAYLISTS ─────────────────────────────────────────────────────────────
 
-    def _remember_current_playlist(self, uri="", name="", query=""):
+    def _remember_current_playlist(self, uri="", name="", query="", reset_pause_flags: bool = False):
+        new_playlist = False
         if uri and str(uri).startswith("spotify:playlist:"):
+            new_playlist = uri != getattr(self, "_current_playlist_uri", "")
             self._current_playlist_uri = uri
         if name:
             self._current_playlist_name = name
         if query:
             self._current_playlist_query = query
-        self._manual_paused = False
-        self._user_paused_flag = False
-        if getattr(self, "_pause_stack", None):
-            self._pause_stack.clear()
-        self._playlist_end_pending = False
+        if reset_pause_flags:
+            self._manual_paused = False
+            self._user_paused_flag = False
+            if getattr(self, "_pause_stack", None):
+                self._pause_stack.clear()
+            self._playlist_end_pending = False
         # Only reset silence tracking if there's no active deferred cooldown
         # (block/try-another sets until_audio=True and we must preserve that)
         if not getattr(self, "_playlist_end_extra_until_audio", False):
@@ -2851,6 +4049,13 @@ class GameBeatsApp:
             self._last_spotify_loud_ts = time.time()  # Assume Spotify is loud when starting
         else:
             self._music_missing_since = 0.0
+        # A brand-new playlist has not produced audio yet. Do not let the
+        # silence timer reach the end-of-playlist threshold while the web
+        # player is still loading (this caused a false "Playlist finished"
+        # popup right after playback started).
+        if new_playlist or reset_pause_flags:
+            self._playlist_audio_armed = False
+            self._spotify_loud_streak = 0
         self.root.after(0, lambda: (
             self.playlist_display_lbl.configure(text=f"Playlist: {self._current_playlist_name or '\u2014'}"),
             self.track_lbl.configure(text=self._current_playlist_name or "Spotify Playlist"),
@@ -2974,24 +4179,31 @@ class GameBeatsApp:
             pass
 
     def _intentional_pause_active(self) -> bool:
-        paused_by_game = bool(getattr(self, "_paused_by_game_flag", False))
+        """True only when GameBeats or the user explicitly paused playback.
+
+        This used to guess from window titles / track progress. Those guesses
+        were unreliable and caused the "Playlist finished" overlay to appear
+        after a manual pause (or to suppress it at a real playlist end).
+        """
+        if getattr(self, "_manual_paused", False) or getattr(self, "_user_paused_flag", False):
+            return True
+        if getattr(self, "_paused_by_game_flag", False):
+            return True
         try:
-            if self.spotify:
-                paused_by_game = paused_by_game or bool(
-                    getattr(self.spotify, "paused_by_game", getattr(self.spotify, "_paused_by_game", False))
-                )
+            if self.spotify and getattr(
+                self.spotify,
+                "paused_by_game",
+                getattr(self.spotify, "_paused_by_game", False),
+            ):
+                return True
         except Exception:
             pass
         try:
-            stack_active = bool(getattr(self, "_pause_stack", None))
+            if getattr(self, "_pause_stack", None):
+                return True
         except Exception:
-            stack_active = False
-        return bool(
-            paused_by_game
-            or getattr(self, "_manual_paused", False)
-            or getattr(self, "_user_paused_flag", False)
-            or stack_active
-        )
+            pass
+        return False
 
     def _blocked_playlists(self):
         try:
@@ -3199,87 +4411,138 @@ class GameBeatsApp:
                     text="No playlists found on this account.", text_color=TEXT_MUTED)
             self._render_blocked_playlists(blocked)
             return
-        self.pl_status_lbl.configure(text=f"{len(pls)} playlist{'s' if len(pls) != 1 else ''}", text_color=TEXT_SEC)
-        for pl in pls[:30]:
-            row = ctk.CTkFrame(self.pl_inner, fg_color=SURFACE, corner_radius=8, cursor="hand2")
-            row.pack(fill=tk.X, pady=2)
+        self.pl_status_lbl.configure(
+            text=f"{len(pls)} record{'s' if len(pls) != 1 else ''} in the crate \u00b7 click a sleeve to spin it",
+            text_color=TEXT_SEC,
+        )
+        palette = [MINT, GOLD, ORANGE, CREAM, "#C084FC", "#00E5FF"]
+        for index, pl in enumerate(pls[:30]):
+            color = palette[index % len(palette)]
+            row = ctk.CTkFrame(
+                self.pl_inner, fg_color=SURFACE2, corner_radius=0,
+                border_width=2, border_color=WOOD, height=94, cursor="hand2",
+            )
+            row.pack(fill=tk.X, pady=4, padx=(0, 4))
+            row.pack_propagate(False)
 
-            # Music note icon — compact pill
-            note_c = ctk.CTkFrame(row, width=40, height=40, fg_color=SURFACE3, corner_radius=20)
-            note_c.pack(side=tk.LEFT, padx=(8, 4))
-            note_c.pack_propagate(False)
-            ctk.CTkLabel(note_c, text="\u266B", fg_color="transparent", text_color=ACCENT,
-                         font=ctk.CTkFont(family="Segoe UI", size=12)).pack(expand=True)
+            sleeve = self._record_sleeve(row, color, index, size=68)
+            sleeve.pack(side=tk.LEFT, padx=(10, 12), pady=10)
 
             col = ctk.CTkFrame(row, fg_color="transparent", corner_radius=0)
-            col.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=12, padx=(4, 0))
-            
-            ctk.CTkLabel(col, text=pl["name"], fg_color="transparent", text_color=TEXT,
-                         font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), anchor="w").pack(anchor="w")
-            
-            ctk.CTkLabel(col, text=f"{pl['tracks']} tracks", fg_color="transparent", text_color=TEXT_MUTED,
-                         font=ctk.CTkFont(family="Segoe UI", size=8), anchor="w").pack(anchor="w", pady=(1, 0))
+            col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=10)
 
-            arrow = ctk.CTkLabel(row, text="\u25B6", fg_color="transparent", text_color=TEXT_MUTED,
-                                 font=ctk.CTkFont(family="Segoe UI", size=10), padx=16)
-            arrow.pack(side=tk.RIGHT)
+            title = ctk.CTkLabel(
+                col, text=pl["name"], fg_color="transparent", text_color=TEXT,
+                font=T.retro_font(21, "bold"), anchor="w", justify=tk.LEFT,
+            )
+            title.pack(anchor="w", fill=tk.X)
 
-            def _set_row_bg(r, color):
-                r.configure(fg_color=color)
+            ctk.CTkLabel(
+                col, text=f"{pl['tracks']} tracks  \u00b7  READY TO SPIN",
+                fg_color="transparent", text_color=TEXT_MUTED,
+                font=T.pixel_font(9), anchor="w",
+            ).pack(anchor="w", pady=(3, 0))
 
-            all_widgets = row.winfo_children() + [row]
-            for widget in all_widgets:
-                widget.bind("<Button-1>",
-                    lambda e, u=pl["uri"], n=pl["name"]: self._play_pl(u, n))
-                widget.bind("<Enter>", lambda e, r=row: _set_row_bg(r, SURFACE2))
-                widget.bind("<Leave>", lambda e, r=row: _set_row_bg(r, SURFACE))
+            spin = T.pixel_button(
+                row, text="\u25b6  SPIN", command=lambda u=pl["uri"], n=pl["name"]: self._play_pl(u, n),
+                width=90, height=32,
+            )
+            spin.pack(side=tk.RIGHT, padx=(8, 10))
 
             if self._is_desktop_mode():
-                del_l = ctk.CTkLabel(row, text="\u2715", fg_color="transparent", text_color=TEXT_MUTED,
-                                     font=ctk.CTkFont(family="Segoe UI", size=11), padx=10, cursor="hand2")
-                del_l.pack(side=tk.RIGHT)
-                del_l.bind("<Button-1>",
-                    lambda e, u=pl["uri"]: self._remove_saved_pl(u))
+                del_l = ctk.CTkButton(
+                    row, text="\u2715", fg_color="transparent", text_color=TEXT_MUTED,
+                    hover_color=SURFACE4, font=T.pixel_font(10, "bold"),
+                    width=30, height=30, corner_radius=0,
+                    command=lambda u=pl["uri"]: self._remove_saved_pl(u),
+                )
+                del_l.pack(side=tk.RIGHT, padx=(0, 2))
+
+            def _set_row_bg(r, color):
+                try:
+                    r.configure(fg_color=color)
+                except Exception:
+                    pass
+
+            for widget in (row, sleeve, col, title):
+                widget.bind(
+                    "<Button-1>",
+                    lambda e, u=pl["uri"], n=pl["name"]: self._play_pl(u, n),
+                )
+                widget.bind("<Enter>", lambda e, r=row: _set_row_bg(r, SURFACE3))
+                widget.bind("<Leave>", lambda e, r=row: _set_row_bg(r, SURFACE2))
 
         self._render_blocked_playlists(blocked)
+
+    def _record_sleeve(self, parent, color, index, size=68):
+        canvas = tk.Canvas(
+            parent, width=size, height=size, bg=color,
+            highlightthickness=2, highlightbackground=NIGHT, bd=0,
+            cursor="hand2",
+        )
+        try:
+            canvas.create_text(
+                size * 0.5, size * 0.12, text=f"0{index + 1}",
+                fill=T.NIGHT, font=(T.F_PIXEL, -7, "bold"),
+            )
+            canvas.create_oval(
+                size * 0.17, size * 0.17, size * 0.83, size * 0.83,
+                fill=NIGHT, outline=CREAM, width=2,
+            )
+            canvas.create_oval(
+                size * 0.37, size * 0.37, size * 0.63, size * 0.63,
+                fill=color, outline=NIGHT, width=2,
+            )
+            canvas.create_text(
+                size * 0.5, size * 0.5, text="GB",
+                fill=NIGHT, font=(T.F_PIXEL, -6, "bold"),
+            )
+        except Exception:
+            pass
+        return canvas
 
     def _render_blocked_playlists(self, blocked):
         if not blocked:
             return
         ctk.CTkLabel(
-            self.pl_inner, text="BLOCKED PLAYLISTS",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family="Segoe UI", size=8, weight="bold"),
-        ).pack(anchor=tk.W, padx=2, pady=(16, 4))
+            self.pl_inner, text="BLOCKED FROM AUTO-PLAY",
+            fg_color="transparent", text_color=GOLD,
+            font=T.pixel_font(10, "bold"),
+        ).pack(anchor=tk.W, padx=2, pady=(18, 6))
         for item in blocked:
             uri  = item.get("uri", "")
             name = item.get("name") or uri.split(":")[-1] or "Blocked playlist"
             query = item.get("query", "")
-            row = ctk.CTkFrame(self.pl_inner, fg_color=SURFACE2, corner_radius=8)
-            row.pack(fill=tk.X, pady=2)
+            row = ctk.CTkFrame(
+                self.pl_inner, fg_color=SURFACE2, corner_radius=0,
+                border_width=2, border_color=NIGHT,
+            )
+            row.pack(fill=tk.X, pady=4, padx=(0, 4))
 
-            badge = ctk.CTkFrame(row, fg_color="#3A1A10", width=40, height=40, corner_radius=20)
-            badge.pack(side=tk.LEFT, padx=(8, 4))
+            badge = ctk.CTkFrame(row, fg_color="#3A1A10", width=46, height=46, corner_radius=0)
+            badge.pack(side=tk.LEFT, padx=(10, 10), pady=10)
             badge.pack_propagate(False)
             ctk.CTkLabel(badge, text="\u2205", fg_color="transparent", text_color=AMBER,
-                         font=ctk.CTkFont(family="Segoe UI", size=13)).pack(expand=True)
+                         font=T.retro_font(22)).pack(expand=True)
 
             col = ctk.CTkFrame(row, fg_color="transparent", corner_radius=0)
-            col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=10, pady=8)
+            col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8), pady=10)
 
             ctk.CTkLabel(col, text=name, fg_color="transparent", text_color=TEXT,
-                         font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"), anchor="w").pack(anchor="w")
+                         font=T.retro_font(19, "bold"), anchor="w", justify=tk.LEFT).pack(anchor="w")
 
-            detail = (query or uri)[:52]
+            detail = (query or uri)[:80]
             ctk.CTkLabel(col, text=detail, fg_color="transparent", text_color=TEXT_MUTED,
-                         font=ctk.CTkFont(family="Segoe UI", size=8), anchor="w").pack(anchor="w")
+                         font=T.retro_font(14), anchor="w", justify=tk.LEFT).pack(anchor="w", pady=(2,0))
 
-            ctk.CTkButton(
-                row, text="Unblock",
-                fg_color="transparent", text_color=ACCENT, hover_color=SURFACE3,
-                font=ctk.CTkFont(family="Segoe UI", size=9, weight="bold"),
-                width=72, height=28, corner_radius=RADIUS_SM,
-                command=lambda u=uri: self._unblock_playlist(u),
-            ).pack(side=tk.RIGHT, padx=(0, 10), pady=8)
+            T.pixel_button(
+                row, text="UNBLOCK",
+                command=lambda u=uri: (
+                    self._unblock_playlist(u),
+                    self._load_playlists(),
+                ),
+                width=96, height=30,
+            ).pack(side=tk.RIGHT, padx=(0, 10), pady=10)
 
     def _remove_saved_pl(self, uri):
         if self._is_desktop_mode():
@@ -3350,44 +4613,77 @@ class GameBeatsApp:
     def _pulse_loop(self, step):
         if not getattr(self, "_pulse_active", False) or self._closing:
             if hasattr(self, "play_btn"):
-                self.play_btn.configure(fg_color=ACCENT)
+                self.play_btn.configure(fg_color=GOLD)
             self._pulse_job = None
             return
-        colors = [ACCENT, "#8b5cf6", ACCENT2, "#a78bfa"]
+        colors = [GOLD, "#FFD89A", ORANGE, "#FFC06A"]
         col = colors[step % len(colors)]
         if hasattr(self, "play_btn"):
             self.play_btn.configure(fg_color=col)
         self._pulse_job = self.root.after(450, lambda: self._pulse_loop(step + 1))
 
     def _set_play_btn_icon(self, playing: bool, force_btn: bool = False):
-        """Update internal playing state. Only updates the visible button
-        icon when force_btn=True (i.e. user-initiated toggle)."""
-        self._is_playing = bool(playing)
+        """Update internal playing state and control button icons.
+
+        This is called from the audio monitor as often as twice per second.
+        Keep it *cheap*: the room canvas has its own animation loop, so never
+        force a full room repaint here unless the play state actually changed.
+        A full repaint on every audio tick made the whole UI feel frozen and
+        caused pause/resume clicks to appear ignored.
+        """
+        playing = bool(playing)
+        previous = bool(getattr(self, "_is_playing", False))
+        changed = (playing != previous) or bool(force_btn)
+        self._is_playing = playing
         if playing:
             self._start_play_btn_pulse()
         else:
             self._pulse_active = False
+        # Only an explicit user/auto action may change the visible icon.
+        # Audio-meter ticks call this method too, and letting them overwrite
+        # the icon is what made the UI show "paused" while music was audible.
         if force_btn and hasattr(self, "play_btn"):
-            self.play_btn.update_text("\u23F8" if playing else "\u25B6")
+            try:
+                self.play_btn.update_text("\u23F8" if playing else "\u25B6")
+            except Exception:
+                pass
         try:
             overlay = getattr(self, "_control_overlay", None)
             if overlay and overlay.is_visible():
-                overlay.update_status(playing=bool(playing))
+                overlay.update_status(playing=playing)
         except Exception:
             pass
+        try:
+            self._update_deck_status()
+        except Exception:
+            pass
+        if changed:
+            # One coalesced repaint per actual state change (not per tick).
+            try:
+                self._schedule_room_redraw(0)
+            except Exception:
+                pass
+            try:
+                if playing and not self._intentional_pause_active():
+                    self._set_puppy_singing_visible(True)
+                elif not playing and self._intentional_pause_active():
+                    self._set_puppy_singing_visible(False)
+            except Exception:
+                pass
 
     def _sync_play_btn_to_spotify_audio(self, audio_active: bool, peak: float = 0.0):
-        """Track Spotify audio state internally — does NOT touch the button icon."""
+        """Track Spotify audio state internally (never the visible button icon).
+
+        The audio meter is a hint for auto-pause and animation; it is not a
+        reliable source of truth for play/pause state (the browser can be
+        silent while the desktop sidecar is audible).  Explicit actions pass
+        force_btn=True to _set_play_btn_icon().
+        """
         self._spotify_audio_active = bool(audio_active)
         try:
             self._last_spotify_peak = float(peak)
         except Exception:
             self._last_spotify_peak = 0.0
-        self._is_playing = bool(audio_active)
-        if audio_active:
-            self._start_play_btn_pulse()
-        else:
-            self._pulse_active = False
 
     def _read_spotify_is_playing(self):
         """Best-effort read of Spotify's real play state."""
@@ -3412,15 +4708,22 @@ class GameBeatsApp:
         return None
 
     def _spotify_is_playing_for_toggle(self) -> bool:
-        """Resolve clicks from Spotify/audio state instead of stale UI state."""
-        if (
-            getattr(self, "_manual_paused", False)
-            or getattr(self, "_user_paused_flag", False)
-            or getattr(self, "_paused_by_game_flag", False)
-        ):
+        """Resolve clicks from explicit/audio state instead of stale UI state."""
+        # Explicit pause state wins. Residual loopback audio for ~1s after a
+        # pause used to make the next click send *pause* again instead of play.
+        if self._intentional_pause_active():
             return False
-        if self._spotify_sound_detected_recently(1.5):
+        if self._spotify_sound_detected_recently(2.0):
             return True
+        # In web mode get_playback_state() goes through the Playwright queue
+        # and can block the Tk thread. The poller/monitor keeps these caches
+        # up to date instead.
+        if self._is_web_mode():
+            info = getattr(self, "_last_track_info", None) or {}
+            ts = float(getattr(self, "_last_track_info_ts", 0.0) or 0.0)
+            if "is_playing" in info and ts > 0 and (time.time() - ts) <= 10.0:
+                return bool(info.get("is_playing"))
+            return bool(getattr(self, "_is_playing", False))
         state = self._read_spotify_is_playing()
         if state is not None:
             return bool(state)
@@ -3429,105 +4732,229 @@ class GameBeatsApp:
     def _send_spotify_pause_command(self) -> bool:
         if not self.spotify:
             return False
-        if hasattr(self.spotify, "_media_pause"):
-            return bool(self.spotify._media_pause())
-        if hasattr(self.spotify, "ensure_paused"):
-            return bool(self.spotify.ensure_paused())
-        if hasattr(self.spotify, "pause"):
-            return bool(self.spotify.pause())
-        if hasattr(self.spotify, "media_stop"):
-            return bool(self.spotify.media_stop())
-        return False
+        ok = False
+        try:
+            if hasattr(self.spotify, "ensure_paused"):
+                try:
+                    ok = bool(self.spotify.ensure_paused(paused_by_game=False))
+                except TypeError:
+                    ok = bool(self.spotify.ensure_paused())
+            elif hasattr(self.spotify, "pause"):
+                ok = bool(self.spotify.pause())
+            elif hasattr(self.spotify, "media_stop"):
+                ok = bool(self.spotify.media_stop())
+            elif hasattr(self.spotify, "media_play_pause"):
+                ok = bool(self.spotify.media_play_pause())
+        except Exception:
+            ok = False
+        return ok
 
     def _send_spotify_resume_command(self) -> bool:
         if not self.spotify:
             return False
-        if hasattr(self.spotify, "_media_play"):
-            return bool(self.spotify._media_play())
-        if hasattr(self.spotify, "ensure_playing"):
-            return bool(self.spotify.ensure_playing())
-        if hasattr(self.spotify, "resume"):
-            return bool(self.spotify.resume())
-        if hasattr(self.spotify, "play"):
-            return bool(self.spotify.play())
-        if hasattr(self.spotify, "media_play_pause"):
-            return bool(self.spotify.media_play_pause())
-        return False
+
+        def _attempt() -> bool:
+            try:
+                if hasattr(self.spotify, "ensure_playing"):
+                    return bool(self.spotify.ensure_playing())
+                if hasattr(self.spotify, "resume"):
+                    return bool(self.spotify.resume())
+                if hasattr(self.spotify, "play"):
+                    return bool(self.spotify.play())
+                if hasattr(self.spotify, "media_play_pause"):
+                    return bool(self.spotify.media_play_pause())
+            except Exception:
+                return False
+            return False
+
+        ok = _attempt()
+        if not ok:
+            # One bounded retry. NEVER fall back to play_playlist() here:
+            # that navigates to the playlist and restarts it, which users
+            # experienced as "pausing/resuming starts another playlist".
+            time.sleep(0.35)
+            ok = _attempt()
+        return ok
 
     def _apply_user_pause_state(self, paused: bool):
         self._user_toggle_ts = time.time()
+        # The next end-of-playlist check must wait until this playlist's
+        # audio is actually heard again.  Silence during a pause/resume
+        # transition is not a finished playlist.
+        self._playlist_audio_armed = False
+        self._spotify_loud_streak = 0
         if paused:
             self._manual_paused = True
             self._user_paused_flag = True
+            self._paused_by_game_flag = False
             self._add_pause_reason("user")
+            self._remove_pause_reason("auto")
+            self._playlist_end_pending = False
+            self._music_missing_since = 0.0
+            # Keep the playlist-end prompt from firing immediately after a
+            # resume (audio may need a moment to come back).
+            self._playlist_end_prompt_not_before = (
+                time.time() + max(3.0, self._playlist_end_delay_seconds())
+            )
+            self._set_play_btn_icon(False, force_btn=True)
+            if getattr(self, "_mascot_notifier", None) is not None:
+                try:
+                    self._mascot_notifier.close()
+                except Exception:
+                    pass
+                self._mascot_notifier = None
         else:
             self._manual_paused = False
             self._user_paused_flag = False
             self._paused_by_game_flag = False
+            self._spotify_started_by_us = True
             self._remove_pause_reason("user")
             self._remove_pause_reason("auto")
             self._playlist_end_pending = False
             self._music_missing_since = 0.0
+            self._playlist_end_prompt_not_before = (
+                time.time() + max(3.0, self._playlist_end_delay_seconds())
+            )
+            if self.spotify:
+                # Clear the *private* flag: paused_by_game is a read-only
+                # property. Assigning to it raised AttributeError before the
+                # private flag could be cleared, leaving the app stuck in an
+                # "intentionally paused" state after a manual resume.
+                try:
+                    self.spotify._paused_by_game = False
+                except Exception:
+                    pass
+                try:
+                    desktop = getattr(self.spotify, "_desktop_player", None)
+                    if desktop:
+                        desktop._paused_by_game = False
+                except Exception:
+                    pass
+
+    def _begin_play_pause(self) -> bool:
+        """Take the play/pause lock, with a watchdog so it can never stick."""
+        if getattr(self, "_play_pause_busy", False):
+            return False
+        self._play_pause_busy = True
+        try:
+            if getattr(self, "_play_pause_watchdog", None):
+                self.root.after_cancel(self._play_pause_watchdog)
+        except Exception:
+            pass
+        try:
+            self._play_pause_watchdog = self.root.after(
+                8000, self._finish_play_pause
+            )
+        except Exception:
+            self._play_pause_watchdog = None
+        return True
+
+    def _finish_play_pause(self):
+        self._play_pause_busy = False
+        try:
+            if getattr(self, "_play_pause_watchdog", None):
+                self.root.after_cancel(self._play_pause_watchdog)
+        except Exception:
+            pass
+        self._play_pause_watchdog = None
 
     def _pause(self):
         """Pause Spotify (called from overlay / keyboard shortcut)."""
-        if not self.spotify:
-            return
+        if not self.spotify or not self._begin_play_pause():
+            return False
         self._apply_user_pause_state(True)
         def _do_pause():
             try:
                 ok = self._send_spotify_pause_command()
             except Exception:
                 ok = False
-            if not ok:
-                self.root.after(0, lambda: self._log("Spotify pause did not confirm."))
-        threading.Thread(target=_do_pause, daemon=True).start()
+            def finish():
+                self._finish_play_pause()
+                if ok:
+                    self._set_play_btn_icon(False, force_btn=True)
+                else:
+                    # The player is still audibly playing; reflect reality so
+                    # the next click is a pause rather than a stuck toggle.
+                    self._apply_user_pause_state(False)
+                    self._set_play_btn_icon(True, force_btn=True)
+                    self._log("Spotify pause did not confirm — still playing.")
+            self.root.after(0, finish)
+        try:
+            threading.Thread(target=_do_pause, daemon=True).start()
+        except Exception as ex:
+            self._finish_play_pause()
+            self._apply_user_pause_state(False)
+            self._log(f"Could not start pause command: {ex}")
+            return False
+        return True
 
     def _play(self):
         """Resume Spotify (called from overlay / keyboard shortcut)."""
-        if not self.spotify:
-            return
+        if not self.spotify or not self._begin_play_pause():
+            return False
         self._apply_user_pause_state(False)
         def go():
             try:
                 ok = self._send_spotify_resume_command()
             except Exception:
                 ok = False
-            if not ok:
-                self.root.after(0, lambda: self._log("Spotify resume did not confirm."))
-        threading.Thread(target=go, daemon=True).start()
+            def finish():
+                self._finish_play_pause()
+                if ok:
+                    self._set_play_btn_icon(True, force_btn=True)
+                else:
+                    self._set_play_btn_icon(False, force_btn=True)
+                    self._log("Spotify resume did not confirm — click Play again.")
+            self.root.after(0, finish)
+        try:
+            threading.Thread(target=go, daemon=True).start()
+        except Exception as ex:
+            self._finish_play_pause()
+            self._set_play_btn_icon(False, force_btn=True)
+            self._log(f"Could not start resume command: {ex}")
+            return False
+        return True
 
     def _play_pause_toggle(self):
         """Single-button toggle: pause if playing, play if paused."""
-        if not self.spotify or self._play_pause_busy:
+        if not self.spotify or not self._begin_play_pause():
             return
-        self._play_pause_busy = True
         self._user_toggle_ts = time.time()
+
+        was_playing = self._spotify_is_playing_for_toggle()
+        target_playing = not was_playing
+        self._apply_user_pause_state(not target_playing)
 
         def go():
             ok = False
-            was_playing = self._spotify_is_playing_for_toggle()
             try:
                 if was_playing:
-                    self.root.after(0, lambda: self._apply_user_pause_state(True))
                     ok = self._send_spotify_pause_command()
                 else:
-                    self.root.after(0, lambda: self._apply_user_pause_state(False))
                     ok = self._send_spotify_resume_command()
             except Exception:
                 ok = False
 
             def finish():
-                self._play_pause_busy = False
+                self._finish_play_pause()
                 if ok:
-                    # Only update the visible button icon on successful user toggle
-                    self._set_play_btn_icon(not was_playing, force_btn=True)
+                    self._set_play_btn_icon(target_playing, force_btn=True)
                 else:
                     self._log("Spotify play/pause command did not confirm.")
+                    if not target_playing:
+                        # Pause failed: revert the optimistic manual-pause flags
+                        # so the next click still means "pause", not "play".
+                        self._apply_user_pause_state(False)
+                    actual = self._spotify_is_playing_for_toggle()
+                    self._set_play_btn_icon(actual, force_btn=True)
 
             self.root.after(0, finish)
 
-        threading.Thread(target=go, daemon=True).start()
+        try:
+            threading.Thread(target=go, daemon=True).start()
+        except Exception as ex:
+            self._finish_play_pause()
+            self._log(f"Could not start play/pause command: {ex}")
         return
 
     def _play_pause(self):
@@ -3536,11 +4963,16 @@ class GameBeatsApp:
 
     def _next(self):
         if self.spotify:
-            # If a game is running, prefer picking another playlist (overlay 'Next')
-            if self.current_game:
-                self._try_another_playlist()
-                return
-            threading.Thread(target=self.spotify.media_next, daemon=True).start()
+            threading.Thread(target=self._media_next, daemon=True).start()
+
+    def _media_next(self):
+        try:
+            if hasattr(self.spotify, "media_next"):
+                self.spotify.media_next()
+            elif hasattr(self.spotify, "next_track"):
+                self.spotify.next_track()
+        except Exception as ex:
+            self.root.after(0, lambda e=ex: self._log(f"Next track error: {e}"))
 
     def _prev(self):
         if self.spotify:
@@ -3568,9 +5000,11 @@ class GameBeatsApp:
             if track:
                 self.root.after(0, lambda: self._update_np(track))
             else:
+                if not self._intentional_pause_active():
+                    self.root.after(0, self._mark_music_missing)
+        except Exception:
+            if not self._intentional_pause_active():
                 self.root.after(0, self._mark_music_missing)
-        except:
-            self.root.after(0, self._mark_music_missing)
 
     def _now_playing_playlist_title(self, track=None):
         track = track or {}
@@ -3587,25 +5021,44 @@ class GameBeatsApp:
         return str(track.get("name") or "Nothing playing")
 
     def _update_np(self, t):
+        self._last_track_info = t
+        self._last_track_info_ts = time.time()
+        if not hasattr(self, "track_lbl"):
+            return
         playlist_uri = t.get("playlist_uri") or t.get("context_uri")
         if (
             playlist_uri
             and str(playlist_uri).startswith("spotify:playlist:")
             and playlist_uri != self._current_playlist_uri
         ):
-            # Only clear the name if this is a true manual switch (not during an app-triggered play)
+            self._current_playlist_uri = playlist_uri
+            # New playlist detected from the player itself: wait for it to
+            # produce audio before allowing an end-of-playlist prompt.
+            try:
+                self._playlist_audio_armed = False
+                self._spotify_loud_streak = 0
+            except Exception:
+                pass
             if not self._play_in_progress:
-                self._remember_current_playlist(
-                    playlist_uri,
-                    "Spotify Playlist", # Fallback for manual switch
-                    "" # Clear search query as it no longer applies
-                )
-            else:
-                # Just sync the internal URI tracker without updating UI name
-                self._current_playlist_uri = playlist_uri
+                self._current_playlist_name = "Spotify Playlist"
+                self.root.after(0, lambda: self.playlist_display_lbl.configure(
+                    text=f"PLAYLIST: {self._current_playlist_name}"
+                ))
 
         playlist_title = self._now_playing_playlist_title(t)
-        self.track_lbl.configure(text=playlist_title)
+        song_title = str(t.get("name") or "").strip()
+        if not song_title or song_title.lower() == "spotify":
+            song_title = playlist_title
+        self.track_lbl.configure(text=song_title)
+
+        artist = str(t.get("artist") or "").strip()
+        if not artist or artist.lower() in ("web player", "spotify"):
+            artist = "Spotify web player"
+        try:
+            self.deck_artist_lbl.configure(text=artist)
+        except Exception:
+            pass
+
         self.artist_lbl.configure(text="")
         self.artist_lbl.pack_forget()
 
@@ -3615,25 +5068,28 @@ class GameBeatsApp:
         # overwrites the state).
         user_toggle_age = time.time() - getattr(self, "_user_toggle_ts", 0.0)
         t_is_playing = bool(t.get("is_playing"))
-        effective_is_playing = t_is_playing or bool(
-            not self._intentional_pause_active()
-            and self._spotify_sound_detected_recently(2.5)
-        )
+        spotify_sound = self._spotify_sound_detected_recently(2.5)
+        intentional = self._intentional_pause_active()
+        # While paused (by the user or by game-audio logic), never let a stale
+        # window title / media-session value flip the UI back to playing.
+        effective_is_playing = (not intentional) and (t_is_playing or spotify_sound)
         if user_toggle_age > 3.0 and not getattr(self, "_audio_monitor_running", False):
             self._set_play_btn_icon(effective_is_playing)
             self._is_playing = effective_is_playing
+            # Poll-only mode (no detected game) still needs the floating
+            # puppy to follow playback, since the audio monitor isn't running.
+            self._set_puppy_singing_visible(effective_is_playing)
         if effective_is_playing:
             self._last_music_seen_ts = time.time()
             self._music_missing_since = 0.0
             self._playlist_end_pending = False
-            if user_toggle_age > 3.0 or not (
-                self._manual_paused or getattr(self, "_user_paused_flag", False)
-            ):
-                self._manual_paused = False  # Reset manual pause flag when music resumes
-                self._user_paused_flag = False
-                self._remove_pause_reason("user")
+            # IMPORTANT: never clear _manual_paused/_user_paused_flag here.
+            # Only an explicit user resume or starting a new playlist may
+            # clear a manual pause. The old auto-clear after 5s was what made
+            # the "Playlist finished" overlay appear right after pausing.
         else:
-            self._mark_music_missing()
+            if not intentional:
+                self._mark_music_missing()
 
         if HAS_PIL and t.get("album_art"):
             threading.Thread(target=self._load_art, args=(t["album_art"],), daemon=True).start()
@@ -3643,50 +5099,36 @@ class GameBeatsApp:
             self._spotify_started_by_us
             and self.current_game
             and self.auto_mode.get()
-            and not self._manual_paused
+            and not self._intentional_pause_active()
             and not self._play_in_progress
         )
 
     def _playback_paused_by_app_or_user(self) -> bool:
         """
         Return True if playback is currently paused by GameBeats or the user.
-        This aggregates the controller state and the local flags we use for
-        race-free decision making.
-        
-        CRITICAL: Only return True if we INTENTIONALLY paused playback.
-        If Spotify is just naturally paused (track ended), return False so
-        the playlist-ended overlay can appear.
+        Delegates directly to _intentional_pause_active() so all pause states
+        are checked consistently.
         """
-        paused_by_game = False
+        return self._intentional_pause_active()
+
+    def _player_is_playing_cached(self) -> bool:
+        """True when the last polled player state explicitly says 'playing'.
+
+        Only used for the web player: in desktop mode silence is the reliable
+        end-of-playlist signal and the window title is not trustworthy.
+        """
+        if not self._is_web_mode():
+            return False
         try:
-            if self.spotify:
-                paused_by_game = bool(getattr(self.spotify, "paused_by_game", getattr(self.spotify, "_paused_by_game", False)))
+            info = getattr(self, "_last_track_info", None) or {}
+            if not info.get("is_playing"):
+                return False
+            # Never trust a very old poll; a stalled browser/tab can leave a
+            # stale "playing" snapshot forever and suppress a real end prompt.
+            ts = float(getattr(self, "_last_track_info_ts", 0.0) or 0.0)
+            return ts > 0 and (time.time() - ts) <= 10.0
         except Exception:
-            paused_by_game = False
-        paused_by_game = paused_by_game or bool(getattr(self, "_paused_by_game_flag", False))
-        user_paused = bool(getattr(self, "_user_paused_flag", False))
-
-        # IMPORTANT: Don't check Spotify's playback state here.
-        # If Spotify is paused but paused_by_game is False, it means the track
-        # ended naturally (not paused by us), so we should allow the overlay to show.
-        # Only check intentional pause flags, not the actual playback state.
-
-        # Check pause stack safely
-        pause_stack_entries = False
-        try:
-            pause_stack_entries = bool(getattr(self, "_pause_stack", None) and len(self._pause_stack) > 0)
-        except Exception:
-            pause_stack_entries = False
-
-        paused = bool(paused_by_game or self._manual_paused or user_paused or pause_stack_entries)
-        if paused:
-            try:
-                self._log(
-                    f"_playback_paused_by_app_or_user -> True: paused_by_game={paused_by_game}, manual={getattr(self,'_manual_paused',False)}, user_paused={user_paused}, pause_stack={pause_stack_entries}"
-                )
-            except Exception:
-                pass
-        return paused
+            return False
 
     def _game_quiet_long_enough(self, delay):
         if not self._audio_monitor_running:
@@ -3709,6 +5151,16 @@ class GameBeatsApp:
         user_toggle_age = now - getattr(self, "_user_toggle_ts", 0.0)
         if user_toggle_age <= 3.0:
             return
+        if self._intentional_pause_active():
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
+            return
+        if self._player_is_playing_cached():
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
+            return
+        if not self._playlist_end_prompt_allowed(now):
+            return
         if (
             not self._intentional_pause_active()
             and self._spotify_sound_detected_recently(2.5)
@@ -3725,6 +5177,16 @@ class GameBeatsApp:
         if not self._should_handle_auto_stop():
 
             self._music_missing_since = 0.0
+            return
+        # A brand-new playlist (or a pause/resume transition) has not
+        # produced audio yet. Never call that "playlist ended" until this
+        # playlist has actually been heard at least once.
+        if (
+            getattr(self, "_audio_monitor_running", False)
+            and not getattr(self, "_playlist_audio_armed", False)
+        ):
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
             return
         if not self._music_missing_since:
             self._music_missing_since = now
@@ -3757,23 +5219,13 @@ class GameBeatsApp:
         ):
             return
 
-        # Do not treat silence as 'playlist ended' if GameBeats or the user
-        # explicitly paused Spotify. This avoids race conditions where our
-        # own pause/resume logic briefly pauses playback and the monitor
-        # then believes the playlist finished.
-        paused_by_game = False
-        try:
-            if self.spotify:
-                paused_by_game = bool(getattr(self.spotify, "paused_by_game", getattr(self.spotify, "_paused_by_game", False)))
-        except Exception:
-            paused_by_game = False
-        # Also consider the app-local flag in case the controller state was not updated
-        paused_by_game = paused_by_game or bool(getattr(self, "_paused_by_game_flag", False))
-
-        # Check pause stack: if ANY pause is in effect, don't treat silence as playlist end
-        pause_stack_has_entries = bool(getattr(self, "_pause_stack", None) and len(self._pause_stack) > 0)
-
-        if paused_by_game or self._manual_paused or bool(getattr(self, "_user_paused_flag", False)) or pause_stack_has_entries:
+        if self._intentional_pause_active():
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
+            return
+        if self._player_is_playing_cached():
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
             return
 
         self._playlist_end_pending = True
@@ -3834,6 +5286,29 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             try:
                 self._log("Playlist-end notifier suppressed because playback was intentionally paused.")
+            except Exception:
+                pass
+            return
+        if self._player_is_playing_cached():
+            self._playlist_end_pending = False
+            self._music_missing_since = 0.0
+            try:
+                self._log("Playlist-end notifier suppressed because the player is still playing.")
+            except Exception:
+                pass
+            return
+        if (
+            getattr(self, "_audio_monitor_running", False)
+            and not getattr(self, "_playlist_audio_armed", False)
+        ):
+            # This playlist has never produced audio in this session. It is
+            # most likely still loading (or failed to start), not finished.
+            self._playlist_end_pending = False
+            self._music_missing_since = 0.0
+            try:
+                self._log(
+                    "Playlist-end notifier suppressed: no audio heard from this playlist yet."
+                )
             except Exception:
                 pass
             return
@@ -3927,8 +5402,9 @@ class GameBeatsApp:
             except Exception:
                 pass
             self._mascot_notifier = None
-            self._playlist_end_pending = False   # let monitor re-evaluate
-            self._music_missing_since = 0.0
+            self._defer_playlist_end_prompt(
+                extra_seconds=60.0, until_audio=True, reason="User dismissed notifier"
+            )
 
         def _on_play_another() -> None:
             """Fired when user clicks 'Another' button."""
@@ -4114,14 +5590,12 @@ class GameBeatsApp:
 
     def _overlay_play(self):
         """Play button from control overlay."""
-        self._play()
-        if self._control_overlay:
+        if self._play() and self._control_overlay:
             self._control_overlay.update_status(playing=True)
 
     def _overlay_pause(self):
         """Pause button from control overlay."""
-        self._pause()
-        if self._control_overlay:
+        if self._pause() and self._control_overlay:
             self._control_overlay.update_status(playing=False)
 
     def _overlay_prev(self):

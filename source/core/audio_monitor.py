@@ -39,10 +39,17 @@ if sys.platform == "win32":
         HAS_PROCESS_LOOPBACK = ProcessAudioCapture.is_supported()
     except Exception:
         HAS_PROCESS_LOOPBACK = False
+    try:
+        from pycaw.pycaw import AudioUtilities
+        from pycaw.api.endpointvolume import IAudioMeterInformation
+        HAS_PYCAW = True
+    except Exception:
+        HAS_PYCAW = False
 
 # ── Thresholds ────────────────────────────────────────────────────────────────
 PROCESS_LOOPBACK_LOUD = 0.004  # Game audio detection threshold
 SPOTIFY_LOOPBACK_LOUD = 0.005  # Spotify audio detection threshold (lowered for desktop-only mode)
+OTHER_AUDIO_LOUD = 0.008       # Any non-Spotify app/browser audio (session meter)
 
 
 # ── PyAudioWPatch loopback ────────────────────────────────────────────────────
@@ -290,11 +297,40 @@ def set_browser_audio_only(enabled: bool):
     close_spotify_loopback()
 
 
+def _expand_process_tree(pids) -> list:
+    """Include child processes so Chrome renderer audio is captured too.
+
+    Chrome's browser process is the one carrying --user-data-dir, but audio is
+    produced by renderer/utility children. Capturing only the browser PID
+    yields silence, which previously made GameBeats think a playing web
+    playlist had finished.
+    """
+    roots = sorted({int(p) for p in (pids or []) if int(p) > 0})
+    if not HAS_PSUTIL:
+        return roots
+    expanded = set()
+    stack = list(roots)
+    while stack:
+        pid = stack.pop()
+        if pid in expanded:
+            continue
+        expanded.add(pid)
+        try:
+            for child in psutil.Process(pid).children(recursive=False):
+                if child.pid not in expanded:
+                    stack.append(child.pid)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+        except Exception:
+            continue
+    return sorted(expanded)
+
+
 def register_music_player_pids(pids: list):
     """Register browser (or other) PIDs used for Spotify Web Player audio loopback."""
     global _spotify_loopback_pid
+    cleaned = _expand_process_tree(pids)
     with _registered_music_pid_lock:
-        cleaned = sorted({int(p) for p in (pids or []) if int(p) > 0})
         old = list(_registered_music_pids)
         _registered_music_pids[:] = cleaned
     if old != cleaned:
@@ -320,11 +356,8 @@ def close_spotify_loopback():
         _spotify_loopback_pid = 0
 
 
-def get_all_spotify_pids() -> list:
-    """Find Spotify desktop or registered web-player browser process IDs."""
-    with _registered_music_pid_lock:
-        if _browser_audio_only or _registered_music_pids:
-            return list(_registered_music_pids)
+def _desktop_spotify_pids() -> list:
+    """All spotify.exe process IDs (desktop app / silent sidecar)."""
     if not HAS_PSUTIL:
         return []
     try:
@@ -340,6 +373,81 @@ def get_all_spotify_pids() -> list:
     except Exception:
         pass
     return []
+
+
+def get_all_spotify_pids() -> list:
+    """Find Spotify desktop and/or registered web-player browser process IDs.
+
+    In the simplified dual flow the browser is *supposed* to be the audio
+    source, but Spotify can keep playback on the desktop sidecar when the
+    output switch fails.  Monitoring only the browser then reads silence while
+    music is clearly audible, so the UI shows "paused" and other-app audio
+    never pauses the music.  Include both sources unless the caller explicitly
+    requested browser-only monitoring.
+    """
+    with _registered_music_pid_lock:
+        registered = list(_registered_music_pids)
+    desktop = _desktop_spotify_pids()
+    if registered:
+        return sorted({int(pid) for pid in registered} | {int(pid) for pid in desktop})
+    # Browser mode without a matched player PID yet: fall back to the desktop
+    # client so audible music is never invisible.  _browser_audio_only still
+    # suppresses the "other audio" meter until the browser is registered.
+    return desktop
+
+
+def _session_peak_for_pids(pids) -> float:
+    """Max WASAPI session peak for the given process tree, without loopback.
+
+    Used to tell the browser player and the desktop sidecar apart.  The global
+    process-loopback meter intentionally unions both sources, but pause/resume
+    decisions need to know which one is actually audible right now.
+    """
+    if not HAS_PYCAW:
+        return 0.0
+    targets = set(_expand_process_tree(pids))
+    if not targets:
+        return 0.0
+    try:
+        _ensure_com_initialized()
+    except Exception:
+        pass
+    max_peak = 0.0
+    with _other_audio_lock:
+        try:
+            for session in AudioUtilities.GetAllSessions():
+                proc = session.Process
+                if proc is None:
+                    continue
+                try:
+                    if int(proc.pid) not in targets:
+                        continue
+                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                    peak = float(meter.GetPeakValue())
+                except Exception:
+                    continue
+                if peak > max_peak:
+                    max_peak = peak
+        except Exception:
+            return 0.0
+    return max_peak
+
+
+def get_browser_spotify_peak() -> tuple:
+    """(peak, status) for the automated web-player browser only."""
+    with _registered_music_pid_lock:
+        pids = list(_registered_music_pids)
+    if not pids:
+        return 0.0, "no-browser-pids"
+    return _session_peak_for_pids(pids), "ok"
+
+
+def get_desktop_spotify_peak() -> tuple:
+    """(peak, status) for spotify.exe (desktop client / silent sidecar)."""
+    pids = _desktop_spotify_pids()
+    if not pids:
+        return 0.0, "no-spotify"
+    return _session_peak_for_pids(pids), "ok"
 
 
 def get_spotify_pid() -> int:
@@ -506,6 +614,107 @@ def get_spotify_loopback_peak() -> tuple:
             return 0.0, -60.0, "error"
 
 
+# ── Other application/browser audio ───────────────────────────────────────────
+# Process loopback capture is not universal.  Microsoft Edge, for example,
+# reports -60 dB through ProcessAudioCapture even while its WASAPI session
+# meter reads 0.3+.  The per-session peak meter sees the audio, so it is used
+# as a second, independent signal.  Our own Spotify browser and the desktop
+# sidecar are excluded so the music can never pause itself.
+
+_other_audio_lock = threading.Lock()
+_com_initialized = threading.local()
+
+
+def _ensure_com_initialized() -> None:
+    if not HAS_PYCAW or getattr(_com_initialized, "done", False):
+        return
+    try:
+        import comtypes
+        comtypes.CoInitialize()
+    except Exception:
+        pass
+    _com_initialized.done = True
+
+
+def _spotify_exclusion_pids() -> set:
+    """PIDs whose audio belongs to GameBeats' own music, never 'other' audio."""
+    excluded = set()
+    try:
+        # In web mode this is the automated browser's process tree; in
+        # desktop mode get_all_spotify_pids() falls back to spotify.exe.
+        for pid in _expand_process_tree(get_all_spotify_pids()):
+            if pid:
+                excluded.add(int(pid))
+    except Exception:
+        pass
+    if HAS_PSUTIL:
+        try:
+            for proc in psutil.process_iter(["pid", "name"]):
+                try:
+                    if (proc.info.get("name") or "").lower() == "spotify.exe":
+                        excluded.add(int(proc.info["pid"]))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
+    try:
+        import os
+        excluded.add(int(os.getpid()))
+    except Exception:
+        pass
+    return excluded
+
+
+def get_other_audio_peak() -> tuple:
+    """Return (peak, status) for any non-Spotify app or browser audio.
+
+    This intentionally includes the detected game, other browsers, media
+    players and anything else the user is listening to.  It excludes the
+    automated Spotify browser, the desktop sidecar and GameBeats itself.
+    """
+    if not HAS_PYCAW:
+        return 0.0, "unavailable"
+    if _browser_audio_only:
+        with _registered_music_pid_lock:
+            no_browser_pids = not _registered_music_pids
+        if no_browser_pids:
+            # Do not mistake the still-unregistered web player for "other"
+            # audio during startup.  But if the desktop sidecar is audible,
+            # the web player browser is silent, so other apps must still be
+            # detected (otherwise a beep can never pause the desktop track).
+            desktop_peak, desktop_status = get_desktop_spotify_peak()
+            if not (desktop_status == "ok" and desktop_peak >= 0.0015):
+                return 0.0, "no-music-pids"
+    _ensure_com_initialized()
+    excluded = _spotify_exclusion_pids()
+    max_peak = 0.0
+    with _other_audio_lock:
+        try:
+            for session in AudioUtilities.GetAllSessions():
+                proc = session.Process
+                if proc is None:
+                    continue
+                try:
+                    pid = int(proc.pid)
+                    name = (proc.name() or "").lower()
+                except Exception:
+                    continue
+                if pid in excluded or name in (
+                    "spotify.exe", "gamebeats.exe", "audiodg.exe"
+                ):
+                    continue
+                try:
+                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                    peak = float(meter.GetPeakValue())
+                except Exception:
+                    continue
+                if peak > max_peak:
+                    max_peak = peak
+            return max_peak, "ok"
+        except Exception as ex:
+            return 0.0, f"error: {ex}"
+
+
 def _pids_for_game(pid: int = 0, proc_name: str = "") -> set:
     pids = set()
     if pid:
@@ -573,19 +782,19 @@ def measure_game_loud(
     """
     Returns (is_loud, peak, mode, debug_dict).
 
-    Priority:
-      1. Windows process loopback capture (game) → mode "process"
-      2. PyAudioWPatch loopback RMS of full device output → mode "loopback"
-      3. Spotify is detected separately via ProcessAudioCapture
+    "Loud" means any audio that is not GameBeats' own music: the detected
+    game, another browser, a media player, etc.  Process loopback is used for
+    the game and a per-session WASAPI meter is combined with it because some
+    apps (Edge, for example) are invisible to process capture.
     """
-    if not HAS_PROCESS_LOOPBACK and not HAS_PYAUDIO_WP:
+    if not HAS_PROCESS_LOOPBACK and not HAS_PYAUDIO_WP and not HAS_PYCAW:
         return False, 0.0, "none", {}
 
     game_pids = _pids_for_game(pid, proc_name)
-    if not game_pids:
-        return False, 0.0, "none", {}
+    fg = _game_is_foreground(game_pids) if game_pids else False
 
-    fg = _game_is_foreground(game_pids)
+    other_peak, other_status = get_other_audio_peak()
+    other_loud = other_peak >= OTHER_AUDIO_LOUD
 
     dbg = {
         "pids":         len(game_pids),
@@ -595,32 +804,49 @@ def measure_game_loud(
         "spotify_peak": 0.0,
         "spotify_db":   -60.0,
         "spotify_status": "",
+        "other_peak":   other_peak,
+        "other_status": other_status,
+        "other_loud":   other_loud,
         "lb_peak":      0.0,
         "fg":           fg,
     }
 
-    # Process-specific loopback for game. When this is available it is authoritative:
+    if not game_pids:
+        if other_status == "ok":
+            return other_loud, other_peak, "other-session", dbg
+        return False, 0.0, "none", dbg
+
+    # Process-specific loopback for the game. When available it is
+    # authoritative for that process, but other apps still come from the
+    # session meter above.
     if HAS_PROCESS_LOOPBACK:
         target_pid = pid if pid in game_pids else next(iter(game_pids))
         game_peak, game_db, game_status = get_process_loopback_peak(target_pid)
         dbg["game_peak"] = game_peak
         dbg["game_db"] = game_db
         dbg["game_status"] = game_status
-        
+
         # Also check Spotify audio
         spotify_peak, spotify_db, spotify_status = get_spotify_loopback_peak()
         dbg["spotify_peak"] = spotify_peak
         dbg["spotify_db"] = spotify_db
         dbg["spotify_status"] = spotify_status
-        
+
         if game_status == "ok":
-            # Game audio is detected via ProcessAudioCapture
-            return game_peak >= PROCESS_LOOPBACK_LOUD, game_peak, "process", dbg
+            game_loud = game_peak >= PROCESS_LOOPBACK_LOUD
+            loud = game_loud or other_loud
+            peak = max(game_peak, other_peak)
+            mode = "process+other" if other_loud else "process"
+            return loud, peak, mode, dbg
 
     # ── Fallback: PyAudioWPatch loopback ──────────────────────────────────────
     if HAS_PYAUDIO_WP:
         lb_peak = get_loopback_peak()
         dbg["lb_peak"] = lb_peak
+        if other_loud:
+            # The session meter already saw a non-Spotify app. Use total
+            # loopback only to report the stronger of the two peaks.
+            return True, max(other_peak, lb_peak), "other-session", dbg
         if lb_peak > 0.0:
             if not spotify_paused:
                 spotify_peak = float(dbg.get("spotify_peak", 0.0) or 0.0)
@@ -638,6 +864,8 @@ def measure_game_loud(
             # the game meter.
             return lb_peak >= PROCESS_LOOPBACK_LOUD, lb_peak, "loopback", dbg
 
+    if other_status == "ok":
+        return other_loud, other_peak, "other-session", dbg
     return False, 0.0, "none", dbg
 
 
@@ -661,6 +889,8 @@ def format_debug(dbg: dict, mode: str = "") -> str:
     spotify_peak = float(dbg.get("spotify_peak", 0))
     spotify_db = float(dbg.get("spotify_db", -60))
     spotify_stat = str(dbg.get("spotify_status", "") or "")
+    other_peak = float(dbg.get("other_peak", 0))
+    other_stat = str(dbg.get("other_status", "") or "")
     lb_peak = float(dbg.get("lb_peak", 0))
     
     extra = f" mode={mode}" if mode else ""
@@ -671,9 +901,12 @@ def format_debug(dbg: dict, mode: str = "") -> str:
     spotify_str = f" spotify_peak={spotify_peak:.4f} spotify_db={spotify_db:.1f}"
     if spotify_stat and spotify_stat != "ok":
         spotify_str += f" spotify={spotify_stat}"
+    other_str = f" other_peak={other_peak:.4f}"
+    if other_stat and other_stat != "ok":
+        other_str += f" other={other_stat}"
     
     return (
-        f"{fg} pids={dbg.get('pids', 0)}{game_str}{spotify_str}{lb_str} ok-meter{extra}"
+        f"{fg} pids={dbg.get('pids', 0)}{game_str}{spotify_str}{other_str}{lb_str} ok-meter{extra}"
     )
 
 
@@ -736,6 +969,18 @@ class GameMusicDetector:
     @property
     def is_loud(self) -> bool:
         return self._last_loud
+
+    @property
+    def other_peak(self) -> float:
+        return float(self._last_dbg.get("other_peak", 0.0) or 0.0)
+
+    @property
+    def other_loud(self) -> bool:
+        return bool(self._last_dbg.get("other_loud", False))
+
+    @property
+    def other_status(self) -> str:
+        return str(self._last_dbg.get("other_status", "") or "")
 
     def debug_line(self) -> str:
         return format_debug(self._last_dbg, self._last_mode)

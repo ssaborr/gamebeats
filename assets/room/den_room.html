@@ -1,0 +1,59 @@
+<!doctype html><html><head><meta charset="utf-8">
+<style>
+@font-face { font-family:'Silkscreen'; src:url('file:///C:/Users/Sabor/Desktop/GameBeats_fixed/assets/fonts/Silkscreen-Regular.ttf'); }
+html,body { margin:0; padding:0; width:1600px; height:1000px; background:#1b1030; overflow:hidden; }
+svg { display:block; width:1600px; height:1000px; image-rendering:pixelated; }
+</style></head><body><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 200" width="1600" height="1000"
+     shape-rendering="crispEdges" preserveAspectRatio="none" style="display:block">
+  <defs>
+    <pattern id="wall" width="8" height="8" patternUnits="userSpaceOnUse"><rect width="8" height="8" fill="#28182F"/><path d="M0 7h1M6 2h1" stroke="#342035"/></pattern>
+    <pattern id="floor" width="51" height="14" patternUnits="userSpaceOnUse"><rect width="51" height="14" fill="#54303A"/><path d="M0 13h51M1 0v13M30 4h12M9 9h11" stroke="#381F30"/><path d="M3 1h46" stroke="#75403F"/></pattern>
+    <pattern id="dither" width="4" height="4" patternUnits="userSpaceOnUse"><rect width="1" height="1" fill="#FF8A3D"/><rect x="2" y="2" width="1" height="1" fill="#FF8A3D"/></pattern>
+    <pattern id="peg" width="5" height="5" patternUnits="userSpaceOnUse"><rect width="5" height="5" fill="#54303A"/><rect x="2" y="2" width="1" height="1" fill="#1A1111"/></pattern>
+    <pattern id="scanline" width="1" height="2" patternUnits="userSpaceOnUse"><rect width="1" height="1" fill="#1A1111" opacity=".22"/></pattern>
+  </defs>
+  <rect width="320" height="200" fill="#1B1030"/><path d="M0 0h320v143H0z" fill="url(#wall)"/>
+  <path d="M0 0h10v140H0z" fill="#1B1030"/><path d="M10 140h310v4H10" fill="#7A3E0E"/><path d="M0 145h320v55H0" fill="url(#floor)"/><path d="M0 142h320v3H0" fill="#1A1111"/>
+  <path d="M109 20h104v83H109z" fill="#1A1111"/><path d="M112 22h98v77h-98" fill="#7A3E0E"/><path d="M116 26h90v68h-90" fill="#4C2147"/>
+  <path d="M116 48h90v46h-90" fill="#7A2E5B"/><path d="M116 63h90v31h-90" fill="url(#dither)"/><path d="M116 79h90v15h-90" fill="#FF8A3D"/>
+  <g fill="#FFF3D0"><path d="M127 34h1v3h-1zm-1 1h3v1h-3zM174 30h1v3h-1zm-1 1h3v1h-3zM192 43h1v3h-1zm-1 1h3v1h-3zM145 42h1v1h-1zM185 28h1v1h-1zM158 32h1v1h-1z"/></g>
+  <path fill="#FDB75C" d="M187 51h7v2h2v7h-2v2h-7v-2h-2v-7h2z"/><path fill="#7A2E5B" d="M190 50h5v8h-5z"/>
+  <path fill="#342035" d="M116 87h5v-8h5v5h5v-13h4v-3h3v17h6v-8h7v7h7v-13h2v-7h1v7h4v13h4v-5h8v8h5v-11h7v-5h3v15h5v-4h8v12h-90z"/>
+  <g fill="#FDB75C"><path d="M133 77h1v2h-1zm0 7h1v2h-1zm28-4h1v2h-1zm24 2h1v2h-1zm9 6h1v2h-1z"/></g>
+  <path fill="#7A3E0E" d="M158 24h3v71h-3zM114 58h94v3h-94z"/><path fill="#FDB75C" d="M110 97h104v3H110z"/><path fill="#1A1111" d="M106 100h112v4H106z"/>
+  <path fill="#7A2E5B" d="M107 22h7v70h-4v-7h-3zM208 22h7v63h-3v7h-4z"/>
+  <g>
+    <path d="M230 25h66v54h-66z" fill="#1A1111"/><path d="M233 28h60v47h-60z" fill="#54303A"/><path d="M233 29h60v4h-60z" fill="#7A3E0E"/>
+    <g><path d="M237 39h5v31h-5z" fill="#7CFFC4"/><path d="M238 44h3v14h-3z" fill="#1B1030"/><path d="M239 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M244 39h5v31h-5z" fill="#FDB75C"/><path d="M245 44h3v14h-3z" fill="#1B1030"/><path d="M246 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M251 39h5v31h-5z" fill="#7A2E5B"/><path d="M252 44h3v14h-3z" fill="#1B1030"/><path d="M253 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M258 39h5v31h-5z" fill="#FF8A3D"/><path d="M259 44h3v14h-3z" fill="#1B1030"/><path d="M260 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M265 39h5v31h-5z" fill="#FFF3D0"/><path d="M266 44h3v14h-3z" fill="#1B1030"/><path d="M267 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M272 39h5v31h-5z" fill="#7A2E5B"/><path d="M273 44h3v14h-3z" fill="#1B1030"/><path d="M274 47v8" stroke="#FFF3D0"/></g>
+    <g><path d="M279 39h5v31h-5z" fill="#7CFFC4"/><path d="M280 44h3v14h-3z" fill="#1B1030"/><path d="M281 47v8" stroke="#FFF3D0"/></g>
+    <path d="M229 71h69v6h-69z" fill="#7A3E0E"/><path d="M229 71h69v2h-69z" fill="#FF8A3D"/><path d="M237 77h3v5h-3zm48 0h3v5h-3z" fill="#1A1111"/>
+  </g>
+  <g>
+    <path d="M238 87h52v35h-52z" fill="#1A1111"/><path d="M240 89h48v30h-48z" fill="url(#peg)"/>
+    <path d="M244 94h9v13h-9zm15 0h9v13h-9zm15 0h9v13h-9z" fill="#1A1111"/><path d="M246 96h5v5h-5zm15 5h5v4h-5zm15-5h5v5h-5z" fill="#7CFFC4"/>
+    <path d="M245 113h36" stroke="#1A1111" stroke-width="2"/><path d="M266 110h4v6h-4z" fill="#FDB75C"/>
+  </g>
+  <path fill="#1A1111" d="M25 81h49v6h5v36H20V87h5zM32 123h4v5h-4zm31 0h4v5h-4z"/><path fill="#7A3E0E" d="M24 87h50v33H24z"/><path fill="#54303A" d="M27 89h44v27H27z"/>
+  <path fill="#7CFFC4" d="M29 92h32v2h2v18h-2v2H29v-2h-2V94h2z"/>
+  <g><path fill="#39786B" d="M29 105h5v-6h5v4h4v-8h7v8h4v-5h7v14H29z"/><path fill="#FFF3D0" d="M36 103h3v5h-3zm15-8h3v3h-3z"/><text x="45" y="110" font-size="3" fill="#1B1030" text-anchor="middle" font-family="Silkscreen">PLAYER 1</text></g>
+  <path d="M27 92h36v22H27z" fill="url(#scanline)"/><path fill="#FDB75C" d="M66 94h4v4h-4zm0 9h4v4h-4z"/><path fill="#1DB954" d="M67 112h2v2h-2z"/>
+  <path d="M16 128h69v6H16z" fill="#7A3E0E"/><path d="M16 128h69v2H16z" fill="#FF8A3D"/><path d="M21 134h5v24h-5zm54 0h5v24h-5z" fill="#381F30"/>
+  <path d="M32 138h30v11H32z" fill="#1A1111"/><path d="M35 140h24v2H35z" fill="#7CFFC4"/><path d="M38 145h6v2h-6zm9 0h6v2h-6z" fill="#54303A"/>
+  <path fill="#381F30" d="M97 167h95v4h9v10h-9v4H97v-4h-9v-10h9z"/><path fill="#7A2E5B" d="M99 169h91v3h7v7h-7v3H99v-3h-7v-7h7z"/><path fill="#FDB75C" d="M103 173h82v1h-82zm0 5h82v1h-82z"/>
+  <path fill="#1A1111" d="M124 135h38v4h10v8h6v19h-7v8h-49v-5h-9v-17h4v-9h7z"/><path fill="#7A2E5B" d="M125 138h35v5h9v8h5v13h-7v6h-44v-5h-7v-11h5v-10h4z"/><path fill="#A04763" d="M130 139h27v4h-27zm-7 5h5v9h-5zm-3 13h7v7h-7z"/>
+  <path d="M215 100h3v57h-3zM207 157h19v3h-19z" fill="#1A1111"/><path d="M208 88h16v5h4v8h-24v-8h4z" fill="#FDB75C"/><path d="M205 100h23v3h-23z" fill="#7A3E0E"/><path d="M211 104h12v1h-12zm-4 4h20v1h-20z" fill="#FF8A3D"/>
+  <g>
+    <path d="M245 144h11v-13h24v13h11v33h-46z" fill="#1A1111"/><path d="M249 138h22v25h-22z" fill="#7A2E5B"/><path d="M254 134h23v27h-23z" fill="#FDB75C"/><path d="M260 139h23v26h-23z" fill="#7CFFC4"/><path d="M263 142h17v17h-17z" fill="#1B1030"/><path d="M268 145h7v3h3v7h-3v3h-7v-3h-3v-7h3z" fill="#7A2E5B"/><path d="M270 149h3v3h-3z" fill="#FFF3D0"/>
+    <path d="M246 153h44v22h-44z" fill="#7A3E0E"/><path d="M248 155h40v3h-40zm0 8h40v3h-40zm0 8h40v2h-40z" fill="#A65F40"/><path d="M250 153h3v21h-3zm33 0h3v21h-3z" fill="#54303A"/>
+    <text x="269" y="170" font-family="Silkscreen" font-size="4" fill="#FFF3D0" text-anchor="middle">GOOD FINDS</text>
+  </g>
+  <path d="M94 148h8v9h-8zm8 2h3v5h-3z" fill="#FFF3D0"/><path d="M95 149h6v2h-6z" fill="#7A3E0E"/>
+  <path d="M273 180h20v6h-20z" fill="#1A1111"/><path d="M277 180v-3h12v3m-11 3h3m4 0h3" stroke="#FDB75C"/>
+  <path d="M92 87h10v11H92z" fill="#FF8A3D"/><path d="M95 86V73h3v13zm-4-9h4v6h-4zm7-9h4v12h-4z" fill="#7CFFC4"/><path d="M89 98h16v3H89z" fill="#7A3E0E"/>
+  <text x="18" y="191" font-family="Silkscreen" font-size="2.5" fill="#A65F40">A PLACE FOR YOUR SIDE QUESTS.</text>
+</svg></body></html>

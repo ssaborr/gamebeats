@@ -1,12 +1,77 @@
 """
 GameBeats design tokens and reusable UI helpers.
+
+The visual language follows the "Player 1's Room" pixel-art den:
+plum/navy walls, warm wood, cream type, mint/gold/orange accents.
 """
 
+import ctypes
+import os
 import sys
+from pathlib import Path
+
 import tkinter as tk
 import customtkinter as ctk
 
 UI_SCALE = 1.0
+
+
+# ── Bundled fonts ─────────────────────────────────────────────────────────────
+
+def assets_dir() -> Path:
+    """Locate the bundled assets directory in dev and compiled builds."""
+    candidates = []
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        candidates.append(Path(meipass) / "assets")
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).resolve().parent / "assets")
+    try:
+        here = Path(__file__).resolve()
+        # source/ui/theme.py -> project root/assets
+        candidates.append(here.parents[2] / "assets")
+        candidates.append(here.parents[1] / "assets")
+    except Exception:
+        pass
+    candidates.append(Path.cwd() / "assets")
+    for candidate in candidates:
+        try:
+            if candidate.exists():
+                return candidate
+        except Exception:
+            pass
+    return Path("assets")
+
+
+_FONTS_LOADED = False
+
+
+def load_bundled_fonts() -> bool:
+    """Load the open-source pixel fonts privately for this process."""
+    global _FONTS_LOADED
+    if _FONTS_LOADED:
+        return True
+    if sys.platform != "win32":
+        return False
+    font_dir = assets_dir() / "fonts"
+    names = (
+        "Silkscreen-Regular.ttf",
+        "Silkscreen-Bold.ttf",
+        "VT323-Regular.ttf",
+        "Fraunces-Italic.ttf",
+    )
+    loaded = False
+    for name in names:
+        path = font_dir / name
+        try:
+            if path.exists():
+                # FR_PRIVATE (0x10): process-local font, no system install.
+                ctypes.windll.gdi32.AddFontResourceExW(str(path), 0x10, 0)
+                loaded = True
+        except Exception:
+            pass
+    _FONTS_LOADED = loaded
+    return loaded
 
 
 def init_dpi():
@@ -14,15 +79,12 @@ def init_dpi():
     if sys.platform != "win32":
         return
     try:
-        import ctypes
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
         try:
-            import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             try:
-                import ctypes
                 ctypes.windll.user32.SetProcessDPIAware()
             except Exception:
                 pass
@@ -41,29 +103,46 @@ def scaled_px(n):
     """Fixed pixel size — do not scale layout with DPI."""
     return int(n)
 
+
 # ── Palette ───────────────────────────────────────────────────────────────────
-BG         = "#eef0f6"
-SIDEBAR    = "#f4f5fa"
-SURFACE    = "#ffffff"
-SURFACE2   = "#f4f5fa"
-SURFACE3   = "#eceff6"
-SURFACE4   = "#dde3ef"
-ACCENT     = "#6d28d9"
-ACCENT2    = "#7c3aed"
-ACCENT_HOV = "#5b21b6"
-ACCENT_DIM = "#ddd6fe"
-ACCENT_BG  = "#ede9fe"
-ACCENT_GLOW= "#f3efff"
-TEXT       = "#0f172a"
-TEXT_SEC   = "#4338ca"
-TEXT_MUTED = "#64748b"
-BORDER     = "#e2e8f0"
-BORDER2    = "#d1d9e8"
-RED        = "#ef4444"
-AMBER      = "#d97706"
-GREEN      = "#10b981"
-PURPLE     = "#8b5cf6"
-BLUE       = "#3b82f6"
+# Core room palette from the Figma den concept.
+PLUM      = "#1B1030"
+NIGHT     = "#1A1111"
+WALL      = "#28182F"
+WOOD      = "#7A3E0E"
+WOOD_DARK = "#381F30"
+DECK      = "#54303A"
+DECK_TOP  = "#75403F"
+MAGENTA   = "#7A2E5B"
+CREAM     = "#FFF3D0"
+GOLD      = "#FDB75C"
+ORANGE    = "#FF8A3D"
+MINT      = "#7CFFC4"
+ROSE      = "#D8B7B4"
+DUST      = "#C79AA5"
+
+BG         = PLUM
+SIDEBAR    = NIGHT
+SURFACE    = "#2A1830"
+SURFACE2   = "#381F30"
+SURFACE3   = "#332035"
+SURFACE4   = "#4A2A3F"
+ACCENT     = MINT
+ACCENT2    = GOLD
+ACCENT_HOV = "#A7FFD9"
+ACCENT_DIM = "#39786B"
+ACCENT_BG  = "#203A32"
+ACCENT_GLOW= "#1D2F2B"
+TEXT       = CREAM
+TEXT_SEC   = GOLD
+TEXT_MUTED = ROSE
+BORDER     = DECK
+BORDER2    = WOOD
+RED        = ORANGE
+AMBER      = GOLD
+GREEN      = MINT
+PURPLE     = "#C084FC"
+BLUE       = MINT
 
 SURF  = SURFACE
 SURF2 = SURFACE2
@@ -71,93 +150,164 @@ SURF3 = SURFACE3
 SURF4 = SURFACE4
 TEXT2 = TEXT_SEC
 TEXT3 = TEXT_MUTED
-SHADOW = BORDER
+SHADOW = NIGHT
 
-# ── Layout (compact) ────────────────────────────────────────────────────────
+# ── Layout ──────────────────────────────────────────────────────────────────
 SIDEBAR_W  = 228
 NAV_H      = 34
-WIN_W      = 960
-WIN_H      = 680
-RADIUS_SM  = 8
-RADIUS_MD  = 10
-RADIUS_LG  = 12
-RADIUS_XL  = 16
+WIN_W      = 1280
+WIN_H      = 860
+RADIUS_SM  = 3
+RADIUS_MD  = 5
+RADIUS_LG  = 7
+RADIUS_XL  = 10
 
 DEFAULT_PADX = 10
 DEFAULT_PADY = 6
 
-# ── Typography (text-forward) ───────────────────────────────────────────────
+# ── Typography ──────────────────────────────────────────────────────────────
+load_bundled_fonts()
+
 F_FALLBACK = ("Segoe UI Variable Display", "Segoe UI", "Inter", "Arial")
 F_UI       = F_FALLBACK[0]
-F_TITLE    = (F_UI, 21, "bold")
-F_HEADING  = (F_UI, 17, "bold")
-F_LABEL    = (F_UI, 15)
-F_BODY     = (F_UI, 14)
-F_SMALL    = (F_UI, 13)
-F_MICRO    = (F_UI, 12, "bold")
-F_CAPTION  = (F_UI, 12)
+F_PIXEL    = "Silkscreen" if _FONTS_LOADED else "Consolas"
+F_RETRO    = "VT323" if _FONTS_LOADED else "Consolas"
+F_SERIF    = "Fraunces 9pt" if _FONTS_LOADED else "Georgia"
+
+F_TITLE    = (F_SERIF, 29, "italic")
+F_HEADING  = (F_PIXEL, 13, "bold")
+F_LABEL    = (F_RETRO, 17)
+F_BODY     = (F_RETRO, 16)
+F_SMALL    = (F_RETRO, 14)
+F_MICRO    = (F_PIXEL, 9, "bold")
+F_CAPTION  = (F_PIXEL, 9)
 F_MONO     = ("Consolas", 11)
 
 NAV_ITEMS = [
-    ("main",     "Home",       "\u2302"),
-    ("games",    "My Games",   "\u25c6"),
-    ("blocked",  "Blocked",    "\u2298"),
-    ("settings", "Settings",   "\u2699"),
-    ("faq",      "FAQ & Help", "\u2139"),
+    ("main",     "The Den",       "\u2302"),
+    ("games",    "Game Shelf",    "\u25a5"),
+    ("playlists","Record Crate",  "\u25c9"),
+    ("blocked",  "Blocked",       "\u2298"),
+    ("settings", "Control Panel", "\u2692"),
+    ("faq",      "FAQ & Help",    "\u2726"),
 ]
+
+
+def pixel_font(size, weight="normal", slant="roman"):
+    return ctk.CTkFont(family=F_PIXEL, size=size, weight=weight, slant=slant)
+
+
+def retro_font(size, weight="normal", slant="roman"):
+    return ctk.CTkFont(family=F_RETRO, size=size, weight=weight, slant=slant)
+
+
+def serif_font(size, weight="normal", slant="italic"):
+    return ctk.CTkFont(family=F_SERIF, size=size, weight=weight, slant=slant)
 
 
 def ctk_font(size, weight="normal", slant="roman"):
     return ctk.CTkFont(family=F_UI, size=size, weight=weight, slant=slant)
 
 
+# ── Reusable widgets ────────────────────────────────────────────────────────
+
+def elevate_frame(parent, fg_color=SURFACE, border_color=BORDER, border_width=1,
+                  corner_radius=RADIUS_MD, **kwargs):
+    """A dark physical panel with a crisp pixel border."""
+    return ctk.CTkFrame(
+        parent, fg_color=fg_color, border_width=border_width,
+        border_color=border_color, corner_radius=corner_radius, **kwargs,
+    )
+
+
 def elevated_card(parent, pady=0, padx=0, fill=tk.BOTH, expand=True):
-    """Borderless content surface — no lines, minimal padding."""
+    """Dark content surface inspired by the den's wooden panels."""
     outer = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
     outer.pack(fill=fill, expand=expand, pady=pady, padx=padx)
 
     card = ctk.CTkFrame(
-        outer, fg_color=SURFACE, border_width=0, corner_radius=RADIUS_LG,
+        outer, fg_color=SURFACE, border_width=1,
+        border_color=BORDER, corner_radius=RADIUS_MD,
     )
     card.pack(fill=tk.BOTH, expand=True)
 
     content = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-    content.pack(fill=tk.BOTH, expand=True, padx=18, pady=16)
+    content.pack(fill=tk.BOTH, expand=True, padx=18, pady=14)
     return content
 
 
-def section_header(parent, text, pady=(0, 6)):
-    """Page title only — no rules or boxes."""
+def section_header(parent, text, pady=(0, 6), color=ACCENT2):
+    """Small physical label above a panel."""
     ctk.CTkLabel(
-        parent, text=text, fg_color="transparent",
-        text_color=TEXT, font=ctk_font(17, "bold"), anchor="w",
+        parent, text=str(text).upper(), fg_color="transparent",
+        text_color=color, font=pixel_font(11, "bold"), anchor="w",
     ).pack(fill=tk.X, padx=2, pady=pady)
 
 
 def page_title(parent, text, subtitle=None):
+    """Object-view heading with an eyebrow and a serif display title."""
     hdr = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
-    hdr.pack(fill=tk.X, pady=(0, 10))
+    hdr.pack(fill=tk.X, pady=(2, 14))
+
     col = ctk.CTkFrame(hdr, fg_color="transparent", corner_radius=0)
     col.pack(side=tk.LEFT, fill=tk.X, expand=True)
-    ctk.CTkLabel(
-        col, text=text, fg_color="transparent", text_color=TEXT,
-        font=ctk_font(19, "bold"), anchor="w",
-    ).pack(anchor="w")
+
     if subtitle:
         ctk.CTkLabel(
-            col, text=subtitle, fg_color="transparent", text_color=TEXT_MUTED,
-            font=ctk_font(13), anchor="w",
-        ).pack(anchor="w", pady=(1, 0))
+            col, text=str(subtitle).upper(), fg_color="transparent",
+            text_color=TEXT_MUTED, font=pixel_font(9), anchor="w",
+        ).pack(anchor="w")
+    ctk.CTkLabel(
+        col, text=text, fg_color="transparent", text_color=TEXT,
+        font=serif_font(28, slant="italic"), anchor="w",
+    ).pack(anchor="w", pady=(5, 0))
+    return hdr
+
+
+def object_header(parent, eyebrow, title, subtitle=None, on_back=None):
+    """Large Figma-style object-view heading with a back-to-room control."""
+    hdr = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
+    hdr.pack(fill=tk.X, pady=(2, 16))
+
+    left = ctk.CTkFrame(hdr, fg_color="transparent", corner_radius=0)
+    left.pack(side=tk.LEFT, fill=tk.X, expand=True)
+    ctk.CTkLabel(
+        left, text=str(eyebrow).upper(), fg_color="transparent",
+        text_color=TEXT_MUTED, font=pixel_font(10), anchor="w",
+    ).pack(anchor="w")
+    ctk.CTkLabel(
+        left, text=title, fg_color="transparent", text_color=TEXT,
+        font=serif_font(31, slant="italic"), anchor="w",
+    ).pack(anchor="w", pady=(6, 0))
+    if subtitle:
+        ctk.CTkLabel(
+            left, text=subtitle, fg_color="transparent", text_color=TEXT_MUTED,
+            font=retro_font(17), anchor="w", justify=tk.LEFT, wraplength=720,
+        ).pack(anchor="w", pady=(5, 0))
+
+    if on_back:
+        back = ctk.CTkFrame(hdr, fg_color="transparent", corner_radius=0)
+        back.pack(side=tk.RIGHT, anchor="n", padx=(16, 0))
+        ctk.CTkButton(
+            back, text="\u00d7", command=on_back, width=34, height=34,
+            fg_color=SURFACE2, text_color=GOLD, hover_color=DECK,
+            border_width=2, border_color=WOOD, corner_radius=0,
+            font=retro_font(24, "bold"),
+        ).pack()
+        ctk.CTkLabel(
+            back, text="BACK TO THE ROOM", fg_color="transparent",
+            text_color=TEXT_MUTED, font=pixel_font(8),
+        ).pack(pady=(4, 0))
     return hdr
 
 
 def primary_button(parent, text, command=None, width=120, height=34, **kwargs):
     return ctk.CTkButton(
         parent, text=text, command=command,
-        fg_color=ACCENT, text_color="#ffffff",
+        fg_color=ACCENT, text_color=BG,
         hover_color=ACCENT_HOV, corner_radius=RADIUS_SM,
         height=height, width=width,
-        font=ctk_font(13, "bold"), **kwargs,
+        font=pixel_font(11, "bold"), **kwargs,
     )
 
 
@@ -167,14 +317,43 @@ def ghost_button(parent, text, command=None, width=100, height=32, **kwargs):
         fg_color="transparent", text_color=TEXT,
         hover_color=SURFACE3, corner_radius=RADIUS_SM,
         height=height, width=width,
-        font=ctk_font(12, "bold"), **kwargs,
+        border_width=1, border_color=WOOD,
+        font=pixel_font(10, "bold"), **kwargs,
     )
+
+
+def pixel_button(parent, text, command=None, width=110, height=32,
+                 active=False, accent=False, **kwargs):
+    """Dark physical button that flashes mint on hover."""
+    normal_bg = ACCENT if accent else (ACCENT_BG if active else SURFACE2)
+    normal_fg = BG if accent else (ACCENT if active else TEXT)
+    btn = ctk.CTkButton(
+        parent, text=text, command=command, width=width, height=height,
+        fg_color=normal_bg, text_color=normal_fg,
+        hover_color=ACCENT if not accent else ACCENT_HOV,
+        border_width=2, border_color=WOOD, corner_radius=0,
+        font=pixel_font(10, "bold"), **kwargs,
+    )
+    if not accent:
+        def _enter(_e):
+            try:
+                btn.configure(text_color=BG)
+            except Exception:
+                pass
+        def _leave(_e):
+            try:
+                btn.configure(text_color=normal_fg)
+            except Exception:
+                pass
+        btn.bind("<Enter>", _enter, add="+")
+        btn.bind("<Leave>", _leave, add="+")
+    return btn
 
 
 def info_banner(parent, text, color="transparent", fg=ACCENT):
     return ctk.CTkLabel(
         parent, text=text, fg_color=color, text_color=fg,
-        font=ctk_font(13), anchor="w", justify=tk.LEFT,
+        font=retro_font(15), anchor="w", justify=tk.LEFT,
         padx=0, pady=4, corner_radius=0,
     )
 
@@ -186,8 +365,14 @@ def divider(parent, pady=(8, 8)):
     )
 
 
+def rule(parent, color=BORDER, pady=(4, 8)):
+    ctk.CTkFrame(parent, fg_color=color, height=2, corner_radius=0).pack(
+        fill=tk.X, pady=pady,
+    )
+
+
 class SidebarPanel(ctk.CTkFrame):
-    """Compact sidebar — no separator lines."""
+    """Legacy compact sidebar. Kept for compatibility; the den uses a footer nav."""
 
     def __init__(self, parent, on_nav, logo_photo=None, **kw):
         super().__init__(
@@ -218,19 +403,19 @@ class SidebarPanel(ctk.CTkFrame):
         else:
             ctk.CTkLabel(
                 brand_row, text="\u266a", fg_color="transparent",
-                text_color=ACCENT, font=ctk_font(18, "bold"),
+                text_color=ACCENT, font=pixel_font(18, "bold"),
             ).pack(side=tk.LEFT, padx=(0, 10))
 
         text_col = ctk.CTkFrame(brand_row, fg_color="transparent", corner_radius=0)
         text_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ctk.CTkLabel(
-            text_col, text="GameBeats", fg_color="transparent",
-            text_color=TEXT, font=ctk_font(15, "bold"), anchor="w",
+            text_col, text="GAMEBEATS", fg_color="transparent",
+            text_color=TEXT, font=pixel_font(14, "bold"), anchor="w",
         ).pack(fill=tk.X)
         ctk.CTkLabel(
-            text_col, text="Music for your game", fg_color="transparent",
-            text_color=TEXT_MUTED, font=ctk_font(12), anchor="w",
+            text_col, text="THE DEN / VOL. 01", fg_color="transparent",
+            text_color=TEXT_MUTED, font=pixel_font(8), anchor="w",
         ).pack(fill=tk.X)
 
         nav_section = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
@@ -246,18 +431,10 @@ class SidebarPanel(ctk.CTkFrame):
         footer = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         footer.pack(fill=tk.X, padx=14, pady=(0, 12))
 
-        foot_row = ctk.CTkFrame(footer, fg_color="transparent", corner_radius=0)
-        foot_row.pack(fill=tk.X)
-
         ctk.CTkLabel(
-            foot_row, text="\u25cf  Ready", fg_color="transparent",
-            text_color=TEXT_MUTED, font=ctk_font(12),
+            footer, text="\u25cf  READY", fg_color="transparent",
+            text_color=TEXT_MUTED, font=pixel_font(8),
         ).pack(side=tk.LEFT)
-
-        ctk.CTkLabel(
-            foot_row, text="@ssaborr", fg_color="transparent",
-            text_color=TEXT_MUTED, font=ctk_font(11),
-        ).pack(side=tk.RIGHT)
 
         self.set_active("main")
 
@@ -276,13 +453,13 @@ class SidebarPanel(ctk.CTkFrame):
 
         icon_lbl = ctk.CTkLabel(
             inner, text=icon, width=24, fg_color="transparent",
-            text_color=TEXT_MUTED, font=ctk_font(14),
+            text_color=TEXT_MUTED, font=retro_font(16),
         )
         icon_lbl.pack(side=tk.LEFT, padx=(4, 0))
 
         text_lbl = ctk.CTkLabel(
             inner, text=label, fg_color="transparent",
-            text_color=TEXT_MUTED, font=ctk_font(13), anchor="w",
+            text_color=TEXT_MUTED, font=pixel_font(9), anchor="w",
         )
         text_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
@@ -327,7 +504,7 @@ class SidebarPanel(ctk.CTkFrame):
 
         w["pill"].configure(fg_color=bg)
         w["icon"].configure(text_color=icon_c)
-        w["label"].configure(text_color=text_c, font=ctk_font(13, weight))
+        w["label"].configure(text_color=text_c, font=pixel_font(9, weight))
 
     def set_active(self, page):
         self._active = page
@@ -336,4 +513,5 @@ class SidebarPanel(ctk.CTkFrame):
             self._paint_item(p)
 
 
+load_bundled_fonts()
 init_dpi()

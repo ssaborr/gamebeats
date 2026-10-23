@@ -7,8 +7,8 @@ echo  GameBeats Release Build
 echo ============================================
 echo.
 
-echo [0/4] Cleaning GameBeats AppData for fresh test...
-if exist "%APPDATA%\GameBeats" rmdir /s /q "%APPDATA%\GameBeats"
+echo [0/4] Preserving your saved GameBeats login and settings...
+echo (AppData is intentionally NOT deleted; your Spotify web login stays valid.)
 echo.
 
 where py >nul 2>&1
@@ -33,7 +33,7 @@ if exist "%~dp0dist_release" rmdir /s /q "%~dp0dist_release"
 if exist "%~dp0build_release" rmdir /s /q "%~dp0build_release"
 
 pushd "%~dp0source"
-py -m pip install nuitka
+py -m pip install "nuitka==4.1.2" --quiet
 py -m nuitka ^
     --standalone ^
     --windows-console-mode=disable ^

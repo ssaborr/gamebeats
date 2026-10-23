@@ -51,9 +51,12 @@ if IS_WINDOWS:
     EVENT_SYSTEM_FOREGROUND = 0x0003
     WINEVENT_OUTOFCONTEXT   = 0x0000
 
-    APPCOMMAND_MEDIA_PAUSE     = 47
-    APPCOMMAND_MEDIA_PLAY      = 46
-    APPCOMMAND_MEDIA_PLAYPAUSE = 14
+    APPCOMMAND_MEDIA_NEXTTRACK     = 11
+    APPCOMMAND_MEDIA_PREVIOUSTRACK = 12
+    APPCOMMAND_MEDIA_STOP          = 13
+    APPCOMMAND_MEDIA_PLAYPAUSE     = 14
+    APPCOMMAND_MEDIA_PLAY          = 46
+    APPCOMMAND_MEDIA_PAUSE         = 47
 
     # SendInput structures for reliable media key injection
     VK_MEDIA_PLAY_PAUSE = 0xB3
@@ -296,6 +299,44 @@ def _find_spotify_hwnds(logger=None):
     if logger:
         logger(f"Found {len(found)} Spotify HWNDs.")
     return found
+
+
+def _find_spotify_window_titles(logger=None) -> list[str]:
+    """Return all non-empty window titles belonging to Spotify.exe processes."""
+    if not IS_WINDOWS or not HAS_PSUTIL:
+        return []
+
+    spotify_pids = set()
+    for proc in psutil.process_iter(["pid", "name"]):
+        try:
+            if (proc.info.get("name") or "").lower() == "spotify.exe":
+                spotify_pids.add(proc.info["pid"])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+
+    if not spotify_pids:
+        return []
+
+    titles = []
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def _enum(hwnd, _):
+        n = user32.GetWindowTextLengthW(hwnd) + 1
+        buf = ctypes.create_unicode_buffer(n)
+        user32.GetWindowTextW(hwnd, buf, n)
+        title = (buf.value or "").strip()
+
+        if not title or "GameBeats" in title:
+            return True
+
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if int(pid.value) in spotify_pids:
+            titles.append(title)
+        return True
+
+    user32.EnumWindows(_enum, 0)
+    return titles
 
 
 def _foreground_hwnd():
@@ -609,7 +650,7 @@ class SpotifyDesktopController:
             played = self._send_playback_command("play", use_toggle=False)
 
         if not played:
-            played = self._send_input_media_key(VK_MEDIA_PLAY_PAUSE)
+            played = self._uia_toggle_playback()
 
         self._remember_playback_state(True, paused_by_game=False)
         self._log(f"Spotify desktop track URI sent: {uri}")
@@ -902,7 +943,7 @@ class SpotifyDesktopController:
         # kickstart loop, but without audio verification (track is silent by design).
         self._send_playback_command("play", use_toggle=False)
         time.sleep(0.5)
-        self._send_input_media_key(VK_MEDIA_PLAY_PAUSE)
+        self._uia_toggle_playback()
         time.sleep(0.3)
         self._send_playback_command("toggle", use_toggle=True)
 
@@ -1063,14 +1104,10 @@ class SpotifyDesktopController:
             if self._send_appcommand_to_spotify(APPCOMMAND_MEDIA_PLAYPAUSE, "toggle"):
                 _restore_foreground(fg)
                 return True
-            if self._send_input_media_key(VK_MEDIA_PLAY_PAUSE):
-                self._log("Sent global media play/pause key.")
-                _restore_foreground(fg)
-                return True
-            if self._powershell_sendkeys(179):
-                self._log("Sent PowerShell play/pause fallback.")
-                _restore_foreground(fg)
-                return True
+            # Do NOT fall back to a global media key here.  Windows routes it
+            # to the currently active media session, which may be the other
+            # app whose audio just stopped — resuming that app instead of
+            # Spotify.  Targeted Spotify commands only.
 
         self._last_error = "Could not send a Spotify media command."
         _restore_foreground(fg)
@@ -1078,13 +1115,11 @@ class SpotifyDesktopController:
 
     def _media_pause(self) -> bool:
         """Pause Spotify. Spotify stays in the background."""
-        self._clear_mixer_mute()
-        return self._send_playback_command("pause", use_toggle=False)
+        return self.ensure_paused(paused_by_game=False)
 
     def _media_play(self) -> bool:
         """Resume Spotify. Spotify stays in the background."""
-        self._clear_mixer_mute()
-        return self._send_playback_command("play", use_toggle=False)
+        return self.ensure_playing()
 
     def _set_playback_paused(self, paused: bool) -> bool:
         """
@@ -1119,59 +1154,292 @@ class SpotifyDesktopController:
             self._remember_playback_state(True, paused_by_game=False)
             return True
 
-    def ensure_paused(self) -> bool:
-        """Make Spotify paused, regardless of whether GameBeats paused it before."""
-        self._clear_mixer_mute()
-        if self._paused_by_game:
-            self._remember_playback_state(False, paused_by_game=True)
+    def _desktop_is_playing(self):
+        """
+        Check if Spotify desktop is currently playing music.
+        Returns:
+            True: A track is playing (local status or our confirmed command state).
+            False: Spotify is paused.
+            None: Cannot determine (e.g. Spotify not running).
+        """
+        local = self._local_is_playing()
+        if local is not None:
+            return bool(local)
+        # After an explicit play/pause command, trust that state.  Spotify's
+        # window title normally keeps showing the track name while paused, so
+        # title-only detection reported "playing" for a paused app.  That made
+        # resume a no-op and pause send a second (resuming) toggle.
+        if getattr(self, "_playback_state_known", False):
+            return bool(getattr(self, "_is_playing", False))
+        titles = _find_spotify_window_titles(self._log)
+        if titles:
+            for t in titles:
+                clean = t.strip()
+                if clean and clean not in ("Spotify", "Spotify Free", "Spotify Premium"):
+                    return True
+            return False
+        return None
+
+    def _is_spotify_main_window(self, hwnd) -> bool:
+        """Filter out Spotify helper windows (GDI+, IME, MSCTFIME UI)."""
+        try:
+            user32 = ctypes.windll.user32
+            cls = ctypes.create_unicode_buffer(256)
+            title = ctypes.create_unicode_buffer(512)
+            user32.GetClassNameW(hwnd, cls, 256)
+            user32.GetWindowTextW(hwnd, title, 512)
+            if cls.value not in ("Chrome_WidgetWin_1", "Chrome_WidgetWin_0"):
+                return False
+            if title.value.startswith("GDI+"):
+                return False
             return True
-        if self._playback_state_known and not self._is_playing:
-            self._paused_by_game = True
+        except Exception:
+            return False
+
+    def _show_spotify_for_uia(self, hwnd) -> bool:
+        """Briefly show a hidden Spotify window so Chromium builds its UIA tree.
+
+        Returns True when the window was already visible.  SW_SHOWNOACTIVATE
+        plus HWND_BOTTOM means this does not take focus from the game.
+        """
+        try:
+            user32 = ctypes.windll.user32
+            was_visible = bool(user32.IsWindowVisible(hwnd))
+            if not was_visible:
+                user32.ShowWindow(hwnd, 4)  # SW_SHOWNOACTIVATE
+                user32.SetWindowPos(
+                    hwnd, 1, 0, 0, 0, 0,  # HWND_BOTTOM
+                    0x0001 | 0x0002 | 0x0010,  # NOSIZE|NOMOVE|NOACTIVATE
+                )
+                time.sleep(0.25)
+            return was_visible
+        except Exception:
             return True
 
-        if self._send_playback_command("pause", use_toggle=False):
-            self._remember_playback_state(False, paused_by_game=True)
+    def _hide_spotify_after_uia(self, hwnd, was_visible: bool):
+        if hwnd and not was_visible:
+            try:
+                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+            except Exception:
+                pass
+
+    def _uia_player_button(self):
+        """Locate Spotify's own play/pause button through UI Automation.
+
+        Returns (hwnd, button, was_visible).  InvokePattern targets that
+        specific Spotify button - it cannot be routed to YouTube/another
+        media app like a global media key.
+        """
+        try:
+            from pywinauto import Application
+        except Exception:
+            return None, None, True
+
+        for hwnd in _find_spotify_hwnds():
+            if not self._is_spotify_main_window(hwnd):
+                continue
+            was_visible = self._show_spotify_for_uia(hwnd)
+            try:
+                app = Application(backend="uia").connect(handle=hwnd)
+                win = app.window(handle=hwnd)
+                group = win.child_window(
+                    title="Player controls", control_type="Group"
+                )
+                if not group.exists(timeout=0.4):
+                    self._hide_spotify_after_uia(hwnd, was_visible)
+                    continue
+                buttons = group.descendants(control_type="Button")
+                exact = [
+                    b for b in buttons
+                    if b.window_text() in ("Play", "Pause")
+                ]
+                if exact:
+                    return hwnd, exact[0], was_visible
+                # Fallback: the transport row is Previous, Play/Pause, Next.
+                if len(buttons) >= 3:
+                    return hwnd, buttons[2], was_visible
+                self._hide_spotify_after_uia(hwnd, was_visible)
+            except Exception:
+                self._hide_spotify_after_uia(hwnd, was_visible)
+                continue
+        return None, None, True
+
+    def _uia_run(self, func, timeout: float = 6.0) -> bool:
+        """Run a UI Automation call on its own STA thread.
+
+        The audio-monitor thread already has COM initialized in MTA mode
+        (pycaw), and UI Automation needs STA.  A short-lived worker thread
+        gives UIA a clean apartment and keeps the monitor loop responsive.
+        """
+        import threading
+
+        result = {"ok": False, "error": ""}
+
+        def worker():
+            # UI Automation requires an STA apartment.  The monitor thread
+            # already has MTA COM (pycaw), so use a dedicated STA thread.
+            hr = ctypes.windll.ole32.CoInitializeEx(None, 0x2)  # STA
+            try:
+                result["ok"] = bool(func())
+            except Exception as ex:
+                result["error"] = str(ex)
+            finally:
+                if hr in (0, 1):  # S_OK / S_FALSE
+                    try:
+                        ctypes.windll.ole32.CoUninitialize()
+                    except Exception:
+                        pass
+
+        thread = threading.Thread(target=worker, daemon=True)
+        thread.start()
+        thread.join(timeout)
+        if thread.is_alive():
+            self._last_error = "UI Automation timed out"
+            self._log(self._last_error)
+            return False
+        if result["error"]:
+            self._last_error = f"UI Automation error: {result['error']}"
+            self._log(self._last_error)
+        return bool(result["ok"])
+
+    def _uia_toggle_playback(self) -> bool:
+        """Press Spotify's actual play/pause button.  Returns True if invoked."""
+        return self._uia_run(self._uia_toggle_playback_sync)
+
+    def _uia_toggle_playback_sync(self) -> bool:
+        hwnd, button, was_visible = self._uia_player_button()
+        if button is None:
+            return False
+        try:
+            name = (button.window_text() or "?").strip()
+            button.invoke()
+            self._log(
+                f"Pressed Spotify's own {name!r} control via UI Automation "
+                f"(hwnd={hex(hwnd)})."
+            )
             return True
+        except Exception as ex:
+            self._last_error = f"UI Automation play/pause failed: {ex}"
+            self._log(self._last_error)
+            return False
+        finally:
+            self._hide_spotify_after_uia(hwnd, was_visible)
 
-        state = self._local_is_playing()
-        if state is False:
-            self._remember_playback_state(False, paused_by_game=True)
-            return True
+    def _uia_invoke_transport(self, title: str) -> bool:
+        """Press a specific Spotify transport button (Next/Previous)."""
+        return self._uia_run(lambda: self._uia_invoke_transport_sync(title))
 
-        if state is True or (self._playback_state_known and self._is_playing):
-            if self._send_playback_command("toggle", use_toggle=True):
-                self._remember_playback_state(False, paused_by_game=True)
-                return True
+    def _uia_invoke_transport_sync(self, title: str) -> bool:
+        try:
+            from pywinauto import Application
+        except Exception:
+            return False
 
+        for hwnd in _find_spotify_hwnds():
+            if not self._is_spotify_main_window(hwnd):
+                continue
+            was_visible = self._show_spotify_for_uia(hwnd)
+            try:
+                app = Application(backend="uia").connect(handle=hwnd)
+                win = app.window(handle=hwnd)
+                group = win.child_window(
+                    title="Player controls", control_type="Group"
+                )
+                if not group.exists(timeout=0.4):
+                    continue
+                button = group.child_window(
+                    title=title, control_type="Button"
+                )
+                if button.exists(timeout=0.3):
+                    button.invoke()
+                    self._log(
+                        f"Pressed Spotify's own {title!r} control via "
+                        f"UI Automation (hwnd={hex(hwnd)})."
+                    )
+                    return True
+            except Exception:
+                continue
+            finally:
+                self._hide_spotify_after_uia(hwnd, was_visible)
         return False
+
+    def _desktop_audible(self, threshold: float = 0.0015) -> bool:
+        # Sample briefly: a single WASAPI read can land between beats and
+        # report silence while Spotify is actually playing.
+        for _ in range(3):
+            try:
+                from core.audio_monitor import get_desktop_spotify_peak
+                peak, status = get_desktop_spotify_peak()
+                if status == "ok" and peak >= threshold:
+                    return True
+            except Exception:
+                return False
+            time.sleep(0.08)
+        return False
+
+    def ensure_paused(self, paused_by_game: bool = False) -> bool:
+        """Make Spotify paused (idempotent)."""
+        self._clear_mixer_mute()
+
+        # If Spotify is not audible, it is already paused (or between tracks).
+        # Do not send a toggle: that could start playback instead of stopping it.
+        if not self._desktop_audible():
+            self._remember_playback_state(False, paused_by_game=paused_by_game)
+            return True
+
+        # Spotify is audible: press its own UI play/pause button.  This is
+        # strictly targeted at Spotify; never a global media key and never a
+        # window media command that Windows could route to another app.
+        ok = self._uia_toggle_playback()
+        if not ok:
+            self._last_error = (
+                "Could not press Spotify's play/pause control; "
+                "not sending a global media key."
+            )
+            try:
+                self._log(self._last_error)
+            except Exception:
+                pass
+            return False
+
+        time.sleep(0.08)
+        self._remember_playback_state(False, paused_by_game=paused_by_game)
+        return True
 
     def ensure_playing(self) -> bool:
-        """Make Spotify play using direct playback commands (media keys only)."""
+        """Make Spotify play (idempotent; never toggles a playing track off)."""
         self._clear_mixer_mute()
-        state = self._local_is_playing()
-        if state is True:
-            self._remember_playback_state(True, paused_by_game=False)
-            return True
-        if (
-            state is None
-            and self._playback_state_known
-            and self._is_playing
-            and not self._paused_by_game
-        ):
-            return True
 
-        # Aggressive playback trigger: try direct play, then the global media key
-        # Global media keys (SendInput) are the most reliable for Spotify Free.
-        if (self._send_playback_command("play", use_toggle=False) or 
-            self._send_input_media_key(VK_MEDIA_PLAY_PAUSE) or
-            self._send_playback_command("toggle", use_toggle=True)):
-            
-            # Give it a moment to register before updating internal state
-            time.sleep(0.2)
+        if self._desktop_audible():
             self._remember_playback_state(True, paused_by_game=False)
             return True
 
-        return False
+        # Silent Spotify.  If we did not pause it ourselves, it may just be a
+        # quiet moment in a playing track - do not toggle it off.
+        if not getattr(self, "_paused_by_game", False):
+            known = getattr(self, "_playback_state_known", False)
+            if known and bool(getattr(self, "_is_playing", False)):
+                return True
+            if not known and self._desktop_is_playing() is True:
+                return True
+
+        # Resume the track we paused.  Press Spotify's own UI control so the
+        # command cannot land on YouTube or another media app.
+        ok = self._uia_toggle_playback()
+        if not ok:
+            self._last_error = (
+                "Could not press Spotify's play/pause control; "
+                "not sending a global media key."
+            )
+            try:
+                self._log(self._last_error)
+            except Exception:
+                pass
+            return False
+
+        time.sleep(0.08)
+        self._remember_playback_state(True, paused_by_game=False)
+        return True
 
     def _open_in_spotify(self, uri: str) -> str:
         """
@@ -1569,13 +1837,13 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
             return self.play_playlist(context_uri)
         return self.ensure_playing()
 
-    def pause(self):
+    def pause(self, paused_by_game: bool = False):
         """Pause Spotify using media keys. Spotify stays in background, game keeps focus."""
-        return self.ensure_paused()
+        return self.ensure_paused(paused_by_game=paused_by_game)
 
-    def force_pause(self):
+    def force_pause(self, paused_by_game: bool = False):
         """Force pause using media keys (same as pause())."""
-        return self.pause()
+        return self.pause(paused_by_game=paused_by_game)
 
     def minimize_window(self):
         """Instantly hide all Spotify windows (super refresh) - SYNCHRONOUS."""
@@ -1589,45 +1857,50 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
             return False
 
     def media_play_pause(self) -> bool:
-        """Send media play/pause key (179)."""
-        # Try SendInput first (global system), then fallback to PowerShell
-        if self._send_input_media_key(VK_MEDIA_PLAY_PAUSE):
+        """Toggle Spotify playback through Spotify's own UI control."""
+        if self._uia_toggle_playback():
             return True
-        return self._powershell_sendkeys(179)
+        return self._send_appcommand_to_spotify(
+            APPCOMMAND_MEDIA_PLAYPAUSE, "toggle"
+        )
 
     def media_stop(self) -> bool:
-        """Send media stop key (178)."""
-        if self._send_input_media_key(VK_MEDIA_STOP):
+        """Pause Spotify only if it is currently audible."""
+        if not self._desktop_audible():
             return True
-        return self._powershell_sendkeys(178)
+        return self._uia_toggle_playback()
 
     def media_next(self) -> bool:
-        """Send media next track key (176)."""
-        if self._send_input_media_key(VK_MEDIA_NEXT_TRACK):
+        """Skip to the next track in Spotify only."""
+        if self._uia_invoke_transport("Next"):
             return True
-        return self._powershell_sendkeys(176)
+        return self._send_appcommand_to_spotify(
+            APPCOMMAND_MEDIA_NEXTTRACK, "next"
+        )
 
     def media_prev(self) -> bool:
-        """Send media previous track key (177)."""
-        if self._send_input_media_key(VK_MEDIA_PREV_TRACK):
+        """Skip to the previous track in Spotify only."""
+        if self._uia_invoke_transport("Previous"):
             return True
-        return self._powershell_sendkeys(177)
+        return self._send_appcommand_to_spotify(
+            APPCOMMAND_MEDIA_PREVIOUSTRACK, "prev"
+        )
 
     @property
     def paused_by_game(self) -> bool:
         return self._paused_by_game
 
     def next_track(self):
-        return True
+        return self.media_next()
 
     def prev_track(self):
-        return True
+        return self.media_prev()
 
     def set_volume(self, percent):
         return True
 
     def get_playback_state(self):
-        state = self._local_is_playing()
+        state = self._desktop_is_playing()
         if state is not None:
             self._remember_playback_state(
                 state,
@@ -1676,7 +1949,7 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
                 duration_ms = 0
 
             if playing or name != "Spotify":
-                return {
+                track_info = {
                     "name": name,
                     "artist": artist,
                     "album_art": None,
@@ -1687,6 +1960,70 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
                     "playlist_uri": self._last_uri,
                     "context_uri": self._last_uri,
                 }
+                self._last_known_track_info = track_info
+                return track_info
+
+        # Extract track info and playback state from Spotify window titles
+        titles = _find_spotify_window_titles(self._log)
+        if titles:
+            for t in titles:
+                clean = t.strip()
+                if clean and clean not in ("Spotify", "Spotify Free", "Spotify Premium"):
+                    artist = ""
+                    name = clean
+                    if " - " in clean:
+                        artist, name = clean.split(" - ", 1)
+                        artist = artist.strip()
+                        name = name.strip()
+                    is_playing = True
+                    if getattr(self, "_playback_state_known", False):
+                        is_playing = bool(getattr(self, "_is_playing", False))
+                    track_info = {
+                        "name": name,
+                        "artist": artist,
+                        "album_art": None,
+                        "is_playing": is_playing,
+                        "progress_ms": 0,
+                        "duration_ms": 0,
+                        "uri": self._last_track_uri or self._last_uri,
+                        "playlist_uri": self._last_uri,
+                        "context_uri": self._last_uri,
+                    }
+                    if not getattr(self, "_playback_state_known", False):
+                        self._remember_playback_state(True)
+                    self._last_known_track_info = track_info
+                    return track_info
+
+            # All titles were "Spotify", so Spotify is paused (unless we have
+            # explicit command state that says otherwise).
+            if not getattr(self, "_playback_state_known", False):
+                self._remember_playback_state(False)
+            last = getattr(self, "_last_known_track_info", None)
+            if last:
+                res = dict(last)
+                res["is_playing"] = (
+                    bool(getattr(self, "_is_playing", False))
+                    if getattr(self, "_playback_state_known", False)
+                    else False
+                )
+                return res
+            return {
+                "name": "Spotify",
+                "artist": self._last_query[:40] or "Tag search",
+                "album_art": None,
+                "is_playing": False,
+                "progress_ms": 0,
+                "duration_ms": 0,
+                "uri": self._last_uri,
+                "playlist_uri": self._last_uri,
+                "context_uri": self._last_uri,
+            }
+
+        last = getattr(self, "_last_known_track_info", None)
+        if last:
+            res = dict(last)
+            res["is_playing"] = bool(self._is_playing)
+            return res
 
         if not self._is_playing:
             return None

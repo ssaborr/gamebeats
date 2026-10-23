@@ -395,7 +395,7 @@ class SpotifyController:
     def pause(self):
         return self._put("/me/player/pause")
 
-    def ensure_paused(self):
+    def ensure_paused(self, paused_by_game=False):
         return self.pause()
 
     def ensure_playing(self):

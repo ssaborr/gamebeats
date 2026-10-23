@@ -102,7 +102,7 @@ class OnboardingOverlay(ctk.CTkFrame):
             print(f"RENDER ERROR: {exc}")
             ctk.CTkLabel(self, text=f"Error on step {self._step}:\n{exc}",
                          fg_color="transparent", text_color=RED,
-                         font=("Segoe UI", 10), wraplength=380,
+                         font=T.retro_font(15), wraplength=380,
                          justify="left").pack(pady=40, padx=20)
             traceback.print_exc()
 
@@ -135,11 +135,11 @@ class OnboardingOverlay(ctk.CTkFrame):
 
     def _hero(self, parent, emoji, title, subtitle):
         ctk.CTkLabel(parent, text=emoji, fg_color="transparent",
-                     font=("Segoe UI", 52)).pack(pady=(40, 6))
+                     font=T.retro_font(44)).pack(pady=(40, 6))
         ctk.CTkLabel(parent, text=title, fg_color="transparent",
-                     text_color=TEXT, font=("Segoe UI", 21, "bold")).pack()
+                     text_color=TEXT, font=T.serif_font(30, "bold")).pack()
         ctk.CTkLabel(parent, text=subtitle, fg_color="transparent",
-                     text_color=TEXT2, font=("Segoe UI", 11),
+                     text_color=TEXT2, font=T.retro_font(16),
                      wraplength=350, justify="center").pack(pady=(6, 24))
 
     def _btn(self, parent, text, cmd, bg=ACCENT, fg="#000", disabled=False):
@@ -148,8 +148,8 @@ class OnboardingOverlay(ctk.CTkFrame):
         b = ctk.CTkButton(parent, text=text, command=cmd,
                           fg_color=bg, text_color=fg,
                           hover_color=_lighten(bg),
-                          font=("Segoe UI", 11, "bold"),
-                          corner_radius=10, height=42,
+                          font=T.pixel_font(9, "bold"),
+                          corner_radius=0, height=42,
                           state=state)
         return b
 
@@ -174,14 +174,14 @@ class OnboardingOverlay(ctk.CTkFrame):
         self._dots(self)
 
         ctk.CTkLabel(self, text="🎮", fg_color="transparent",
-                     font=("Segoe UI", 36)).pack(pady=(10, 4))
+                     font=T.retro_font(34)).pack(pady=(10, 4))
         ctk.CTkLabel(self, text="Welcome to GameBeats", fg_color="transparent",
-                     text_color=TEXT, font=("Segoe UI", 20, "bold")).pack()
+                     text_color=TEXT, font=T.serif_font(30, "bold")).pack()
         ctk.CTkLabel(self,
                      text="Plays music that matches your game's vibe — automatically.\n"
                           "Setup takes about 2 minutes.",
                      fg_color="transparent", text_color=TEXT2,
-                     font=("Segoe UI", 10), wraplength=340,
+                     font=T.retro_font(15), wraplength=340,
                      justify="center").pack(pady=(4, 14))
 
         features = [
@@ -191,12 +191,12 @@ class OnboardingOverlay(ctk.CTkFrame):
             ("⚡", "Runs silently in the background"),
         ]
         for icon, desc in features:
-            row = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=10)
+            row = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
             row.pack(fill=tk.X, padx=40, pady=2)
             ctk.CTkLabel(row, text=icon, fg_color="transparent",
-                         font=("Segoe UI", 13)).pack(side=tk.LEFT, padx=10, pady=8)
+                         font=T.retro_font(15)).pack(side=tk.LEFT, padx=10, pady=8)
             ctk.CTkLabel(row, text=desc, fg_color="transparent",
-                         text_color=TEXT, font=("Segoe UI", 10)).pack(side=tk.LEFT, pady=8)
+                         text_color=TEXT, font=T.retro_font(15)).pack(side=tk.LEFT, pady=8)
 
         ctk.CTkFrame(self, fg_color="transparent", height=20, corner_radius=0).pack()
 
@@ -205,9 +205,9 @@ class OnboardingOverlay(ctk.CTkFrame):
             self._next()
 
         ctk.CTkButton(self, text="  ❯  ", command=_go_next,
-                      fg_color=ACCENT, text_color="#000",
-                      hover_color=_lighten(ACCENT),
-                      font=("Segoe UI", 20, "bold"),
+                      fg_color=ACCENT, text_color=BG,
+                      hover_color=T.ACCENT_HOV,
+                      font=T.serif_font(30, "bold"),
                       corner_radius=50, width=80, height=56).pack()
 
     # ══════════════════════════════════════════════════════════════════════════
@@ -234,52 +234,52 @@ class OnboardingOverlay(ctk.CTkFrame):
 
         for step in steps:
             num, title, detail, url = step
-            card = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=10)
+            card = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
             card.pack(fill=tk.X, padx=40, pady=3)
 
             # Badge
             badge = ctk.CTkFrame(card, fg_color=ACCENT, width=28, height=28,
-                                  corner_radius=6)
+                                  corner_radius=0)
             badge.pack(side=tk.LEFT, padx=(12, 10), pady=12)
             badge.pack_propagate(False)
             ctk.CTkLabel(badge, text=num, fg_color="transparent",
-                         text_color="#000", font=("Segoe UI", 10, "bold")).place(
+                         text_color=BG, font=T.pixel_font(9, "bold")).place(
                 relx=.5, rely=.5, anchor="center")
 
-            col = ctk.CTkFrame(card, fg_color=SURF2, corner_radius=0)
+            col = ctk.CTkFrame(card, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
             col.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=10)
             ctk.CTkLabel(col, text=title, fg_color="transparent",
-                         text_color=TEXT, font=("Segoe UI", 10, "bold"),
+                         text_color=TEXT, font=T.pixel_font(9, "bold"),
                          anchor="w").pack(anchor=tk.W)
 
             if url:
                 lnk = ctk.CTkLabel(col, text=detail, fg_color="transparent",
-                                   text_color=ACCENT, font=("Segoe UI", 9, "underline"),
+                                   text_color=ACCENT, font=T.retro_font(14),
                                    cursor="hand2", anchor="w")
                 lnk.pack(anchor=tk.W)
                 lnk.bind("<Button-1>", lambda e, u=url: _open_url_hidden(u))
             else:
                 if num == "3":
-                    uri_row = ctk.CTkFrame(col, fg_color=SURF2, corner_radius=0)
+                    uri_row = ctk.CTkFrame(col, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
                     uri_row.pack(anchor=tk.W)
                     uri_lbl = ctk.CTkLabel(uri_row, text=REDIRECT_URI,
                                            fg_color=SURF3, text_color=ACCENT,
-                                           font=("Consolas", 9), corner_radius=4)
+                                           font=T.retro_font(14), corner_radius=0)
                     uri_lbl.pack(side=tk.LEFT, padx=(0, 6), ipadx=8, ipady=3)
                     self._copy_lbl = ctk.CTkLabel(uri_row, text="📋 Copy",
                                                    fg_color="transparent",
                                                    text_color=TEXT2,
-                                                   font=("Segoe UI", 9), cursor="hand2")
+                                                   font=T.retro_font(14), cursor="hand2")
                     self._copy_lbl.pack(side=tk.LEFT)
                     self._copy_lbl.bind("<Button-1>", self._copy_uri)
-                    warn_row = ctk.CTkFrame(col, fg_color=SURF2, corner_radius=0)
+                    warn_row = ctk.CTkFrame(col, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
                     warn_row.pack(anchor=tk.W, pady=(3, 0))
                     ctk.CTkLabel(warn_row, text="⚠  Must be 127.0.0.1 — NOT localhost",
                                  fg_color="transparent", text_color=AMBER,
-                                 font=("Segoe UI", 8, "bold")).pack(side=tk.LEFT)
+                                 font=T.pixel_font(7, "bold")).pack(side=tk.LEFT)
                 else:
                     ctk.CTkLabel(col, text=detail, fg_color="transparent",
-                                 text_color=TEXT2, font=("Segoe UI", 9),
+                                 text_color=TEXT2, font=T.retro_font(14),
                                  anchor="w").pack(anchor=tk.W)
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
@@ -287,7 +287,7 @@ class OnboardingOverlay(ctk.CTkFrame):
         ctk.CTkButton(btn_row, text="Open Dashboard ↗",
                       command=lambda: _open_url_hidden("https://developer.spotify.com/dashboard"),
                       fg_color=SURF2, text_color=ACCENT, hover_color=SURF3,
-                      font=("Segoe UI", 10, "bold"), corner_radius=8,
+                      font=T.pixel_font(9, "bold"), corner_radius=0,
                       height=38, width=180).pack()
 
         self._nav_row(self, next_text="I've done this →")
@@ -312,32 +312,32 @@ class OnboardingOverlay(ctk.CTkFrame):
 
         # Client ID
         ctk.CTkLabel(form, text="Client ID", fg_color="transparent",
-                     text_color=TEXT2, font=("Segoe UI", 10)).pack(anchor=tk.W, pady=(0, 3))
+                     text_color=TEXT2, font=T.retro_font(15)).pack(anchor=tk.W, pady=(0, 3))
         self._cid_entry = ctk.CTkEntry(form, textvariable=self._cid,
                                         fg_color=SURF2, border_color=BORDER,
-                                        text_color=TEXT, corner_radius=8,
-                                        font=("Consolas", 11), height=44)
+                                        text_color=TEXT, corner_radius=0,
+                                        font=T.retro_font(16), height=44)
         self._cid_entry.pack(fill=tk.X, pady=(0, 12))
 
         # Client Secret
         ctk.CTkLabel(form, text="Client Secret", fg_color="transparent",
-                     text_color=TEXT2, font=("Segoe UI", 10)).pack(anchor=tk.W, pady=(0, 3))
+                     text_color=TEXT2, font=T.retro_font(15)).pack(anchor=tk.W, pady=(0, 3))
         sec_row = ctk.CTkFrame(form, fg_color="transparent", corner_radius=0)
         sec_row.pack(fill=tk.X)
         self._sec_entry = ctk.CTkEntry(sec_row, textvariable=self._csec,
                                         fg_color=SURF2, border_color=BORDER,
-                                        text_color=TEXT, corner_radius=8,
-                                        font=("Consolas", 11), height=44, show="•")
+                                        text_color=TEXT, corner_radius=0,
+                                        font=T.retro_font(16), height=44, show="•")
         self._sec_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
         eye = ctk.CTkButton(sec_row, text="👁", width=44, height=44,
                              fg_color=SURF2, text_color=TEXT2, hover_color=SURF3,
-                             corner_radius=8, font=("Segoe UI", 14),
+                             corner_radius=0, font=T.retro_font(18),
                              command=self._toggle_sec)
         eye.pack(side=tk.LEFT, padx=(4, 0))
         self._show_sec = False
 
         self._cred_err = ctk.CTkLabel(form, text="", fg_color="transparent",
-                                       text_color=RED, font=("Segoe UI", 10))
+                                       text_color=RED, font=T.retro_font(15))
         self._cred_err.pack(anchor=tk.W, pady=(8, 0))
 
         self._nav_row(self, next_text="Next →", next_cmd=self._validate_creds)
@@ -369,11 +369,11 @@ class OnboardingOverlay(ctk.CTkFrame):
                    "and ask you to log in to Spotify.")
 
         # Quick checklist
-        chk = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=10)
+        chk = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
         chk.pack(fill=tk.X, padx=44, pady=(0, 16))
         ctk.CTkLabel(chk, text="Before clicking, make sure your Spotify app has:",
                      fg_color="transparent", text_color=TEXT2,
-                     font=("Segoe UI", 9, "bold")).pack(anchor=tk.W, padx=12, pady=(8, 4))
+                     font=T.pixel_font(8, "bold")).pack(anchor=tk.W, padx=12, pady=(8, 4))
         for line in [
             "✓  Redirect URI set to:  http://127.0.0.1:8888/callback",
             "✗  Remove any  http://localhost:8888/callback  entries",
@@ -381,39 +381,39 @@ class OnboardingOverlay(ctk.CTkFrame):
         ]:
             color = ACCENT if line.startswith("✓") else RED
             ctk.CTkLabel(chk, text=line, fg_color="transparent",
-                         text_color=color, font=("Consolas", 9), anchor="w").pack(
+                         text_color=color, font=T.retro_font(14), anchor="w").pack(
                 fill=tk.X, padx=12, pady=2)
         ctk.CTkFrame(chk, fg_color="transparent", height=8, corner_radius=0).pack()
 
         self._conn_status = ctk.CTkLabel(self, text="", fg_color="transparent",
-                                          text_color=TEXT2, font=("Segoe UI", 11),
+                                          text_color=TEXT2, font=T.retro_font(16),
                                           wraplength=360)
         self._conn_status.pack(pady=(0, 8))
 
         self._spinner = ctk.CTkLabel(self, text="", fg_color="transparent",
-                                      text_color=ACCENT, font=("Segoe UI", 24))
+                                      text_color=ACCENT, font=T.retro_font(24))
         self._spinner.pack()
 
         self._conn_btn = ctk.CTkButton(self, text="Connect Spotify ↗",
                                         command=self._do_connect,
-                                        fg_color=ACCENT, text_color="#000",
-                                        hover_color=_lighten(ACCENT),
-                                        font=("Segoe UI", 12, "bold"),
-                                        corner_radius=10, height=52, width=220)
+                                        fg_color=ACCENT, text_color=BG,
+                                        hover_color=T.ACCENT_HOV,
+                                        font=T.pixel_font(10, "bold"),
+                                        corner_radius=0, height=52, width=220)
         self._conn_btn.pack(pady=(18, 0))
 
         nav = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         nav.pack(pady=(16, 0))
         ctk.CTkButton(nav, text="← Back", command=self._back,
                       fg_color=SURF2, text_color=TEXT2, hover_color=SURF3,
-                      font=("Segoe UI", 10, "bold"), corner_radius=8,
+                      font=T.pixel_font(9, "bold"), corner_radius=0,
                       height=38, width=100).pack(side=tk.LEFT, padx=5)
         self._finish_btn = ctk.CTkButton(nav, text="Finish Setup →",
                                           command=self._finish,
                                           fg_color=SURF3, text_color=TEXT3,
                                           hover_color=SURF4,
-                                          font=("Segoe UI", 10, "bold"),
-                                          corner_radius=8, height=38, width=140,
+                                          font=T.pixel_font(9, "bold"),
+                                          corner_radius=0, height=38, width=140,
                                           state="disabled")
         self._finish_btn.pack(side=tk.LEFT, padx=5)
 
@@ -444,10 +444,10 @@ class OnboardingOverlay(ctk.CTkFrame):
             self._spotify = self._SpotifyController(self._auth)
             self._conn_status.configure(text="✓  Connected! Click Finish Setup →",
                                         text_color=ACCENT)
-            self._conn_btn.configure(text="✓ Connected", fg_color="#1a6b35",
+            self._conn_btn.configure(text="✓ Connected", fg_color=T.ACCENT_BG,
                                      state="disabled")
             self._finish_btn.configure(state="normal", fg_color=ACCENT,
-                                       text_color="#000", hover_color=_lighten(ACCENT))
+                                       text_color=BG, hover_color=T.ACCENT_HOV)
         else:
             self._conn_status.configure(
                 text="✗  Auth failed. Check your credentials and try again.", text_color=RED)
@@ -473,13 +473,13 @@ class OnboardingOverlay(ctk.CTkFrame):
         self._dots(self)
 
         ctk.CTkLabel(self, text="🎉", fg_color="transparent",
-                     font=("Segoe UI", 60)).pack(pady=(48, 6))
+                     font=T.retro_font(54)).pack(pady=(48, 6))
         ctk.CTkLabel(self, text="You're all set!", fg_color="transparent",
-                     text_color=TEXT, font=("Segoe UI", 23, "bold")).pack()
+                     text_color=TEXT, font=T.serif_font(32, "bold")).pack()
         ctk.CTkLabel(self,
                      text="GameBeats is ready.\nLaunch a game and music starts automatically.",
                      fg_color="transparent", text_color=TEXT2,
-                     font=("Segoe UI", 11), justify="center", wraplength=330).pack(pady=(8, 30))
+                     font=T.retro_font(16), justify="center", wraplength=330).pack(pady=(8, 30))
 
         tips = [
             ("🎮", "Start a game — music kicks in automatically"),
@@ -487,19 +487,19 @@ class OnboardingOverlay(ctk.CTkFrame):
             ("🎵", "Browse and play your playlists"),
         ]
         for icon, tip in tips:
-            row = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=10)
+            row = ctk.CTkFrame(self, fg_color=SURF2, corner_radius=0, border_width=1, border_color=BORDER)
             row.pack(fill=tk.X, padx=52, pady=3)
             ctk.CTkLabel(row, text=icon, fg_color="transparent",
-                         font=("Segoe UI", 14)).pack(side=tk.LEFT, padx=12, pady=9)
+                         font=T.retro_font(18)).pack(side=tk.LEFT, padx=12, pady=9)
             ctk.CTkLabel(row, text=tip, fg_color="transparent",
-                         text_color=TEXT, font=("Segoe UI", 10)).pack(side=tk.LEFT, pady=9)
+                         text_color=TEXT, font=T.retro_font(15)).pack(side=tk.LEFT, pady=9)
 
         ctk.CTkButton(self, text="Open GameBeats →",
                       command=self._complete,
-                      fg_color=ACCENT, text_color="#000",
-                      hover_color=_lighten(ACCENT),
-                      font=("Segoe UI", 12, "bold"),
-                      corner_radius=10, height=52, width=220).pack(pady=16)
+                      fg_color=ACCENT, text_color=BG,
+                      hover_color=T.ACCENT_HOV,
+                      font=T.pixel_font(10, "bold"),
+                      corner_radius=0, height=52, width=220).pack(pady=16)
 
     def _complete(self):
         self.place_forget()

@@ -38,12 +38,12 @@ TEXT = T.TEXT
 TEXT_SEC = T.TEXT_MUTED
 TRANSPARENT_KEY = "#010203"
 
-NOTIFIER_CARD_BG = "#1a1628"
-NOTIFIER_CARD_BORDER = "#3d3560"
-NOTIFIER_TEXT = "#ffffff"
-NOTIFIER_TEXT_SUB = "#d8d4ea"
-NOTIFIER_TEXT_MUTED = "#a9a3bf"
-NOTIFIER_BTN_HOVER = "#2d2648"
+NOTIFIER_CARD_BG = T.SURFACE
+NOTIFIER_CARD_BORDER = T.WOOD
+NOTIFIER_TEXT = T.TEXT
+NOTIFIER_TEXT_SUB = T.GOLD
+NOTIFIER_TEXT_MUTED = T.TEXT_MUTED
+NOTIFIER_BTN_HOVER = T.SURFACE3
 
 PUPPY_SINGING_FRAMES = ("puppy_sing_open.png", "puppy_sing_closed.png")
 PUPPY_IDLE_FRAME = "puppy_idle.png"
@@ -180,7 +180,7 @@ class PuppySingingOverlay:
         self._win = win
         win.overrideredirect(True)
         win.configure(bg=TRANSPARENT_KEY)
-        win.attributes("-alpha", 0.55)
+        win.attributes("-alpha", 0.92)
         win.attributes("-topmost", True)
         try:
             win.attributes("-transparentcolor", TRANSPARENT_KEY)
@@ -201,8 +201,8 @@ class PuppySingingOverlay:
         else:
             self._label = tk.Label(
                 win,
-                text="♪",
-                font=("Segoe UI", 40, "bold"),
+                text="\u266a",
+                font=T.retro_font(40, "bold"),
                 fg=ACCENT,
                 bg=TRANSPARENT_KEY,
                 bd=0,
@@ -263,22 +263,44 @@ class PuppySingingOverlay:
             pass
 
     def show(self):
-        if self._visible:
-            return
         if self._win is None:
             self._build()
         if self._win is None:
             return
+        if self._visible:
+            # The window may have been pushed behind a fullscreen game even
+            # though we still consider it visible. Re-assert it.
+            self._raise_safe()
+            return
         self._visible = True
         try:
+            win = self._win
             self._place()
-            self._win.deiconify()
-            self._win.lift()
-            self._win.attributes("-topmost", True)
+            win.deiconify()
+            win.update_idletasks()
+            win.lift()
+            win.attributes("-topmost", True)
             self._noactivate_safe()
+            # Windows sometimes maps an override-redirect Toplevel under the
+            # foreground window on the first pass. Re-lift shortly after.
+            win.after(60, self._raise_safe)
+            win.after(220, self._raise_safe)
         except Exception:
             pass
         self._animate()
+
+    def _raise_safe(self):
+        if not self._visible or self._win is None:
+            return
+        try:
+            win = self._win
+            if not win.winfo_viewable():
+                win.deiconify()
+            win.lift()
+            win.attributes("-topmost", True)
+            self._noactivate_safe()
+        except Exception:
+            pass
 
     def hide(self):
         self._visible = False
@@ -303,6 +325,11 @@ class PuppySingingOverlay:
                 self._label.configure(image=self._photos[self._idx])
             except Exception:
                 return
+        # Gentle breathing glow so the puppy feels alive even between frames.
+        try:
+            self._win.attributes("-alpha", 0.88 if self._idx % 2 else 0.98)
+        except Exception:
+            pass
         try:
             self._after = self._win.after(PUPPY_ANIMATION_INTERVAL, self._animate)
         except Exception:
@@ -402,11 +429,19 @@ class MascotNotifier:
         card = ctk.CTkFrame(
             outer,
             fg_color=NOTIFIER_CARD_BG,
-            corner_radius=16,
-            border_width=1,
+            corner_radius=0,
+            border_width=2,
             border_color=NOTIFIER_CARD_BORDER,
         )
         card.pack(padx=2, pady=2)
+
+        ctk.CTkLabel(
+            card,
+            text="\u266a  SIDE A COMPLETE",
+            font=T.pixel_font(8, "bold"),
+            fg_color="transparent",
+            text_color=T.MINT,
+        ).pack(padx=18, pady=(12, 2))
 
         photos = _load_puppy_photos((PUPPY_IDLE_FRAME,), (96, 96))
         if photos:
@@ -417,20 +452,20 @@ class MascotNotifier:
                 bg=NOTIFIER_CARD_BG,
                 bd=0,
                 highlightthickness=0,
-            ).pack(pady=(14, 4))
+            ).pack(pady=(2, 2))
         else:
             ctk.CTkLabel(
                 card,
-                text="♪",
-                font=ctk.CTkFont(family="Segoe UI", size=30, weight="bold"),
+                text="\u266a",
+                font=T.retro_font(40, "bold"),
                 fg_color="transparent",
-                text_color=NOTIFIER_TEXT,
-            ).pack(pady=(14, 4))
+                text_color=T.GOLD,
+            ).pack(pady=(2, 2))
 
         ctk.CTkLabel(
             card,
             text="Playlist finished",
-            font=ctk.CTkFont(family="Segoe UI", size=11, weight="bold"),
+            font=T.serif_font(24),
             fg_color="transparent",
             text_color=NOTIFIER_TEXT,
         ).pack(padx=18)
@@ -439,45 +474,49 @@ class MascotNotifier:
         ctk.CTkLabel(
             card,
             text=name,
-            font=ctk.CTkFont(family="Segoe UI", size=9),
+            font=T.retro_font(17),
             fg_color="transparent",
             text_color=NOTIFIER_TEXT_SUB,
-        ).pack(padx=18, pady=(2, 10))
+        ).pack(padx=18, pady=(2, 6))
 
         self._timer_lbl = ctk.CTkLabel(
             card,
             text="",
-            font=ctk.CTkFont(family="Segoe UI", size=8),
+            font=T.pixel_font(8),
             fg_color="transparent",
             text_color=NOTIFIER_TEXT_MUTED,
         )
         self._timer_lbl.pack()
 
         btn_row = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-        btn_row.pack(padx=18, pady=(10, 6), fill="x")
+        btn_row.pack(padx=14, pady=(10, 6), fill="x")
 
         self._play_next_btn = ctk.CTkButton(
             btn_row,
-            text="▶ Play Next",
+            text="\u25b6  PLAY NEXT",
             fg_color=ACCENT,
-            text_color=NOTIFIER_TEXT,
-            hover_color=ACCENT2,
-            corner_radius=8,
+            text_color=T.BG,
+            hover_color=T.ACCENT_HOV,
+            corner_radius=0,
+            height=36,
+            border_width=2,
+            border_color=T.WOOD,
             command=self._on_click_play_next,
-            font=ctk.CTkFont(family="Segoe UI", size=10, weight="bold"),
+            font=T.pixel_font(9, "bold"),
         )
         self._play_next_btn.pack(side=tk.LEFT, fill="x", expand=True)
 
         ctk.CTkButton(
             card,
-            text="dismiss",
+            text="DISMISS",
             fg_color="transparent",
             text_color=NOTIFIER_TEXT_MUTED,
             hover_color=NOTIFIER_BTN_HOVER,
-            corner_radius=8,
+            corner_radius=0,
+            height=26,
             command=self._on_click_dismiss,
-            font=ctk.CTkFont(family="Segoe UI", size=10),
-        ).pack(pady=(0, 12))
+            font=T.pixel_font(8),
+        ).pack(pady=(0, 10))
 
 
     def _target_position(self, win):

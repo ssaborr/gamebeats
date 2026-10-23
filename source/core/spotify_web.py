@@ -319,6 +319,9 @@ class SpotifyWebController:
         self._last_play_time = 0.0
         self._paused_by_game = False
         self._session_locked = False
+        # "browser" or "desktop" — remembered so resume targets the source
+        # that was actually audible before the game audio paused it.
+        self._last_audio_source = "browser"
 
         self._pw = None
         self._context = None
@@ -327,12 +330,10 @@ class SpotifyWebController:
         self._player_page = None
         self._browser_launched_at = 0.0
 
-        try:
-            from core.audio_monitor import set_browser_audio_only
-            # Always prefer Spotify desktop client audio (do not monitor browser audio)
-            set_browser_audio_only(False)
-        except Exception:
-            pass
+        # Audio routing is configured by _refresh_audio_pids() once the browser
+        # and player mode are known. Do not force desktop audio here: in web
+        # mode the actual music is produced by the automated browser, while the
+        # desktop client may be a silent sidecar.
 
         # Playwright sync API must run on one thread only (not UI + game threads).
         self._browser_queue = queue.Queue()
@@ -465,6 +466,11 @@ class SpotifyWebController:
             "--autoplay-policy=no-user-gesture-required",
             "--exclude-switches=enable-automation",
             "--disable-infobars",
+            # A previous run can leave Chrome showing the off-screen
+            # "Restore pages?" bubble.  Playwright's first goto then waits
+            # until it times out because the modal owns the browser UI.
+            "--hide-crash-restore-bubble",
+            "--disable-session-crashed-bubble",
         ]
         if not self._headless and self._hide_window:
             # Keep the window off-screen but prevent Chrome from throttling
@@ -582,7 +588,11 @@ class SpotifyWebController:
             headless=self._headless,
             args=self._browser_args(),
             locale="en-US",
-            ignore_default_args=["--enable-automation"],
+            # Playwright adds --disable-component-update by default. Chrome
+            # ships Widevine as a component, so leaving that switch in place
+            # makes Spotify's web player report "Unsupported keySystem" and
+            # play silently. Removing it lets Chrome load Widevine.
+            ignore_default_args=["--enable-automation", "--disable-component-update"],
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -658,73 +668,81 @@ class SpotifyWebController:
         except Exception:
             pass
 
-    def _refresh_audio_pids(self):
-        self._hide_automation_browser_taskbar_icons()
+    def _browser_player_is_audio_source(self) -> bool:
+        """True when the automated browser is the component producing audio.
 
-        # If a real Spotify desktop process is present, prefer desktop audio
+        In the simplified dual flow a desktop Spotify process may still be
+        running, but it only plays a silent track (device detection). Listening
+        to spotify.exe in that situation makes the app believe playback ended
+        while Chrome is actually playing.
+        """
         try:
-            if _spotify_running():
-                try:
-                    from core.audio_monitor import set_browser_audio_only, register_music_player_pids
-                    set_browser_audio_only(False)
-                    register_music_player_pids([])
-                    self._log(
-                        "Audio monitor: Spotify desktop detected — listening to spotify.exe"
-                    )
-                except Exception:
-                    pass
-                return
+            if self._uses_desktop_player():
+                return False
+            if self._desktop_sidecar_active and self._use_spotify_connect:
+                return False
+            return True
         except Exception:
-            pass
+            return True
 
-        if self._uses_desktop_player():
-            try:
-                from core.audio_monitor import set_browser_audio_only, register_music_player_pids
-                set_browser_audio_only(False)
-                register_music_player_pids([])
-                self._log("Audio monitor: listening to Spotify desktop (spotify.exe)")
-            except Exception:
-                pass
-            return
+    def _find_browser_audio_pids(self) -> list:
+        """Find Chrome/Edge processes hosting this app's Spotify web player."""
         if not HAS_PSUTIL:
-            return
+            return []
         markers = {
+            os.path.normcase(self._profile_dir),
+            os.path.normcase(os.path.basename(self._profile_dir)),
             os.path.normcase(self._player_profile_dir),
-            os.path.normcase("spotify_chrome_player_profile"),
+            os.path.normcase(os.path.basename(self._player_profile_dir)),
         }
-        if not self._dual_chrome:
-            markers.add(os.path.normcase(self._profile_dir))
-            markers.add(os.path.normcase("spotify_web_profile"))
-        pids = []
+        pids = set()
         try:
-            for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
                 try:
                     name = (proc.info.get("name") or "").lower()
                     if name not in ("chrome.exe", "chromium.exe", "msedge.exe"):
                         continue
                     cmd = os.path.normcase(" ".join(proc.info.get("cmdline") or []))
-                    if any(m in cmd for m in markers):
-                        pids.append(int(proc.info["pid"]))
-                        continue
-                    # Processes spawned right after we launched Playwright Chromium
-                    if self._browser_launched_at and proc.info.get("create_time"):
-                        if proc.info["create_time"] >= self._browser_launched_at - 2.0:
-                            if "ms-playwright" in cmd or "playwright" in cmd:
-                                pids.append(int(proc.info["pid"]))
+                    if any(marker and marker in cmd for marker in markers):
+                        pids.add(int(proc.info["pid"]))
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
                     pass
         except Exception:
             pass
-        pids = sorted(set(pids))
+        return sorted(pids)
+
+    def refresh_audio_source(self):
+        """Public hook so the app can re-point the audio monitor safely."""
+        self._refresh_audio_pids()
+
+    def _refresh_audio_pids(self):
+        self._hide_automation_browser_taskbar_icons()
         try:
-            from core.audio_monitor import register_music_player_pids
+            from core.audio_monitor import (
+                register_music_player_pids,
+                set_browser_audio_only,
+            )
+        except Exception:
+            return
+
+        if self._browser_player_is_audio_source():
+            pids = self._find_browser_audio_pids()
+            set_browser_audio_only(True)
             register_music_player_pids(pids)
             if pids:
-                self._log(f"Audio monitor: listening to browser Chrome PIDs {pids}")
+                self._log(
+                    f"Audio monitor: listening to web-player browser PIDs {pids}"
+                )
             else:
-                self._log("Audio monitor: browser running but no Chrome PIDs matched yet")
-        except Exception:
-            pass
+                self._log(
+                    "Audio monitor: browser running but no player PIDs matched yet"
+                )
+            return
+
+        # Desktop player (legacy Connect mode) — monitor spotify.exe.
+        set_browser_audio_only(False)
+        register_music_player_pids([])
+        self._log("Audio monitor: listening to Spotify desktop (spotify.exe)")
 
     def _ensure_browser(self, check_login: bool = False) -> bool:
         return bool(
@@ -769,7 +787,11 @@ class SpotifyWebController:
                 headless=self._headless,
                 args=self._browser_args(),
                 locale="en-US",
-                ignore_default_args=["--enable-automation"],
+                # Playwright adds --disable-component-update by default. Chrome
+            # ships Widevine as a component, so leaving that switch in place
+            # makes Spotify's web player report "Unsupported keySystem" and
+            # play silently. Removing it lets Chrome load Widevine.
+            ignore_default_args=["--enable-automation", "--disable-component-update"],
                 no_viewport=not self._headless,
             )
             try:
@@ -1249,6 +1271,8 @@ class SpotifyWebController:
                 exe,
                 f"--user-data-dir={self._player_profile_dir}",
                 "--new-window",
+                "--hide-crash-restore-bubble",
+                "--disable-session-crashed-bubble",
             ]
             if self._hide_window:
                 cmd.extend(["--window-position=-32000,-32000", "--window-size=960,720"])
@@ -1377,21 +1401,90 @@ class SpotifyWebController:
         self._refresh_audio_pids()
         self._log_spotify_playback_issues(page)
         self._unmute_web_player(page)
-        if not self._click_playlist_play_button(page, times=3):
+        # In the simplified flow there is no Connect panel to wait for. A
+        # single click starts playback; repeated clicks would toggle it
+        # pause/play and make the whole session unreliable.
+        click_attempts = 1 if self._use_simplified_dual_flow() else 3
+        # Prefer a real (trusted) click on the playlist Play button. Spotify
+        # accepts the click, but a synthetic JS click does not count as a user
+        # gesture; the UI then shows "Pause" while Chrome stays silent. That
+        # looked like a finished playlist and broke pause/resume state.
+        # The playlist shell can be "ready" before the big Play button is
+        # painted. Clicking too early falls back to a synthetic JS click,
+        # which Spotify does not treat as a user gesture (UI says Pause but
+        # audio never starts). Wait for the real button first.
+        try:
+            page.locator(f"xpath={self._play_xpath}").first.wait_for(
+                state="visible", timeout=6000
+            )
+        except Exception:
+            pass
+        clicked_label = ""
+        try:
+            clicked_label = self._try_click_play_selectors(
+                page, self._playlist_play_selectors(), "Controller: clicked"
+            )
+        except Exception:
+            clicked_label = ""
+        if not clicked_label and not self._click_playlist_play_button(page, times=click_attempts):
             self._log("Playlist Play button missed — trying fallbacks…")
             if not self._kickstart_playback(page):
                 self._last_error = self._last_error or "Could not start playlist playback"
                 return False
-        if self._confirm_playback_started(page, timeout=8.0):
-            self._log("Controller: playlist playing.")
+        ui_playing = self._confirm_playback_started(page, timeout=10.0)
+        if not ui_playing:
+            ui_playing = self._playlist_header_is_playing(page)
+        if ui_playing:
+            if self._ensure_browser_playback_audio(page, timeout=8.0):
+                self._log("Controller: playlist playing (browser audio confirmed).")
+                return True
+            self._log(
+                "Controller: UI shows playing but Chrome has no audio - "
+                "Spotify may still be using the desktop sidecar."
+            )
+            # The playlist *is* playing, just not through the automated
+            # browser.  Switch pause/resume (and audio monitoring) to the
+            # desktop client instead of reporting failure and leaving the UI
+            # out of sync with the audible music.
+            try:
+                from core.audio_monitor import get_desktop_spotify_peak
+                desktop_peak, _desktop_status = get_desktop_spotify_peak()
+            except Exception:
+                desktop_peak = 0.0
+            if desktop_peak >= 0.0015:
+                self._dual_player = "desktop"
+                self._desktop_sidecar_active = True
+                self._last_audio_source = "desktop"
+                try:
+                    self.refresh_audio_source()
+                except Exception:
+                    pass
+                self._log(
+                    "Controller: desktop Spotify is the audible source - "
+                    "using desktop controls for pause/resume."
+                )
+                return True
+        # Page-scoped retry only. Never send a global media key here: it can
+        # reach the silent desktop sidecar and/or toggle the browser twice.
+        state = self._player_is_playing(page)
+        if state is None and self._browser_audio_is_loud():
+            self._log("Controller: browser audio detected — playlist is playing.")
             return True
-        if self._playlist_header_is_playing(page):
-            self._log("Controller: playlist header shows Pause — playing.")
+        if state is False:
+            try:
+                page.keyboard.press("Space")
+            except Exception:
+                pass
+            time.sleep(0.4)
+            if self._player_is_playing(page) is True:
+                return True
+        # Real browser audio is the strongest proof that playback started
+        # (covers slow DRM/UI updates).
+        if self._wait_for_browser_audio(timeout=6.0):
+            self._log("Controller: browser audio detected — playlist is playing.")
             return True
-        self._log("Trying media key on controller…")
-        self._send_global_media_key("_setup_controller_play_playlist")
-        time.sleep(0.5)
-        return self._player_is_playing(page) is True
+        self._last_error = self._last_error or "Playback did not start"
+        return False
 
     def _setup_controller_for_remote(self) -> bool:
         """Open controller Spotify and attach via Spotify Connect (legacy dual flow)."""
@@ -1749,7 +1842,18 @@ class SpotifyWebController:
         return True
 
     def _activate_this_web_player(self, page) -> bool:
-        """If Spotify is playing on another device, switch output to this browser."""
+        """If Spotify is playing on another device, switch output to this browser.
+
+        Spotify keeps a single active device.  When the desktop sidecar is
+        playing its silent track, the web player shows a Pause button but no
+        audio comes out of Chrome - the account is still sending sound to the
+        desktop.  The device menu is the reliable way to move playback to the
+        browser, but it renders asynchronously and the web-player row has no
+        stable data-testid.  Click the row itself (not a loose text match) and
+        wait for the list to appear first.
+        """
+        # Fast path: Spotify sometimes shows an explicit "listen on this
+        # web player" banner/button.
         try:
             page.get_by_role(
                 "button",
@@ -1757,27 +1861,98 @@ class SpotifyWebController:
                     r"listen on (this )?(web player|browser|computer)|play on this",
                     re.I,
                 ),
-            ).first.click(timeout=2500)
+            ).first.click(timeout=2000)
             self._log("Switched Spotify to this web player.")
             time.sleep(0.5)
             return True
         except Exception:
             pass
-        for sel in (
+
+        # Open the Connect-to-a-device menu.  It renders only after the
+        # bottom bar has painted, so poll for the trigger instead of giving
+        # up on the first 0.4 s check.
+        triggers = (
+            'button[aria-label*="Connect to a device"]',
             'button[data-testid="devices-bar-button"]',
             '[data-testid="device-picker-trigger"]',
-            'button[aria-label*="Connect to a device"]',
-        ):
-            try:
-                page.locator(sel).first.click(timeout=2000)
-                time.sleep(0.4)
-                page.get_by_text(re.compile(r"web player|this computer|this browser", re.I)).first.click(
-                    timeout=2500
-                )
-                self._log("Selected Web Player in device menu.")
+        )
+        deadline = time.time() + 6.0
+        while time.time() < deadline:
+            for sel in triggers:
+                try:
+                    btn = page.locator(sel).first
+                    if btn.count() == 0 or not btn.is_visible():
+                        continue
+                    btn.click(timeout=3000)
+                    # The device list lives in a portal and takes a moment
+                    # to paint.  The old fixed 0.4 s wait was too short on a
+                    # cold profile, so the row search ran before it existed.
+                    try:
+                        page.locator('[data-testid="devices-list-"]').first.wait_for(
+                            state="visible", timeout=5000
+                        )
+                    except Exception:
+                        self._log("Device menu did not open; retrying...")
+                        try:
+                            page.keyboard.press("Escape")
+                        except Exception:
+                            pass
+                        time.sleep(0.3)
+                        continue
+                    rows = page.locator('[data-testid="device-picker-row-sidepanel"]')
+                    target = rows.filter(
+                        has_text=re.compile(
+                            r"this web browser|this web player|web player|this computer",
+                            re.I,
+                        )
+                    ).first
+                    if target.count() == 0:
+                        # Localized UIs may not use the English label.  The
+                        # actionable row is the one whose hidden hint says
+                        # "Connect to this device"; the current desktop row
+                        # does not include that hint.
+                        target = rows.filter(
+                            has_text=re.compile(r"connect to this device", re.I)
+                        ).first
+                    if target.count() > 0:
+                        target.click(timeout=3000)
+                        self._log("Selected Web Player in device menu.")
+                        time.sleep(0.5)
+                        return True
+                    self._log("Device menu opened but no web-player row was found.")
+                    try:
+                        page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+                except Exception:
+                    continue
+            time.sleep(0.4)
+        self._log("Could not switch Spotify output to the web player.")
+        return False
+
+    def _ensure_browser_playback_audio(self, page, timeout: float = 8.0) -> bool:
+        """Make Chrome, not the desktop sidecar, the device producing audio.
+
+        Spotify permits one active device.  A UI that says "Pause" only means
+        the account is playing somewhere; it may still be the desktop app, in
+        which case Chrome is completely silent.  Check real loopback audio,
+        switch the device menu to "This web browser" when needed, and resume
+        the page if the switch left it paused.
+        """
+        if self._wait_for_browser_audio(timeout=2.0):
+            return True
+        if self._activate_this_web_player(page):
+            self._log("Web player: switched Spotify output to this browser.")
+        else:
+            self._log("Web player: could not switch Spotify output to this browser.")
+        if self._wait_for_browser_audio(timeout=timeout):
+            return True
+        # A device switch can move playback to Chrome but leave the track
+        # paused.  Use the real play/pause control (never a global media key).
+        if self._player_is_playing(page) is False:
+            self._click_player_control(page)
+            if self._wait_for_browser_audio(timeout=timeout):
                 return True
-            except Exception:
-                pass
         return False
 
     def _unmute_web_player(self, page) -> None:
@@ -2079,67 +2254,157 @@ class SpotifyWebController:
         return False
 
     def _nudge_playback(self, page) -> bool:
-        """Extra play nudges when the bar still shows Play."""
+        """Extra play nudges, one page-scoped action at a time.
+
+        The old version pressed Space *and* clicked the control *and* sent a
+        global media key, which could toggle playback three times (ending in
+        the wrong state). Only act again if the player is still paused.
+        """
+        if self._player_is_playing(page) is True:
+            return True
+        if self._player_is_playing(page) is None and self._browser_audio_is_loud():
+            return True
         try:
             page.keyboard.press("Space")
             time.sleep(0.35)
         except Exception:
             pass
+        for _ in range(20):
+            time.sleep(0.15)
+            if self._player_is_playing(page) is True:
+                return True
+        if self._player_is_playing(page) is False:
+            self._click_player_control(page)
+            return self._confirm_playback_started(page, timeout=4.0)
+        return self._wait_for_browser_audio(timeout=3.0)
+
+    def _browser_audio_is_loud(self, threshold: float = 0.0015) -> bool:
+        """Ground-truth check: is the web player actually producing audio?
+
+        The process-loopback meter now includes the desktop sidecar too, so it
+        cannot answer this question.  Use the WASAPI session meter for the
+        registered browser PIDs instead; otherwise a desktop track would make
+        the app believe Chrome was playing and pause the wrong component.
+        """
         try:
-            bar = page.locator(PLAYER_PLAYPAUSE_SELECTOR).first
-            if bar.count() > 0 and bar.is_visible():
-                bar.click(timeout=3000)
-                try:
-                    self._log("[_nudge_playback] Clicked player play/pause control (page click).")
-                except Exception:
-                    pass
-                time.sleep(0.35)
+            from core.audio_monitor import (
+                get_browser_spotify_peak,
+                get_desktop_spotify_peak,
+                get_spotify_loopback_peak,
+            )
+            peak, status = get_browser_spotify_peak()
+            if status == "ok" and peak >= threshold:
+                return True
+            # Some Chrome audio sessions are invisible to the WASAPI session
+            # meter.  If the desktop is silent, the combined loopback can
+            # still prove the browser is the source.
+            desktop_peak, desktop_status = get_desktop_spotify_peak()
+            if desktop_status == "ok" and desktop_peak >= threshold:
+                return False
+            union_peak, _db, union_status = get_spotify_loopback_peak()
+            return bool(union_status == "ok" and union_peak >= threshold)
+        except Exception:
+            return False
+
+    def _wait_for_browser_audio(self, timeout: float = 6.0,
+                                threshold: float = 0.0015) -> bool:
+        self._refresh_audio_pids()
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._browser_audio_is_loud(threshold):
+                return True
+            time.sleep(0.25)
+        return False
+
+    def _click_player_control(self, page) -> bool:
+        """Click the page play/pause control, or send Space to the page.
+
+        Never use a global media key here: in dual mode it reaches both the
+        browser and the silent desktop sidecar, producing a net double toggle.
+        """
+        try:
+            loc = page.locator(PLAYER_PLAYPAUSE_SELECTOR).first
+            if loc.count() > 0:
+                loc.click(timeout=4000)
+                return True
         except Exception:
             pass
-        if self._send_global_media_key("_nudge_playback"):
-            time.sleep(0.35)
-        return self._confirm_playback_started(page, timeout=3.0)
+        try:
+            page.keyboard.press("Space")
+            return True
+        except Exception:
+            return False
 
     def _player_is_playing(self, page) -> bool | None:
+        # Media Session state is language-independent and reflects real
+        # playback (Spotify sets it in the web player).
+        try:
+            state = page.evaluate(
+                "() => { try { return (navigator.mediaSession && "
+                "navigator.mediaSession.playbackState) || ''; } "
+                "catch (e) { return ''; } }"
+            )
+            state = str(state or "").strip().lower()
+            if state == "playing":
+                return True
+            if state == "paused":
+                return False
+        except Exception:
+            pass
         try:
             btn = page.locator(PLAYER_PLAYPAUSE_SELECTOR).first
             if btn.count() == 0:
                 return None
-            label = (btn.get_attribute("aria-label") or "").lower()
-            if "pause" in label:
+            label = (btn.get_attribute("aria-label") or "").strip().lower()
+            if "pause" in label or "pausa" in label or "pausieren" in label:
                 return True
-            if "play" in label:
+            if "play" in label or "lecture" in label or "abspielen" in label:
                 return False
         except Exception:
             pass
         return None
 
     def _toggle_player(self, page) -> bool:
-        if self._click_locator(page, PLAYER_PLAYPAUSE_SELECTOR):
+        ok = self._click_player_control(page)
+        if ok:
             try:
-                self._log("[_toggle_player] Clicked player play/pause control (page click).")
+                self._log("[_toggle_player] Clicked player play/pause control.")
             except Exception:
                 pass
-            return True
-        return self._send_global_media_key("_toggle_player")
+        return ok
 
     def _pause_player(self, page) -> bool:
         state = self._player_is_playing(page)
         if state is False:
             return True
-        if state is True:
-            return self._toggle_player(page)
-        return self._send_global_media_key("_pause_player")
+        if state is None:
+            # Avoid inverting an unknown state: audio is the tie-breaker.
+            if not self._browser_audio_is_loud():
+                return True  # already silent/paused
+        if not self._click_player_control(page):
+            return False
+        # Confirm the pause actually happened (Spotify UI updates quickly).
+        for _ in range(16):
+            time.sleep(0.15)
+            if self._player_is_playing(page) is False:
+                return True
+        # UI did not update but audio may have stopped; check it as fallback.
+        time.sleep(0.25)
+        return not self._browser_audio_is_loud()
 
     def _play_player(self, page) -> bool:
         state = self._player_is_playing(page)
         if state is True:
             return True
-        if state is False:
-            return self._toggle_player(page)
-        if self._toggle_player(page):
-            return True
-        return self._send_global_media_key("_play_player")
+        if state is None and self._browser_audio_is_loud():
+            return True  # already audibly playing
+        if not self._click_player_control(page):
+            return False
+        for _ in range(16):
+            time.sleep(0.15)
+            if self._player_is_playing(page) is True:
+                return True
+        return self._wait_for_browser_audio(timeout=3.0)
 
     def _remember_playback_state(self, is_playing: bool, paused_by_game=None):
         self._is_playing = bool(is_playing)
@@ -2412,112 +2677,213 @@ class SpotifyWebController:
         except Exception:
             pass
 
-    def ensure_paused(self) -> bool:
-        self._clear_mixer_mute()
+    def _source_peaks(self) -> tuple:
+        """Return (browser_peak, desktop_peak) from WASAPI session meters."""
+        browser_peak = 0.0
+        desktop_peak = 0.0
         try:
-            prefer_browser_pause = self._use_simplified_dual_flow() or self._uses_browser_player()
-        except Exception:
-            prefer_browser_pause = False
-        if self._paused_by_game and not prefer_browser_pause:
-            self._remember_playback_state(False, paused_by_game=True)
-            return True
-        if prefer_browser_pause:
-            def _work(page):
-                return self._pause_player(page)
-
-            ok = bool(self._run_on_page(_work))
-            if ok:
-                try:
-                    if _spotify_running() or self._desktop_sidecar_active:
-                        self._desktop_helper().ensure_paused()
-                except Exception:
-                    pass
-                self._remember_playback_state(False, paused_by_game=True)
-                return True
-        # If Spotify desktop is available, prefer sending desktop command
-        try:
-            if (
-                not prefer_browser_pause
-                and (_spotify_running() or self._desktop_sidecar_active or self._uses_desktop_player())
-            ):
-                try:
-                    desktop = self._desktop_helper()
-                    self._log("Calling desktop.ensure_paused from ensure_paused")
-                    ok = desktop.ensure_paused()
-                    if ok:
-                        self._remember_playback_state(False, paused_by_game=True)
-                        return True
-                except Exception:
-                    pass
+            from core.audio_monitor import (
+                get_browser_spotify_peak,
+                get_desktop_spotify_peak,
+            )
+            browser_peak, browser_status = get_browser_spotify_peak()
+            desktop_peak, desktop_status = get_desktop_spotify_peak()
+            if browser_status != "ok":
+                browser_peak = 0.0
+            if desktop_status != "ok":
+                desktop_peak = 0.0
         except Exception:
             pass
+        return float(browser_peak or 0.0), float(desktop_peak or 0.0)
 
-        def _work(page):
-            return self._pause_player(page)
+    def _loopback_audible(self, threshold: float = 0.0015) -> bool:
+        try:
+            from core.audio_monitor import get_spotify_loopback_peak
+            peak, _db, status = get_spotify_loopback_peak()
+            return bool(status == "ok" and peak >= threshold)
+        except Exception:
+            return False
 
-        ok = bool(self._run_on_page(_work))
-        if ok:
-            self._remember_playback_state(False, paused_by_game=True)
-        elif self._send_global_media_key("ensure_paused:global_fallback"):
-            self._remember_playback_state(False, paused_by_game=True)
-            ok = True
-        return ok
+    def _note_audio_source(self, browser_peak: float, desktop_peak: float,
+                           threshold: float = 0.0015):
+        if desktop_peak >= threshold and desktop_peak > browser_peak:
+            self._last_audio_source = "desktop"
+        elif browser_peak >= threshold:
+            self._last_audio_source = "browser"
+
+    def _pause_desktop(self, paused_by_game: bool = False) -> bool:
+        try:
+            if not (
+                _spotify_running()
+                or self._desktop_sidecar_active
+                or self._uses_desktop_player()
+            ):
+                return False
+            desktop = self._desktop_helper()
+            self._log("Calling desktop.ensure_paused from ensure_paused")
+            return bool(desktop.ensure_paused(paused_by_game=paused_by_game))
+        except Exception:
+            return False
+
+    def _resume_desktop(self) -> bool:
+        try:
+            if not (
+                _spotify_running()
+                or self._desktop_sidecar_active
+                or self._uses_desktop_player()
+            ):
+                return False
+            desktop = self._desktop_helper()
+            self._log("Calling desktop.ensure_playing from ensure_playing")
+            return bool(desktop.ensure_playing())
+        except Exception:
+            return False
+
+    def _wait_for_silence(self, threshold: float = 0.0015,
+                          timeout: float = 1.6) -> bool:
+        """Wait until Spotify is actually inaudible after a pause command."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            browser_peak, desktop_peak = self._source_peaks()
+            if browser_peak < threshold and desktop_peak < threshold:
+                return True
+            if not self._loopback_audible(threshold):
+                return True
+            time.sleep(0.15)
+        return False
+
+    def ensure_paused(self, paused_by_game: bool = False) -> bool:
+        self._clear_mixer_mute()
+        try:
+            prefer_browser_pause = not self._uses_desktop_player()
+        except Exception:
+            prefer_browser_pause = False
+
+        threshold = 0.0015
+        browser_peak, desktop_peak = self._source_peaks()
+        self._note_audio_source(browser_peak, desktop_peak, threshold)
+        audible = (
+            browser_peak >= threshold
+            or desktop_peak >= threshold
+            or self._loopback_audible(threshold)
+        )
+
+        if not audible:
+            # Nothing is audible.  Still send one targeted idempotent pause so
+            # a stale internal "playing" state gets cleared, but never launch
+            # a browser just to pause silence.
+            if prefer_browser_pause:
+                if self._page or self._context or self._cdp_url:
+                    try:
+                        self._run_on_page(lambda page: self._pause_player(page))
+                    except Exception:
+                        pass
+            else:
+                self._pause_desktop(paused_by_game)
+            self._remember_playback_state(False, paused_by_game=paused_by_game)
+            return True
+
+        # Pause the source that is actually audible first.  This is the key
+        # fix: the old code paused the silent browser, claimed success, and
+        # left the desktop track playing.  Every command here is targeted at
+        # Spotify (browser page or Spotify window), never a global media key
+        # that could hit the other app that just made the sound.
+        browser_audible = browser_peak >= threshold
+        desktop_audible = desktop_peak >= threshold
+        if desktop_audible and desktop_peak >= browser_peak:
+            order = ["desktop", "browser"]
+        elif browser_audible:
+            order = ["browser", "desktop"]
+        elif not prefer_browser_pause:
+            order = ["desktop", "browser"]
+        else:
+            order = ["browser", "desktop"]
+
+        for source in order:
+            if source == "desktop":
+                # Never poke the silent desktop sidecar while the browser is
+                # the known source.  That used to toggle the wrong component.
+                if not desktop_audible and browser_audible:
+                    continue
+                if not desktop_audible and not self._loopback_audible(threshold):
+                    continue
+                if not self._pause_desktop(paused_by_game):
+                    continue
+            else:
+                if not (self._page or self._context or self._cdp_url):
+                    continue
+                if not self._run_on_page(lambda page: self._pause_player(page)):
+                    continue
+            if self._wait_for_silence(threshold, timeout=1.6):
+                self._remember_playback_state(False, paused_by_game=paused_by_game)
+                return True
+        self._last_error = self._last_error or "Could not confirm Spotify pause"
+        return False
 
     def ensure_playing(self) -> bool:
         self._clear_mixer_mute()
-        if self._paused_by_game:
-            try:
-                prefer_browser_play = self._use_simplified_dual_flow() or self._uses_browser_player()
-            except Exception:
-                prefer_browser_play = False
-            if prefer_browser_play:
-                def _work(page):
-                    return self._play_player(page)
+        try:
+            prefer_browser_play = not self._uses_desktop_player()
+        except Exception:
+            prefer_browser_play = False
 
-                ok = bool(self._run_on_page(_work))
-                if ok:
-                    self._remember_playback_state(True, paused_by_game=False)
-                    return True
-            # If Spotify desktop is available, try resuming desktop first
-            try:
-                if (
-                    not prefer_browser_play
-                    and (_spotify_running() or self._desktop_sidecar_active or self._uses_desktop_player())
-                ):
-                    try:
-                        desktop = self._desktop_helper()
-                        self._log("Calling desktop.ensure_playing from ensure_playing")
-                        ok = desktop.ensure_playing()
-                        if ok:
-                            self._remember_playback_state(True, paused_by_game=False)
-                            return True
-                    except Exception:
-                        pass
-                # If desktop is present but didn't resume, try a global media key as a robust fallback
-                try:
-                    if self._send_global_media_key("ensure_playing:desktop_global_fallback"):
-                        self._log("Sent global media Play/Pause key as desktop resume fallback.")
-                        self._remember_playback_state(True, paused_by_game=False)
-                        return True
-                except Exception:
-                    pass
-            except Exception:
-                pass
+        threshold = 0.0015
+        browser_peak, desktop_peak = self._source_peaks()
+        if browser_peak >= threshold or desktop_peak >= threshold:
+            self._note_audio_source(browser_peak, desktop_peak, threshold)
+            self._remember_playback_state(True, paused_by_game=False)
+            return True
+        # The source-specific meters can miss a session; if the combined
+        # meter already hears Spotify, do not risk stealing playback by
+        # sending another play command to the other component.
+        if self._loopback_audible(threshold):
+            self._remember_playback_state(True, paused_by_game=False)
+            return True
 
-            def _work(page):
-                return self._play_player(page)
+        # Remember which source was audible before the game paused it.
+        prefer_desktop = (
+            not prefer_browser_play
+            or getattr(self, "_last_audio_source", "browser") == "desktop"
+        )
 
-            ok = bool(self._run_on_page(_work))
+        def _resume_browser() -> bool:
+            ok = bool(self._run_on_page(lambda page: self._play_player(page)))
             if ok:
+                self._last_audio_source = "browser"
                 self._remember_playback_state(True, paused_by_game=False)
-            elif self._send_global_media_key("ensure_playing:page_global_fallback"):
-                self._remember_playback_state(True, paused_by_game=False)
-                ok = True
             return ok
-        return self.ensure_playing_any()
+
+        def _resume_desktop_checked() -> bool:
+            ok = self._resume_desktop()
+            if ok:
+                self._last_audio_source = "desktop"
+                self._remember_playback_state(True, paused_by_game=False)
+            return ok
+
+        # Only targeted commands here.  A global media key can resume the
+        # other app whose audio just stopped instead of Spotify.
+        if prefer_desktop:
+            if _resume_desktop_checked():
+                return True
+            if _resume_browser():
+                return True
+        else:
+            if _resume_browser():
+                return True
+            if _resume_desktop_checked():
+                return True
+        return False
 
     def ensure_playing_any(self) -> bool:
         self._clear_mixer_mute()
+        try:
+            if not self._uses_desktop_player():
+                ok = bool(self._run_on_page(lambda page: self._play_player(page)))
+                if ok:
+                    self._remember_playback_state(True, paused_by_game=False)
+                return ok
+        except Exception:
+            pass
         # Prefer desktop client if present
         try:
             if _spotify_running() or self._desktop_sidecar_active or self._uses_desktop_player():
@@ -2530,26 +2896,17 @@ class SpotifyWebController:
                         return True
                 except Exception:
                     pass
-            # If desktop present but didn't resume, try a global media key as a fallback
-            try:
-                if self._send_global_media_key("ensure_playing_any:desktop_global_fallback"):
-                    self._log("Sent global media Play/Pause key as desktop resume fallback.")
-                    self._remember_playback_state(True, paused_by_game=False)
-                    return True
-            except Exception:
-                pass
         except Exception:
             pass
 
+        # Targeted browser command only.  Never fall back to a global media
+        # key here: it can target the other app that just stopped playing.
         def _work(page):
             return self._play_player(page)
 
         ok = bool(self._run_on_page(_work))
         if ok:
             self._remember_playback_state(True, paused_by_game=False)
-        elif self._send_global_media_key("ensure_playing_any:page_global_fallback"):
-            self._remember_playback_state(True, paused_by_game=False)
-            ok = True
         return ok
 
     def resume(self):
@@ -2566,17 +2923,31 @@ class SpotifyWebController:
             return self.play_playlist(context_uri)
         return self.ensure_playing_any()
 
-    def pause(self):
-        return self.ensure_paused()
+    def pause(self, paused_by_game: bool = False):
+        return self.ensure_paused(paused_by_game=paused_by_game)
 
-    def force_pause(self):
-        return self.pause()
+    def force_pause(self, paused_by_game: bool = False):
+        return self.pause(paused_by_game=paused_by_game)
 
     def minimize_window(self):
         return True
 
     def media_play_pause(self) -> bool:
         self._clear_mixer_mute()
+        try:
+            if not self._uses_desktop_player():
+                ok = bool(self._run_on_page(lambda page: self._toggle_player(page)))
+                if ok:
+                    state = self._run_on_page(
+                        lambda page: self._player_is_playing(page)
+                    )
+                    if state is not None:
+                        self._remember_playback_state(bool(state))
+                    else:
+                        self._is_playing = not self._is_playing
+                return ok
+        except Exception:
+            pass
 
         def _work(page):
             return self._toggle_player(page)
@@ -2587,7 +2958,7 @@ class SpotifyWebController:
         return ok
 
     def media_stop(self) -> bool:
-        return self.ensure_paused()
+        return self.ensure_paused(paused_by_game=False)
 
     def media_next(self) -> bool:
         def _work(page):
@@ -2813,34 +3184,45 @@ class SpotifyWebController:
             self._last_error = "One-shot playback attempt failed"
             return None
 
-        # Normal vetted-loop behavior (legacy): try several candidates until one works
+        # Start exactly one playlist per request.  Previously a failed or
+        # uncertain start (slow buffering, DRM, UI lag) made this loop open the
+        # next candidate, which users experienced as "it starts another
+        # playlist" after pause/resume.  A definite failure is reported; the
+        # user can press "Try another" when they actually want a new mix.
         random.shuffle(pool)
-        for pool_index, item in enumerate(pool[:6]):
-            uri = self.normalize_playlist_uri(item.get("uri") or "")
-            if not uri:
-                continue
-            item_name = item.get("name", "")[:60] or "Spotify Playlist"
-            self._log(
-                f"Web player: trying #{pool_index + 1} {item_name} → "
-                f"{playlist_uri_to_url(uri)}"
-            )
-            self._last_play_time = time.time()
-            self._last_query = pick.get("query", "")
-            self._last_pick = pick
-            self._last_error = ""
-            display_name = item_name
-            result = self._start_playback(uri, display_name)
-            if result:
-                self._session_locked = True
-                result.update({
-                    "query": pick.get("query", ""),
-                    "pick_rank": pool.index(item) + 1,
-                    "top_count": len(pool),
-                    "pool": pool,
-                })
-                return result
+        item = None
+        for candidate in pool[:6]:
+            if self.normalize_playlist_uri(candidate.get("uri") or ""):
+                item = candidate
+                break
+        if item is None:
+            self._last_error = "No valid playlist URI in the candidate pool"
+            return None
 
-        self._last_error = "Could not start any playlist in the web player."
+        uri = self.normalize_playlist_uri(item.get("uri") or "")
+        item_name = item.get("name", "")[:60] or "Spotify Playlist"
+        self._log(
+            f"Web player: playing {item_name} → {playlist_uri_to_url(uri)}"
+        )
+        self._last_play_time = time.time()
+        self._last_query = pick.get("query", "")
+        self._last_pick = pick
+        self._last_error = ""
+        display_name = item_name
+        result = self._start_playback(uri, display_name)
+        if result:
+            self._session_locked = True
+            result.update({
+                "query": pick.get("query", ""),
+                "pick_rank": pool.index(item) + 1,
+                "top_count": len(pool),
+                "pool": pool,
+            })
+            return result
+
+        self._last_error = self._last_error or (
+            "Could not start the selected playlist in the web player."
+        )
         return None
 
     def search_and_play(self, query, type_="playlist", mood="chill", tags=None, game_name=""):
