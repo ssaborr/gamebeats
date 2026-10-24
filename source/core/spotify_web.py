@@ -32,6 +32,8 @@ from core.playlist_search import (
 )
 from core.spotify_desktop import (
     SpotifyDesktopController,
+    _is_silent_placeholder,
+    _looks_like_helper_window,
     _spotify_running,
     is_playlist_uri,
     parse_spotify_uri,
@@ -313,6 +315,7 @@ class SpotifyWebController:
         self._last_query = ""
         self._last_pick = {}
         self._last_playlist_name = ""
+        self._last_known_track_info = None
         self._play_lock = threading.RLock()
         self._browser_lock = threading.Lock()
         self._login_checked = False
@@ -730,13 +733,17 @@ class SpotifyWebController:
             set_browser_audio_only(True)
             register_music_player_pids(pids)
             if pids:
-                self._log(
-                    f"Audio monitor: listening to web-player browser PIDs {pids}"
-                )
-            else:
+                if pids != getattr(self, "_last_audio_pids_logged", None):
+                    self._log(
+                        f"Audio monitor: listening to web-player browser PIDs {pids}"
+                    )
+                    self._last_audio_pids_logged = pids
+                self._logged_waiting_for_player_pids = False
+            elif not getattr(self, "_logged_waiting_for_player_pids", False):
                 self._log(
                     "Audio monitor: browser running but no player PIDs matched yet"
                 )
+                self._logged_waiting_for_player_pids = True
             return
 
         # Desktop player (legacy Connect mode) — monitor spotify.exe.
@@ -2998,20 +3005,41 @@ class SpotifyWebController:
         def _work(page):
             title = ""
             artist = ""
+            album_art = None
+            # Media Session metadata is language-independent and carries the
+            # actual song/artist. Spotify's DOM sometimes labels the context
+            # (playlist) as the track, so prefer this source.
             try:
-                title_el = page.locator('[data-testid="context-item-link"]').first
-                if title_el.count():
-                    title = (title_el.inner_text() or "").strip()
+                meta = page.evaluate(
+                    "() => { try { const m = navigator.mediaSession && "
+                    "navigator.mediaSession.metadata; if (!m) return null; "
+                    "const a = (m.artwork && m.artwork.length) ? "
+                    "m.artwork[m.artwork.length - 1].src : ''; "
+                    "return {title: m.title || '', artist: m.artist || '', "
+                    "album: m.album || '', art: a}; } catch (e) { return null; } }"
+                )
+                if meta:
+                    title = str(meta.get("title") or "").strip()
+                    artist = str(meta.get("artist") or "").strip()
+                    album_art = str(meta.get("art") or "").strip() or None
             except Exception:
                 pass
-            try:
-                artist_el = page.locator(
-                    '[data-testid="context-item-info-artist"], a[href*="/artist/"]'
-                ).first
-                if artist_el.count():
-                    artist = (artist_el.inner_text() or "").strip()
-            except Exception:
-                pass
+            if not title:
+                try:
+                    title_el = page.locator('[data-testid="context-item-link"]').first
+                    if title_el.count():
+                        title = (title_el.inner_text() or "").strip()
+                except Exception:
+                    pass
+            if not artist:
+                try:
+                    artist_el = page.locator(
+                        '[data-testid="context-item-info-artist"], a[href*="/artist/"]'
+                    ).first
+                    if artist_el.count():
+                        artist = (artist_el.inner_text() or "").strip()
+                except Exception:
+                    pass
             playing = self._player_is_playing(page)
             if playing is None:
                 playing = self._is_playing
@@ -3019,7 +3047,7 @@ class SpotifyWebController:
                 return {
                     "name": title or "Spotify",
                     "artist": artist or self._last_query[:40] or "Web player",
-                    "album_art": None,
+                    "album_art": album_art,
                     "is_playing": bool(playing),
                     "progress_ms": 0,
                     "duration_ms": 0,
@@ -3031,12 +3059,73 @@ class SpotifyWebController:
 
         data = self._run_on_page(_work)
         if data:
-            return data
+            name = str(data.get("name") or "").strip()
+            if not _is_silent_placeholder(
+                name, data.get("artist"), data.get("uri")
+            ):
+                if name and name.lower() != "spotify":
+                    self._last_known_track_info = dict(data)
+                return data
+
+        # The web page can be idle while the desktop sidecar is the audible
+        # source. In that case read the track from the desktop player so the
+        # deck still shows the real song instead of "Nothing playing".
+        try:
+            if (
+                self._desktop_sidecar_active
+                or self._desktop_player is not None
+                or self._uses_desktop_player()
+            ):
+                desktop_track = self._desktop_helper().get_current_track()
+                if desktop_track:
+                    desktop_name = str(desktop_track.get("name") or "").strip()
+                    if (
+                        desktop_name
+                        and not _looks_like_helper_window(desktop_name)
+                        and not _is_silent_placeholder(
+                            desktop_name,
+                            desktop_track.get("artist"),
+                            desktop_track.get("uri"),
+                        )
+                    ):
+                        self._last_known_track_info = dict(desktop_track)
+                        return desktop_track
+        except Exception:
+            pass
+
+        # Reuse the last real track while Spotify is still running. This keeps
+        # the deck stable across the brief moments when neither page reports a
+        # title (track transitions, desktop sidecar hand-off, etc.).
+        cached = getattr(self, "_last_known_track_info", None)
+        if cached and (
+            self._desktop_sidecar_active
+            or self._uses_desktop_player()
+            or self._is_playing
+        ):
+            cached = dict(cached)
+            cached["is_playing"] = True
+            return cached
+
         if not self._is_playing:
+            # The desktop sidecar is audible even though the web page reports
+            # no track. Show the known playlist rather than "Nothing playing".
+            if self._desktop_sidecar_active or self._uses_desktop_player():
+                return {
+                    "name": self._last_playlist_name or "",
+                    "artist": "Spotify",
+                    "album_art": None,
+                    "is_playing": True,
+                    "progress_ms": 0,
+                    "duration_ms": 0,
+                    "uri": self._last_uri,
+                    "playlist_uri": self._last_uri,
+                    "context_uri": self._last_uri,
+                    "playlist_name": self._last_playlist_name,
+                }
             return None
         return {
-            "name": "Spotify",
-            "artist": self._last_query[:40] or "Web player",
+            "name": self._last_playlist_name or "Spotify",
+            "artist": "Spotify",
             "album_art": None,
             "is_playing": True,
             "progress_ms": 0,
@@ -3044,6 +3133,7 @@ class SpotifyWebController:
             "uri": self._last_uri,
             "playlist_uri": self._last_uri,
             "context_uri": self._last_uri,
+            "playlist_name": self._last_playlist_name,
         }
 
     def _begin_playback(

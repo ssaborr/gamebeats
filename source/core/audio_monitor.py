@@ -337,6 +337,12 @@ def register_music_player_pids(pids: list):
         close_spotify_loopback()
 
 
+def has_registered_music_pids() -> bool:
+    """True once the web-player browser PIDs have been discovered."""
+    with _registered_music_pid_lock:
+        return bool(_registered_music_pids)
+
+
 def close_spotify_loopback():
     global _spotify_loopback_capture, _spotify_loopback_pid, _spotify_loopback_captures
     with _spotify_loopback_lock:

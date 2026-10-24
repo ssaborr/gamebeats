@@ -960,14 +960,21 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         app._set_puppy_singing_visible = (
             GameBeatsApp._set_puppy_singing_visible.__get__(app, GameBeatsApp)
         )
-        app._puppy_singing_overlay = MagicMock()
+        app._hide_puppy_after_quiet = (
+            GameBeatsApp._hide_puppy_after_quiet.__get__(app, GameBeatsApp)
+        )
         app._mascot_notifier = None
         app._control_overlay = None
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_hide_job = None
+        app._puppy_last_loud_ts = 0.0
         app.play_btn = MagicMock()
         app._update_deck_status = MagicMock()
         app._schedule_room_redraw = MagicMock()
         app._pulse_active = True
         app._pulse_job = MagicMock()
+        app._puppy_audio_active = False
+        app.root = MagicMock()
         app._intentional_pause_active = MagicMock(return_value=False)
         return app
 
@@ -998,6 +1005,12 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
 
         app._schedule_room_redraw.assert_called_once_with(0)
 
+    def test_desktop_puppy_overlay_is_translucent(self):
+        from ui.mascot_notifier import PUPPY_OVERLAY_ALPHA
+
+        self.assertLessEqual(PUPPY_OVERLAY_ALPHA, 0.85)
+        self.assertGreater(PUPPY_OVERLAY_ALPHA, 0.5)
+
     def test_singing_puppy_shows_without_a_detected_game(self):
         app = self._make_app()
         app.current_game = None
@@ -1005,6 +1018,8 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         app._set_puppy_singing_visible(True)
 
         app._puppy_singing_overlay.show.assert_called_once()
+        self.assertTrue(app._puppy_audio_active)
+        app._schedule_room_redraw.assert_called_once_with(0)
 
     def test_singing_puppy_hides_on_intentional_pause(self):
         app = self._make_app()
@@ -1013,7 +1028,30 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         app._set_puppy_singing_visible(True)
 
         app._puppy_singing_overlay.show.assert_not_called()
-        app._puppy_singing_overlay.hide.assert_called_once()
+        app._puppy_singing_overlay.hide.assert_called_once_with(immediate=True)
+        self.assertFalse(app._puppy_audio_active)
+
+    def test_singing_puppy_survives_a_short_audio_dip(self):
+        app = self._make_app()
+        app._puppy_singing_overlay.is_visible.return_value = True
+
+        app._set_puppy_singing_visible(True)
+        app._set_puppy_singing_visible(False)
+
+        # A ~0.5s meter dip schedules a delayed hide instead of blinking.
+        app._puppy_singing_overlay.show.assert_called_once()
+        app._puppy_singing_overlay.hide.assert_not_called()
+        app.root.after.assert_called()
+        self.assertFalse(app._puppy_audio_active)
+
+    def test_singing_puppy_hides_after_a_long_quiet_run(self):
+        app = self._make_app()
+        app._puppy_singing_overlay.is_visible.return_value = True
+        app._puppy_last_loud_ts = 0.0
+
+        app._hide_puppy_after_quiet()
+
+        app._puppy_singing_overlay.hide.assert_called_once_with()
 
 
 class TestAudioMonitorRegression(unittest.TestCase):

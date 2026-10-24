@@ -459,10 +459,16 @@ class GameBeatsApp:
         sh = self.root.winfo_screenheight()
         init_w = min(WIN_W, max(960, int(sw * 0.75)))
         init_h = min(WIN_H, max(700, int(sh * 0.80)))
-        
-        # Center window on screen for overrideredirect
-        px = max(0, (sw - init_w) // 2)
-        py = max(0, (sh - init_h) // 2)
+
+        # Tk scales geometry sizes by the display DPI but screen dimensions are
+        # physical pixels, so centering with the raw numbers pushes the window
+        # off-screen on 150%+ displays. Center using the physical window size.
+        try:
+            ui_scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            ui_scale = 1.0
+        px = max(0, (sw - int(init_w * ui_scale)) // 2)
+        py = max(0, (sh - int(init_h * ui_scale)) // 2)
         self.root.geometry(f"{init_w}x{init_h}+{px}+{py}")
         self.root.minsize(960, 700)
         self.root.resizable(True, True)
@@ -523,7 +529,10 @@ class GameBeatsApp:
         self._current_playlist_query = ""
         self._playlist_end_pending = False
         self._mascot_notifier = None          # MascotNotifier shown at playlist end
-        self._puppy_singing_overlay = None    # Small puppy animation while Spotify audio is active
+        self._puppy_singing_overlay = None    # Small desktop puppy while music plays
+        self._puppy_hide_job = None           # Delayed hide so short audio dips don't blink it
+        self._puppy_last_loud_ts = 0.0
+        self._puppy_audio_active = False      # Drives the in-room mascot pose
         self._music_missing_since = 0.0
         self._last_music_seen_ts = 0.0
         self._last_game_loud_ts = 0.0
@@ -590,8 +599,9 @@ class GameBeatsApp:
                 )
             ),
         )
-        self._puppy_singing_overlay = PuppySingingOverlay(self.root)
-
+        self._puppy_singing_overlay = PuppySingingOverlay(
+            self.root, corner="bottom-left"
+        )
         self._build_ui()
         # Make layout responsive to window resizes
         self.root.bind("<Configure>", lambda e: self._on_root_resize())
@@ -1448,12 +1458,12 @@ class GameBeatsApp:
         self._last_resize = (w, h)
 
         room_h = max(260, h - 48 - 44 - 62)
-        self._deck_height = int(room_h * 0.34)
-        for attr in ("_deck_wrap", "_deck_shadow"):
-            try:
-                getattr(self, attr).place_configure(relheight=0.34)
-            except Exception:
-                pass
+        self._deck_height = 420
+        try:
+            if getattr(self, "_deck_wrap", None) is not None:
+                self._deck_wrap.configure(height=self._deck_height)
+        except Exception:
+            pass
 
         wrap = max(300, w - 120)
         deck_wrap = max(240, int(w * 0.584) - 230)
@@ -1655,43 +1665,58 @@ class GameBeatsApp:
         mp = self._page_main
 
         self._room_canvas = tk.Canvas(mp, bg=BG, highlightthickness=0, bd=0)
-        self._room_canvas.pack(fill=tk.BOTH, expand=True)
+        mp.grid_rowconfigure(0, weight=1)
+        mp.grid_columnconfigure(0, weight=1)
+        self._room_canvas.grid(row=0, column=0, sticky="nsew")
         self._room_canvas.bind("<Configure>", self._on_room_canvas_configure)
         self._room_canvas.bind("<Button-1>", self._on_room_canvas_click)
         self._room_image_item = None
         self._puppy_bbox = (0, 0, 0, 0)
+        self._room_puppy_item = None
+        self._room_puppy_photo = None
+        self._room_puppy_base = (0, 0, 0, 0)
+        self._room_puppy_sprite_key = None
         self._vu_level = 0.0
-        self._deck_height = 260
+        self._deck_height = 420
 
-        self._deck_shadow = tk.Frame(mp, bg=NIGHT, bd=0, highlightthickness=0)
-        self._deck_shadow.place(
-            relx=0.057, rely=0.90, anchor="sw", relwidth=0.584,
-            relheight=0.34, x=7, y=7,
+        # The deck is a real dock now, not a floating window placed over the
+        # canvas. That keeps it visible on every DPI/window-size combination.
+        self._deck_shadow = None
+        self._deck_wrap = tk.Frame(
+            mp, bg=DECK, bd=0, highlightthickness=0, height=420,
         )
-
-        self._deck_wrap = tk.Frame(mp, bg=DECK, bd=0, highlightthickness=0)
-        self._deck_wrap.place(
-            relx=0.057, rely=0.90, anchor="sw", relwidth=0.584,
-            relheight=0.34,
+        self._deck_wrap.grid(
+            row=1, column=0, sticky="ew", padx=(24, 24), pady=(0, 12),
         )
+        self._deck_wrap.pack_propagate(False)
 
         self._deck = ctk.CTkFrame(
             self._deck_wrap, fg_color=DECK, corner_radius=0,
             border_width=3, border_color=NIGHT,
         )
         self._deck.pack(fill=tk.BOTH, expand=True)
+        # Crisp 3D bevel: lit top edge, deep bottom edge.
+        try:
+            tk.Frame(self._deck, bg="#8E5560", height=2).place(
+                x=0, y=0, relwidth=1,
+            )
+            tk.Frame(self._deck, bg=NIGHT, height=3).place(
+                x=0, rely=1.0, y=-3, relwidth=1,
+            )
+        except Exception:
+            pass
 
         top = ctk.CTkFrame(self._deck, fg_color=DECK_TOP, height=25, corner_radius=0)
         top.pack(fill=tk.X)
         top.pack_propagate(False)
         ctk.CTkLabel(
             top, text="GB\u201401 / AUTO-SOUND SYSTEM", fg_color="transparent",
-            text_color=GOLD, font=T.pixel_font(8, "bold"),
+            text_color=GOLD, font=T.pixel_font(9, "bold"),
         ).pack(side=tk.LEFT, padx=10)
 
         self.deck_led = ctk.CTkLabel(
             top, text="\u25cb  SPOTIFY OUT", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(8), cursor="hand2",
+            text_color=TEXT_MUTED, font=T.pixel_font(9), cursor="hand2",
         )
         self.deck_led.pack(side=tk.RIGHT, padx=10)
         self.deck_led.bind("<Button-1>", lambda e: self._nav("settings"))
@@ -1724,7 +1749,7 @@ class GameBeatsApp:
         head.pack(fill=tk.X, padx=7, pady=(7, 2))
 
         self._game_icon_holder = ctk.CTkFrame(
-            head, fg_color=SURFACE3, width=34, height=34, corner_radius=0,
+            head, fg_color=SURFACE3, width=40, height=40, corner_radius=0,
             border_width=1, border_color=WOOD,
         )
         self._game_icon_holder.pack(side=tk.LEFT, padx=(0, 7))
@@ -1732,7 +1757,7 @@ class GameBeatsApp:
 
         self._game_icon_label = ctk.CTkLabel(
             self._game_icon_holder, text="\U0001f3ae", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(16),
+            text_color=TEXT_MUTED, font=T.retro_font(18),
         )
         self._game_icon_label.pack(fill=tk.BOTH, expand=True)
 
@@ -1741,21 +1766,21 @@ class GameBeatsApp:
 
         self.game_banner = ctk.CTkLabel(
             name_col, text="NO SAVED GAME RUNNING", fg_color="transparent",
-            text_color=TEXT, font=T.pixel_font(10, "bold"),
+            text_color=TEXT, font=T.pixel_font(11, "bold"),
             anchor="w", justify=tk.LEFT, wraplength=160,
         )
         self.game_banner.pack(fill=tk.X)
 
         self.mood_lbl = ctk.CTkLabel(
             name_col, text="Waiting for a game", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(12),
+            text_color=TEXT_MUTED, font=T.retro_font(13),
             anchor="w", justify=tk.LEFT, wraplength=160,
         )
         self.mood_lbl.pack(fill=tk.X, pady=(1, 0))
 
         self.playlist_display_lbl = ctk.CTkLabel(
             cart_label, text="PLAYLIST: \u2014", fg_color="transparent",
-            text_color=GOLD, font=T.retro_font(12),
+            text_color=GOLD, font=T.retro_font(13),
             anchor="w", justify=tk.LEFT, wraplength=190,
         )
         self.playlist_display_lbl.pack(fill=tk.X, padx=7, pady=(4, 0))
@@ -1785,25 +1810,25 @@ class GameBeatsApp:
 
         self.deck_status_lbl = ctk.CTkLabel(
             status_row, text="\u25cb  STANDING BY", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(8, "bold"),
+            text_color=TEXT_MUTED, font=T.pixel_font(9, "bold"),
         )
         self.deck_status_lbl.pack(side=tk.LEFT)
 
         ctk.CTkLabel(
             status_row, text="SIDE A / AUTO", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(7),
+            text_color=TEXT_MUTED, font=T.pixel_font(8),
         ).pack(side=tk.RIGHT)
 
         self.track_lbl = ctk.CTkLabel(
             inner, text="Nothing playing", fg_color="transparent",
-            text_color=TEXT, font=T.retro_font(22),
+            text_color=TEXT, font=T.retro_font(24),
             anchor="w", justify=tk.LEFT,
         )
         self.track_lbl.pack(fill=tk.X, pady=(2, 0))
 
         self.deck_artist_lbl = ctk.CTkLabel(
             inner, text="Connect Spotify in Control Panel", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(14),
+            text_color=TEXT_MUTED, font=T.retro_font(15),
             anchor="w", justify=tk.LEFT,
         )
         self.deck_artist_lbl.pack(fill=tk.X, pady=(0, 1))
@@ -1847,7 +1872,7 @@ class GameBeatsApp:
 
         self.status_log_lbl = ctk.CTkLabel(
             inner, text="GameBeats ready.", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(12),
+            text_color=TEXT_MUTED, font=T.retro_font(13),
             anchor="w", justify=tk.LEFT,
         )
         self.status_log_lbl.pack(fill=tk.X, pady=(3, 0))
@@ -1861,7 +1886,7 @@ class GameBeatsApp:
         auto.pack(side=tk.LEFT)
         ctk.CTkLabel(
             auto, text="AUTO", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(7),
+            text_color=TEXT_MUTED, font=T.pixel_font(8),
         ).pack(side=tk.LEFT, padx=(0, 4))
         ctk.CTkSwitch(
             auto, variable=self.auto_mode, text="", width=34, height=17,
@@ -1877,7 +1902,7 @@ class GameBeatsApp:
         seamless.pack(side=tk.LEFT, padx=(14, 0))
         ctk.CTkLabel(
             seamless, text="KEEP MUSIC", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(7),
+            text_color=TEXT_MUTED, font=T.pixel_font(8),
         ).pack(side=tk.LEFT, padx=(0, 4))
         ctk.CTkSwitch(
             seamless, variable=self.seamless_music_var,
@@ -1903,6 +1928,20 @@ class GameBeatsApp:
         body.pack(fill=tk.BOTH, expand=True, padx=9, pady=(7, 4))
 
         self.root.after(80, self._redraw_room)
+        # The room canvas fills the page. Force the player deck above it and
+        # re-assert once the window has its final geometry.
+        self._raise_deck()
+        self.root.after(250, self._raise_deck)
+        self.root.after(900, self._raise_deck)
+
+    def _raise_deck(self):
+        try:
+            if getattr(self, "_deck_shadow", None) is not None:
+                self._deck_shadow.lift()
+            if getattr(self, "_deck_wrap", None) is not None:
+                self._deck_wrap.lift()
+        except Exception:
+            pass
 
     # ── DEN CANVAS ────────────────────────────────────────────────────────────
 
@@ -1950,6 +1989,104 @@ class GameBeatsApp:
         except Exception:
             return None
 
+    def _draw_room_puppy(self, canvas, sprite_name, geometry):
+        px, py, pw, ph = geometry
+        sprite = self._puppy_image_for(sprite_name, (pw, ph))
+        if sprite is None:
+            return
+        try:
+            photo = ImageTk.PhotoImage(sprite)
+            self._room_puppy_photo = photo
+            if self._room_puppy_item is None or not canvas.type(self._room_puppy_item):
+                self._room_puppy_item = canvas.create_image(
+                    px, py, anchor="nw", image=photo, tags=("puppy",)
+                )
+            else:
+                canvas.itemconfigure(self._room_puppy_item, image=photo)
+                canvas.coords(self._room_puppy_item, px, py)
+            self._room_puppy_sprite_key = (sprite_name, int(pw), int(ph))
+            canvas.tag_raise("puppy")
+        except Exception:
+            pass
+
+    def _animate_room_puppy(self):
+        """Smoothly bob/sway the in-room puppy without repainting the room."""
+        canvas = getattr(self, "_room_canvas", None)
+        if canvas is None or self._room_puppy_item is None:
+            return
+        try:
+            if not canvas.winfo_exists():
+                return
+            px, py, pw, ph = getattr(self, "_room_puppy_base", (0, 0, 0, 0))
+            if pw <= 0 or ph <= 0:
+                return
+            now = time.time()
+            playing = bool(
+                getattr(self, "_is_playing", False)
+                or getattr(self, "_spotify_audio_active", False)
+            ) and not self._intentional_pause_active()
+            phase = now * (3.6 if playing else 1.8)
+            bob = math.sin(phase) * (3.4 if playing else 2.2)
+            sway = math.sin(phase * 0.5 + 0.8) * (1.6 if playing else 0.8)
+            nx = int(round(px + sway))
+            ny = int(round(py + bob))
+            canvas.coords(self._room_puppy_item, nx, ny)
+            self._puppy_bbox = (nx, ny, nx + pw, ny + ph)
+
+            # Swap mouth poses a little slower than the bob so the motion
+            # reads as singing rather than a strobing two-frame flip.
+            cycle = int(now * (6.0 if playing else 2.0)) % 4
+            if playing:
+                sprite_name = "sing" if cycle < 2 else "mic"
+            elif getattr(self, "current_game", None):
+                sprite_name = "mic"
+            else:
+                sprite_name = "idle"
+            key = (sprite_name, int(pw), int(ph))
+            if key != self._room_puppy_sprite_key:
+                sprite = self._puppy_image_for(sprite_name, (pw, ph))
+                if sprite is not None:
+                    photo = ImageTk.PhotoImage(sprite)
+                    self._room_puppy_photo = photo
+                    canvas.itemconfigure(self._room_puppy_item, image=photo)
+                    self._room_puppy_sprite_key = key
+            self._draw_room_dust(
+                canvas, canvas.winfo_width(), canvas.winfo_height(), now, playing
+            )
+            canvas.tag_raise("puppy")
+        except Exception:
+            pass
+
+    def _draw_room_dust(self, canvas, w, h, now, playing):
+        """Tiny drifting dust motes give the den a lit, lived-in feel."""
+        try:
+            canvas.delete("dust")
+            speed = 7.0 if playing else 2.5
+            for i in range(16):
+                seed = i * 37.17
+                x = int(
+                    (seed * 41.0 + now * speed * (0.35 + (i % 4) * 0.12))
+                    % max(1, w)
+                )
+                y = int(
+                    (
+                        h * 0.12
+                        + (seed * 29.0) % max(1, int(h * 0.62))
+                        + math.sin(now * 0.7 + i) * 6
+                    )
+                    % max(1, h)
+                )
+                size = 2 if i % 3 == 0 else 1
+                color = GOLD if i % 4 == 0 else (MINT if i % 5 == 0 else ROSE)
+                canvas.create_rectangle(
+                    x, y, x + size, y + size, fill=color, outline="",
+                    tags=("dust",),
+                )
+            if self._room_puppy_item is not None:
+                canvas.tag_lower("dust", self._room_puppy_item)
+        except Exception:
+            pass
+
     @staticmethod
     def _game_label(game):
         """Return a clean display name for a detector record or plain string."""
@@ -1965,6 +2102,7 @@ class GameBeatsApp:
 
     def _redraw_room(self):
         canvas = getattr(self, "_room_canvas", None)
+        self._raise_deck()
         self._room_redraw_job = None
         if canvas is None:
             return
@@ -2008,7 +2146,7 @@ class GameBeatsApp:
         playing = bool(
             getattr(self, "_is_playing", False)
             or getattr(self, "_spotify_audio_active", False)
-        )
+        ) and not self._intentional_pause_active()
         if playing:
             beat = int(now * 2.0) % 4
             sprite_name = "sing" if beat < 2 else "mic"
@@ -2020,20 +2158,18 @@ class GameBeatsApp:
             sprite_name = "idle"
             bob = int(round(1.5 + 1.5 * math.sin(now * 1.6)))
 
-        pw = max(80, int(w * 0.140))
+        # The mascot is the big in-room puppy, centred over the player deck.
+        # The sprite has a five-pixel transparent margin under the paws; tuck
+        # that under the canvas edge so the paws visually rest on the dock.
+        pw = max(96, int(w * 0.145))
         ph = int(pw * 144 / 128)
-        px = int(w * 0.390)
-        py = int(h * 0.355) + bob
+        px = (w - pw) // 2
+        paw_margin = int(round(ph * 5.0 / 144.0))
+        perch_y = h - ph + paw_margin - 1
+        py = max(0, min(perch_y + bob, perch_y))
         px = max(0, min(px, w - pw - 4))
-        py = max(0, min(py, h - ph - 8))
         self._puppy_bbox = (px, py, px + pw, py + ph)
-
-        sprite = self._puppy_image_for(sprite_name, (pw, ph))
-        if sprite is not None:
-            try:
-                base.alpha_composite(sprite, (px, py))
-            except Exception:
-                pass
+        self._room_puppy_base = (px, py, pw, ph)
 
         try:
             photo = ImageTk.PhotoImage(base.convert("RGB"))
@@ -2048,6 +2184,36 @@ class GameBeatsApp:
             canvas.delete("overlay")
         except Exception:
             return
+
+        # The puppy lives on its own canvas image item, so the animation loop
+        # can bob it smoothly without re-rendering the entire room.
+        self._draw_room_puppy(canvas, sprite_name, (px, py, pw, ph))
+
+        # Small, dark contact shadow under the paws. The old gold/mint oval
+        # read as an orange circle behind the mascot, so the glow is gone.
+        try:
+            sy = min(h - 1, py + ph - 2)
+            shadow_w = int(pw * 0.62)
+            sx = px + (pw - shadow_w) // 2
+            layers = (
+                (0.00, 1.00, 5, 4),
+                (0.10, 0.90, 3, 3),
+                (0.22, 0.78, 2, 2),
+            )
+            shadow = None
+            for inset, right, height, _ in layers:
+                x0 = sx + int(shadow_w * inset)
+                x1 = sx + int(shadow_w * right)
+                shadow = canvas.create_rectangle(
+                    x0, sy - height, x1, sy,
+                    fill="#160C1A", outline="", stipple="gray50",
+                    tags=("overlay", "puppy_shadow"),
+                )
+            if shadow is not None and self._room_puppy_item is not None:
+                canvas.tag_lower(shadow, self._room_puppy_item)
+                canvas.tag_lower("puppy_shadow", self._room_puppy_item)
+        except Exception:
+            pass
 
         # Greeting
         gx = int(w * 0.068)
@@ -2298,10 +2464,15 @@ class GameBeatsApp:
             getattr(self, "_is_playing", False)
             or getattr(self, "_spotify_audio_active", False)
         )
-        self._redraw_room()
+        if self._room_puppy_item is None:
+            self._redraw_room()
+        else:
+            self._animate_room_puppy()
         try:
+            # Smooth continuous motion; the heavy room image is only rebuilt
+            # on actual state changes, so this is cheap.
             self._puppy_job = self.root.after(
-                440 if playing else 760, self._animate_puppy
+                90 if playing else 180, self._animate_puppy
             )
         except Exception:
             self._puppy_job = None
@@ -3590,6 +3761,7 @@ class GameBeatsApp:
         self._tried_playlist_uris = []  # Reset tried playlists for this game session
         self._spotify_audio_status_logged = False
         self._audio_source_refresh_ts = time.time()
+        self._audio_source_warmup_until = time.time() + 30.0
         self._playlist_audio_armed = False
         self._spotify_loud_streak = 0
         # Clear stale pause state from the previous game session.
@@ -3638,12 +3810,27 @@ class GameBeatsApp:
 
                     # Browsers spawn/replace renderer processes; re-scan the
                     # web-player PIDs periodically so loopback keeps working.
+                    # During the first seconds after startup (while the
+                    # automated browser is still coming up) poll quickly, so
+                    # other-app audio can pause Spotify right away instead of
+                    # waiting for the 10s steady-state refresh.
+                    refresh_interval = (
+                        1.5
+                        if now < getattr(self, "_audio_source_warmup_until", 0.0)
+                        else 10.0
+                    )
                     if (self._is_web_mode()
-                            and now - getattr(self, "_audio_source_refresh_ts", 0.0) >= 10.0):
+                            and now - getattr(self, "_audio_source_refresh_ts", 0.0) >= refresh_interval):
                         self._audio_source_refresh_ts = now
                         try:
                             if self.spotify and hasattr(self.spotify, "refresh_audio_source"):
                                 self.spotify.refresh_audio_source()
+                                try:
+                                    from core.audio_monitor import has_registered_music_pids
+                                    if has_registered_music_pids():
+                                        self._audio_source_warmup_until = 0.0
+                                except Exception:
+                                    pass
                         except Exception:
                             pass
 
@@ -3832,23 +4019,75 @@ class GameBeatsApp:
         threading.Thread(target=_loop, daemon=True).start()
 
     def _set_puppy_singing_visible(self, visible: bool):
-        """Show the floating singing puppy while music is actually playing.
+        """Show the small desktop puppy and update the in-room mascot.
 
-        It used to require a detected game, which meant it never appeared for
-        plain Spotify playback. The puppy is a music companion, not a game
-        HUD, so only an intentional pause (or the playlist-end notifier)
-        should hide it.
+        The desktop puppy is a transparent, always-on-top Toplevel in the
+        lower-left corner. Audio meters dip briefly between beats, so a short
+        quiet run keeps it on screen; a real pause or playlist end hides it
+        immediately. The big den mascot follows the same state.
         """
+        overlay = getattr(self, "_puppy_singing_overlay", None)
+        try:
+            intentionally_stopped = self._intentional_pause_active()
+            notifier_up = getattr(self, "_mascot_notifier", None) is not None
+            active = bool(visible) and not intentionally_stopped and not notifier_up
+            changed = bool(getattr(self, "_puppy_audio_active", False)) != active
+            self._puppy_audio_active = active
+            if changed:
+                self._schedule_room_redraw(0)
+
+            if overlay is None:
+                return
+
+            hide_job = getattr(self, "_puppy_hide_job", None)
+            if active:
+                self._puppy_last_loud_ts = time.time()
+                if hide_job is not None:
+                    try:
+                        self.root.after_cancel(hide_job)
+                    except Exception:
+                        pass
+                    self._puppy_hide_job = None
+                overlay.show()
+                return
+
+            if intentionally_stopped or notifier_up:
+                if hide_job is not None:
+                    try:
+                        self.root.after_cancel(hide_job)
+                    except Exception:
+                        pass
+                    self._puppy_hide_job = None
+                overlay.hide(immediate=True)
+                return
+
+            # Transient quiet: hold the puppy briefly so it doesn't blink.
+            try:
+                is_visible = bool(overlay.is_visible())
+            except Exception:
+                is_visible = True
+            if not is_visible:
+                return
+            if hide_job is None:
+                self._puppy_hide_job = self.root.after(
+                    2600, self._hide_puppy_after_quiet
+                )
+        except Exception:
+            pass
+
+    def _hide_puppy_after_quiet(self):
+        self._puppy_hide_job = None
         overlay = getattr(self, "_puppy_singing_overlay", None)
         if overlay is None:
             return
         try:
+            if time.time() - float(getattr(self, "_puppy_last_loud_ts", 0.0) or 0.0) < 1.0:
+                return
             if (
-                visible
-                and getattr(self, "_mascot_notifier", None) is None
-                and not self._intentional_pause_active()
+                self._intentional_pause_active()
+                or getattr(self, "_mascot_notifier", None) is not None
             ):
-                overlay.show()
+                overlay.hide(immediate=True)
             else:
                 overlay.hide()
         except Exception:
@@ -4057,7 +4296,7 @@ class GameBeatsApp:
             self._playlist_audio_armed = False
             self._spotify_loud_streak = 0
         self.root.after(0, lambda: (
-            self.playlist_display_lbl.configure(text=f"Playlist: {self._current_playlist_name or '\u2014'}"),
+            self.playlist_display_lbl.configure(text=f"PLAYLIST: {self._current_playlist_name or '\u2014'}"),
             self.track_lbl.configure(text=self._current_playlist_name or "Spotify Playlist"),
         ))
         try:
@@ -5018,7 +5257,7 @@ class GameBeatsApp:
                 return value
         if getattr(self, "_current_playlist_uri", ""):
             return "Spotify Playlist"
-        return str(track.get("name") or "Nothing playing")
+        return ""
 
     def _update_np(self, t):
         self._last_track_info = t
@@ -5047,9 +5286,26 @@ class GameBeatsApp:
 
         playlist_title = self._now_playing_playlist_title(t)
         song_title = str(t.get("name") or "").strip()
-        if not song_title or song_title.lower() == "spotify":
-            song_title = playlist_title
+        lowered_song = song_title.lower()
+        if (
+            not song_title
+            or lowered_song == "spotify"
+            or "gdi+ window" in lowered_song
+            or "spotify.exe" in lowered_song
+            or str(t.get("uri") or "") == getattr(self, "SILENT_TRACK_URI", "")
+        ):
+            song_title = playlist_title or "Spotify"
         self.track_lbl.configure(text=song_title)
+
+        # Keep the deck's playlist line in sync even when the track poller is
+        # recovering from a desktop/web hand-off (previously it stayed "—").
+        if playlist_title and playlist_title.lower() != "nothing playing":
+            try:
+                self.playlist_display_lbl.configure(
+                    text=f"PLAYLIST: {playlist_title}"
+                )
+            except Exception:
+                pass
 
         artist = str(t.get("artist") or "").strip()
         if not artist or artist.lower() in ("web player", "spotify"):
@@ -5076,8 +5332,8 @@ class GameBeatsApp:
         if user_toggle_age > 3.0 and not getattr(self, "_audio_monitor_running", False):
             self._set_play_btn_icon(effective_is_playing)
             self._is_playing = effective_is_playing
-            # Poll-only mode (no detected game) still needs the floating
-            # puppy to follow playback, since the audio monitor isn't running.
+            # Poll-only mode (no detected game) still needs the in-room
+            # mascot to follow playback, since the audio monitor isn't running.
             self._set_puppy_singing_visible(effective_is_playing)
         if effective_is_playing:
             self._last_music_seen_ts = time.time()

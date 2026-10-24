@@ -219,7 +219,7 @@ def _add_rounded_corners(im, radius=10):
 
 
 def get_game_square_icon_image(info, size=44):
-    """Square icon for the player tab (Steam banner, exe icon, or mood gradient)."""
+    """Square icon for the player tab (exe icon, Steam banner, or gradient)."""
     if not info:
         return None
     exe_path = info.get("exe_path", "")
@@ -228,6 +228,13 @@ def get_game_square_icon_image(info, size=44):
     game_name = info.get("name", "")
     app_id = info.get("app_id", "")
     px = int(size)
+
+    # Prefer the real executable icon; it is crisp at cart/player sizes and
+    # works for non-Steam games too.
+    if exe_path and os.path.exists(exe_path):
+        img = _extract_exe_icon_image(exe_path, px)
+        if img:
+            return img
 
     if HAS_PIL:
         from PIL import Image
@@ -246,11 +253,10 @@ def get_game_square_icon_image(info, size=44):
                 square = square.resize((px, px), Image.Resampling.LANCZOS)
             return square
 
-    if exe_path and os.path.exists(exe_path):
-        img = _extract_exe_icon_image(exe_path, px)
-        if img:
-            return img
-    return _generate_gradient_fallback(color, size=(px, px), radius=8)
+    return (
+        _pixel_gamepad_icon(color, size=px)
+        or _generate_gradient_fallback(color, size=(px, px), radius=8)
+    )
 
 
 def get_game_thumbnail_image(game_name, app_id="", exe_path="", color=ACCENT, size=(120, 56)):
@@ -344,6 +350,48 @@ def _generate_gradient_fallback(color_hex, size=(BANNER_W, BANNER_H), radius=8):
     return _add_rounded_corners(im, radius)
 
 
+def _pixel_gamepad_icon(color_hex, size=46):
+    """Tiny pixel-art gamepad fallback for games with no readable icon."""
+    if not HAS_PIL:
+        return None
+    from PIL import ImageDraw
+
+    im = _generate_gradient_fallback(color_hex, size=(size, size), radius=6)
+    if im is None:
+        return None
+    draw = ImageDraw.Draw(im)
+    s = int(size)
+    line = max(1, s // 23)
+
+    # Cartridge / panel
+    draw.rounded_rectangle(
+        [int(s * 0.10), int(s * 0.16), int(s * 0.90), int(s * 0.84)],
+        radius=max(3, s // 12),
+        fill=(18, 10, 24, 255),
+        outline=(255, 243, 208, 255),
+        width=line,
+    )
+    # Gamepad shell
+    draw.rounded_rectangle(
+        [int(s * 0.20), int(s * 0.40), int(s * 0.80), int(s * 0.68)],
+        radius=max(3, s // 10),
+        fill=(124, 255, 196, 255),
+    )
+    # D-pad
+    cx, cy = int(s * 0.34), int(s * 0.54)
+    arm = max(1, s // 13)
+    draw.rectangle([cx - arm, cy - arm * 3, cx + arm, cy + arm * 3], fill=(27, 16, 48, 255))
+    draw.rectangle([cx - arm * 3, cy - arm, cx + arm * 3, cy + arm], fill=(27, 16, 48, 255))
+    # Face buttons
+    for dx, dy, col in (
+        (int(s * 0.66), int(s * 0.50), (255, 138, 61, 255)),
+        (int(s * 0.72), int(s * 0.56), (253, 183, 92, 255)),
+    ):
+        r = max(1, s // 14)
+        draw.ellipse([dx - r, dy - r, dx + r, dy + r], fill=col)
+    return im
+
+
 class AddGameDialog(ctk.CTkToplevel):
     def __init__(self, parent, proc_name, display_name, exe_path="", on_save=None,
                  existing=None):
@@ -405,11 +453,11 @@ class AddGameDialog(ctk.CTkToplevel):
                       fg_color=SURF2, text_color=TEXT, hover_color=SURF3,
                       border_width=2, border_color=T.WOOD,
                       corner_radius=0, width=140, height=42,
-                      font=T.pixel_font(9, "bold")).pack(side=tk.LEFT, padx=6)
+                      font=T.pixel_font(11, "bold")).pack(side=tk.LEFT, padx=6)
         ctk.CTkButton(inner, text="ADD GAME \u2713", command=self._save,
                       fg_color=ACCENT, text_color=BG, hover_color=T.ACCENT_HOV,
                       corner_radius=0, width=160, height=42,
-                      font=T.pixel_font(9, "bold")).pack(side=tk.LEFT, padx=6)
+                      font=T.pixel_font(11, "bold")).pack(side=tk.LEFT, padx=6)
 
         self._build(proc_name, display_name)
         self._tag_fetching = True
@@ -444,7 +492,7 @@ class AddGameDialog(ctk.CTkToplevel):
             col,
             text="EDIT GAME" if self._existing else "ADD A GAME",
             fg_color="transparent", text_color=GOLD,
-            font=T.pixel_font(10, "bold"), anchor="w",
+            font=T.pixel_font(11, "bold"), anchor="w",
         ).pack(anchor="w")
         ctk.CTkLabel(
             col, text="Let's make you a mixtape.", fg_color="transparent",
@@ -470,7 +518,7 @@ class AddGameDialog(ctk.CTkToplevel):
         pad.pack(fill=tk.X, padx=20)
 
         ctk.CTkLabel(pad, text="GAME NAME", fg_color="transparent",
-                     text_color=GOLD, font=T.pixel_font(10, "bold")).pack(anchor=tk.W)
+                     text_color=GOLD, font=T.pixel_font(11, "bold")).pack(anchor=tk.W)
         ctk.CTkLabel(
             pad, text="This is what appears on the shelf and in the deck.",
             fg_color="transparent", text_color=TEXT_MUTED,
@@ -497,7 +545,7 @@ class AddGameDialog(ctk.CTkToplevel):
 
         ctk.CTkLabel(pad, text="SPOTIFY SEARCH  (OPTIONAL)",
                      fg_color="transparent", text_color=GOLD,
-                     font=T.pixel_font(9, "bold")).pack(anchor=tk.W)
+                     font=T.pixel_font(11, "bold")).pack(anchor=tk.W)
         ctk.CTkLabel(
             pad, text="Used to find a mix when you have not pasted a playlist link.",
             fg_color="transparent", text_color=TEXT_MUTED,
@@ -512,7 +560,7 @@ class AddGameDialog(ctk.CTkToplevel):
         # ── Spotify Playlist Link ─────────────────────────────────────────────
         ctk.CTkLabel(pad, text="SPOTIFY PLAYLIST LINK  (OPTIONAL \u00b7 OVERRIDES MOOD)",
                      fg_color="transparent", text_color=GOLD,
-                     font=T.pixel_font(9, "bold")).pack(anchor=tk.W, pady=(4, 0))
+                     font=T.pixel_font(11, "bold")).pack(anchor=tk.W, pady=(4, 0))
         ctk.CTkLabel(
             pad, text="Paste a link from Spotify Share. Leave blank to use the mood search.",
             fg_color="transparent", text_color=TEXT_MUTED,
@@ -531,7 +579,7 @@ class AddGameDialog(ctk.CTkToplevel):
         self._playlist_url_var.trace_add("write", self._validate_playlist_url)
 
         ctk.CTkLabel(pad, text="MUSIC MOOD", fg_color="transparent",
-                     text_color=GOLD, font=T.pixel_font(10, "bold")).pack(
+                     text_color=GOLD, font=T.pixel_font(11, "bold")).pack(
             anchor=tk.W, pady=(0, 2))
         ctk.CTkLabel(
             pad, text="Pick the feeling. You can change it any time.",
@@ -767,7 +815,7 @@ class GamesPage(ctk.CTkFrame):
             self._saved_inner,
             text="YOUR CARTS  /  PICK A CART TO EDIT ITS LABEL",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.pixel_font(9, "bold"), anchor="w",
+            font=T.pixel_font(10, "bold"), anchor="w",
         ).pack(fill=tk.X, pady=(12, 0), padx=2)
 
         shelf = ctk.CTkFrame(self._saved_inner, fg_color="transparent", corner_radius=0)
@@ -820,12 +868,12 @@ class GamesPage(ctk.CTkFrame):
             foot,
             text="\u2726  REAL EXECUTABLES ONLY. NO SHORTCUTS, NO STEAM LINKS.",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.pixel_font(8, "bold"), anchor="w",
+            font=T.pixel_font(9, "bold"), anchor="w",
         ).pack(side=tk.LEFT)
         ctk.CTkLabel(
             foot, text=f"{len(games)} CARTS & COUNTING",
             fg_color="transparent", text_color=GOLD,
-            font=T.pixel_font(8, "bold"), anchor="e",
+            font=T.pixel_font(9, "bold"), anchor="e",
         ).pack(side=tk.RIGHT)
 
     # ── Shelf cart ────────────────────────────────────────────────────────────
@@ -874,21 +922,58 @@ class GamesPage(ctk.CTkFrame):
             text_color=label_text, font=T.pixel_font(8, "bold"), anchor="e",
         ).pack(side=tk.RIGHT)
 
-        ctk.CTkLabel(
-            label, text=name.upper(), fg_color="transparent",
-            text_color=label_text, font=T.pixel_font(12, "bold"),
-            anchor="w", justify=tk.LEFT, wraplength=170,
-        ).pack(fill=tk.X, padx=8, pady=(4, 0))
+        body = ctk.CTkFrame(label, fg_color="transparent", corner_radius=0)
+        body.pack(fill=tk.X, padx=8, pady=(4, 0))
+
+        icon_holder = ctk.CTkFrame(
+            body, fg_color=NIGHT, corner_radius=2,
+            width=46, height=46, border_width=1, border_color=WOOD,
+        )
+        icon_holder.pack(side=tk.LEFT, padx=(0, 7))
+        icon_holder.pack_propagate(False)
+        icon_lbl = ctk.CTkLabel(
+            icon_holder, text="\U0001f3ae", fg_color="transparent",
+            text_color=CREAM, font=T.retro_font(19),
+        )
+        icon_lbl.pack(fill=tk.BOTH, expand=True)
+
+        info_col = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
+        info_col.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         ctk.CTkLabel(
-            label, text=proc_name.upper(), fg_color="transparent",
-            text_color=label_text, font=T.retro_font(11),
+            info_col, text=name.upper(), fg_color="transparent",
+            text_color=label_text, font=T.pixel_font(11, "bold"),
+            anchor="w", justify=tk.LEFT, wraplength=125,
+        ).pack(fill=tk.X)
+
+        ctk.CTkLabel(
+            info_col, text=proc_name.upper(), fg_color="transparent",
+            text_color=label_text, font=T.retro_font(12),
             anchor="w",
-        ).pack(fill=tk.X, padx=8, pady=(1, 0))
+        ).pack(fill=tk.X, pady=(1, 0))
+
+        # Executable icons are cheap to extract and cached, so load them on
+        # the UI thread. This guarantees the cart actually shows the game's
+        # icon instead of an empty black tile.
+        try:
+            cart_icon = None
+            exe_path = info.get("exe_path", "")
+            if exe_path and os.path.exists(exe_path):
+                cart_icon = _extract_exe_icon_image(exe_path, 46)
+            if cart_icon is None:
+                cart_icon = _pixel_gamepad_icon(color, 46)
+            if cart_icon is not None:
+                ctk_img = ctk.CTkImage(
+                    light_image=cart_icon, dark_image=cart_icon, size=(46, 46),
+                )
+                self._icon_photos.append(ctk_img)
+                icon_lbl.configure(image=ctk_img, text="")
+        except Exception:
+            pass
 
         ctk.CTkLabel(
             label, text=mood_name.upper(), fg_color=CREAM, text_color=NIGHT,
-            font=T.serif_font(10, "bold"), corner_radius=0,
+            font=T.serif_font(11, "bold"), corner_radius=0,
             padx=4, pady=1, anchor="w",
         ).pack(anchor="w", padx=8, pady=(4, 5))
 
@@ -907,11 +992,11 @@ class GamesPage(ctk.CTkFrame):
         base.pack(fill=tk.X, padx=8, pady=(4, 3))
         ctk.CTkLabel(
             base, text="SIDE A", fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.pixel_font(7, "bold"),
+            font=T.pixel_font(8, "bold"),
         ).pack(side=tk.LEFT)
         ctk.CTkLabel(
             base, text="AUTO", fg_color="transparent", text_color=GOLD,
-            font=T.pixel_font(7, "bold"),
+            font=T.pixel_font(8, "bold"),
         ).pack(side=tk.RIGHT)
 
         self._wood_shelf(cell)
@@ -919,7 +1004,7 @@ class GamesPage(ctk.CTkFrame):
         ctk.CTkLabel(
             cell, text=f"0{index + 1} / READY TO PLAY",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.pixel_font(7), anchor="center",
+            font=T.pixel_font(9), anchor="center",
         ).pack(fill=tk.X, pady=(5, 1))
 
         actions = ctk.CTkFrame(cell, fg_color="transparent", corner_radius=0)
@@ -928,16 +1013,39 @@ class GamesPage(ctk.CTkFrame):
             actions, text="EDIT LABEL \u2197",
             command=lambda p=proc_name, i=info: self._edit_game(p, i),
             fg_color="transparent", text_color=MINT, hover_color=SURF3,
-            font=T.pixel_font(8, "bold"), width=102, height=22,
+            font=T.pixel_font(9, "bold"), width=102, height=22,
             corner_radius=0,
         ).pack(side=tk.LEFT)
         ctk.CTkButton(
             actions, text="\u2715 REMOVE",
             command=lambda p=proc_name: self._delete(p),
             fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURF3,
-            font=T.pixel_font(8), width=76, height=22,
+            font=T.pixel_font(9), width=76, height=22,
             corner_radius=0,
         ).pack(side=tk.RIGHT)
+
+        # 3D bevel + hover glow. The lit top edge and dark bottom edge make the
+        # cart read as a physical object instead of a flat rectangle.
+        try:
+            tk.Frame(cart, bg=_lighten(SURF2, 26), height=2).place(
+                x=0, y=0, relwidth=1,
+            )
+            tk.Frame(cart, bg=NIGHT, height=3).place(
+                x=0, rely=1.0, y=-3, relwidth=1,
+            )
+
+            def _hover(on):
+                try:
+                    cart.configure(border_color=color if on else NIGHT)
+                    label.configure(fg_color=_lighten(color, 14) if on else color)
+                except Exception:
+                    pass
+
+            for widget in (cart, label, body, info_col, icon_holder):
+                widget.bind("<Enter>", lambda e: _hover(True), add="+")
+                widget.bind("<Leave>", lambda e: _hover(False), add="+")
+        except Exception:
+            pass
 
     def _insert_cell(self, parent):
         cell = ctk.CTkFrame(
@@ -959,22 +1067,22 @@ class GamesPage(ctk.CTkFrame):
 
         plus = ctk.CTkLabel(
             inner, text="+", fg_color="transparent", text_color=GOLD,
-            font=T.retro_font(48, "bold"),
+            font=T.retro_font(38, "bold"),
         )
         plus.pack()
         title = ctk.CTkLabel(
             inner, text="ADD A GAME", fg_color="transparent", text_color=CREAM,
             font=T.pixel_font(11, "bold"),
         )
-        title.pack(pady=(0, 4))
+        title.pack(pady=(0, 2))
         hint = ctk.CTkLabel(
             inner, text="Choose the real .exe\nnot a shortcut", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(15), justify=tk.CENTER,
+            text_color=TEXT_MUTED, font=T.retro_font(14), justify=tk.CENTER,
         )
-        hint.pack(pady=(0, 10))
+        hint.pack(pady=(0, 6))
         T.primary_button(
             inner, text="CHOOSE .EXE", command=self._add_by_exe,
-            width=132, height=32,
+            width=132, height=28,
         ).pack()
 
         for widget in (slot, inner, plus, title, hint):
@@ -988,11 +1096,11 @@ class GamesPage(ctk.CTkFrame):
         ctk.CTkLabel(
             cell, text="EMPTY SLOT / DROP A GAME .EXE HERE",
             fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.pixel_font(7), anchor="center",
+            font=T.pixel_font(9), anchor="center",
         ).pack(fill=tk.X, pady=(5, 1))
         ctk.CTkLabel(
             cell, text=" ", fg_color="transparent",
-            font=T.pixel_font(7),
+            font=T.pixel_font(9),
         ).pack(fill=tk.X)
 
     @staticmethod
@@ -1082,7 +1190,7 @@ class GamesPage(ctk.CTkFrame):
             text=f"  {mood_info.get('name', '').upper()}  ",
             fg_color=mood_tint,
             text_color=color,
-            font=T.pixel_font(8, "bold"),
+            font=T.pixel_font(11, "bold"),
             corner_radius=RADIUS_SM,
             height=18,
         )
@@ -1094,7 +1202,7 @@ class GamesPage(ctk.CTkFrame):
                 text="  PLAYLIST  ",
                 fg_color=T.ACCENT_BG,
                 text_color=T.MINT,
-                font=T.pixel_font(8, "bold"),
+                font=T.pixel_font(11, "bold"),
                 corner_radius=RADIUS_SM,
                 height=18,
             )
@@ -1112,7 +1220,7 @@ class GamesPage(ctk.CTkFrame):
             row, text="\u2715", fg_color="transparent",
             text_color=TEXT3, hover_color=SURF4,
             width=32, height=32, corner_radius=RADIUS_MD,
-            font=T.pixel_font(10, "bold"),
+            font=T.pixel_font(11, "bold"),
             command=lambda p=proc_name: self._delete(p),
         )
         del_btn.pack(side=tk.RIGHT, padx=16)

@@ -174,14 +174,14 @@ F_PIXEL    = "Silkscreen" if _FONTS_LOADED else "Consolas"
 F_RETRO    = "VT323" if _FONTS_LOADED else "Consolas"
 F_SERIF    = "Fraunces 9pt" if _FONTS_LOADED else "Georgia"
 
-F_TITLE    = (F_SERIF, 29, "italic")
-F_HEADING  = (F_PIXEL, 13, "bold")
-F_LABEL    = (F_RETRO, 17)
-F_BODY     = (F_RETRO, 16)
-F_SMALL    = (F_RETRO, 14)
-F_MICRO    = (F_PIXEL, 9, "bold")
-F_CAPTION  = (F_PIXEL, 9)
-F_MONO     = ("Consolas", 11)
+F_TITLE    = (F_SERIF, 31, "italic")
+F_HEADING  = (F_PIXEL, 14, "bold")
+F_LABEL    = (F_RETRO, 18)
+F_BODY     = (F_RETRO, 17)
+F_SMALL    = (F_RETRO, 15)
+F_MICRO    = (F_PIXEL, 10, "bold")
+F_CAPTION  = (F_PIXEL, 10)
+F_MONO     = ("Consolas", 12)
 
 NAV_ITEMS = [
     ("main",     "The Den",       "\u2302"),
@@ -240,7 +240,7 @@ def section_header(parent, text, pady=(0, 6), color=ACCENT2):
     """Small physical label above a panel."""
     ctk.CTkLabel(
         parent, text=str(text).upper(), fg_color="transparent",
-        text_color=color, font=pixel_font(11, "bold"), anchor="w",
+        text_color=color, font=pixel_font(12, "bold"), anchor="w",
     ).pack(fill=tk.X, padx=2, pady=pady)
 
 
@@ -255,11 +255,11 @@ def page_title(parent, text, subtitle=None):
     if subtitle:
         ctk.CTkLabel(
             col, text=str(subtitle).upper(), fg_color="transparent",
-            text_color=TEXT_MUTED, font=pixel_font(9), anchor="w",
+            text_color=TEXT_MUTED, font=pixel_font(10), anchor="w",
         ).pack(anchor="w")
     ctk.CTkLabel(
         col, text=text, fg_color="transparent", text_color=TEXT,
-        font=serif_font(28, slant="italic"), anchor="w",
+        font=serif_font(30, slant="italic"), anchor="w",
     ).pack(anchor="w", pady=(5, 0))
     return hdr
 
@@ -273,16 +273,16 @@ def object_header(parent, eyebrow, title, subtitle=None, on_back=None):
     left.pack(side=tk.LEFT, fill=tk.X, expand=True)
     ctk.CTkLabel(
         left, text=str(eyebrow).upper(), fg_color="transparent",
-        text_color=TEXT_MUTED, font=pixel_font(10), anchor="w",
+        text_color=TEXT_MUTED, font=pixel_font(11), anchor="w",
     ).pack(anchor="w")
     ctk.CTkLabel(
         left, text=title, fg_color="transparent", text_color=TEXT,
-        font=serif_font(31, slant="italic"), anchor="w",
+        font=serif_font(33, slant="italic"), anchor="w",
     ).pack(anchor="w", pady=(6, 0))
     if subtitle:
         ctk.CTkLabel(
             left, text=subtitle, fg_color="transparent", text_color=TEXT_MUTED,
-            font=retro_font(17), anchor="w", justify=tk.LEFT, wraplength=720,
+            font=retro_font(18), anchor="w", justify=tk.LEFT, wraplength=720,
         ).pack(anchor="w", pady=(5, 0))
 
     if on_back:
@@ -307,7 +307,7 @@ def primary_button(parent, text, command=None, width=120, height=34, **kwargs):
         fg_color=ACCENT, text_color=BG,
         hover_color=ACCENT_HOV, corner_radius=RADIUS_SM,
         height=height, width=width,
-        font=pixel_font(11, "bold"), **kwargs,
+        font=pixel_font(12, "bold"), **kwargs,
     )
 
 
@@ -318,7 +318,7 @@ def ghost_button(parent, text, command=None, width=100, height=32, **kwargs):
         hover_color=SURFACE3, corner_radius=RADIUS_SM,
         height=height, width=width,
         border_width=1, border_color=WOOD,
-        font=pixel_font(10, "bold"), **kwargs,
+        font=pixel_font(11, "bold"), **kwargs,
     )
 
 
@@ -332,7 +332,7 @@ def pixel_button(parent, text, command=None, width=110, height=32,
         fg_color=normal_bg, text_color=normal_fg,
         hover_color=ACCENT if not accent else ACCENT_HOV,
         border_width=2, border_color=WOOD, corner_radius=0,
-        font=pixel_font(10, "bold"), **kwargs,
+        font=pixel_font(11, "bold"), **kwargs,
     )
     if not accent:
         def _enter(_e):

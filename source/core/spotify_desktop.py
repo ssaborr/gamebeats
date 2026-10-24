@@ -301,6 +301,26 @@ def _find_spotify_hwnds(logger=None):
     return found
 
 
+# Spotify's Chromium build owns several hidden helper windows whose titles are
+# implementation details, not track names. Never let these reach the UI.
+_INVALID_TRACK_TITLE_FRAGMENTS = (
+    "gdi+ window",
+    "spotify.exe",
+    "msctfime",
+    "default ime",
+    "content protection",
+    "media playback",
+    "chromium",
+)
+
+
+def _looks_like_helper_window(title: str) -> bool:
+    lower = str(title or "").strip().lower()
+    if not lower:
+        return True
+    return any(fragment in lower for fragment in _INVALID_TRACK_TITLE_FRAGMENTS)
+
+
 def _find_spotify_window_titles(logger=None) -> list[str]:
     """Return all non-empty window titles belonging to Spotify.exe processes."""
     if not IS_WINDOWS or not HAS_PSUTIL:
@@ -493,6 +513,25 @@ def _inject_hook_dll(pid, logger=None):
 # active device the moment it starts. Browser automation can then target
 # this device for Spotify Connect without the user hearing anything.
 SILENT_TRACK_URI = "spotify:track:2bNCdW4rLnCTzgqUXTTDO1"
+
+
+def _is_silent_placeholder(name: str = "", artist: str = "", uri: str = "") -> bool:
+    """True for Spotify's silent device-registration track.
+
+    This track is an implementation detail used to wake the desktop client.
+    It must never appear as the user's now-playing song.
+    """
+    if str(uri or "").strip() == SILENT_TRACK_URI:
+        return True
+    title = (
+        str(name or "").lower()
+        .replace("'", "")
+        .replace("\u2019", "")
+        .replace(" ", "")
+    )
+    artist_key = str(artist or "").lower().replace(" ", "")
+    return "johncage" in artist_key and "433" in title
+
 
 def _track_cache_path(data_dir: str) -> str:
     return os.path.join(data_dir, "track_cache.json")
@@ -1175,6 +1214,8 @@ class SpotifyDesktopController:
         if titles:
             for t in titles:
                 clean = t.strip()
+                if _looks_like_helper_window(clean):
+                    continue
                 if clean and clean not in ("Spotify", "Spotify Free", "Spotify Premium"):
                     return True
             return False
@@ -1960,14 +2001,22 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
                     "playlist_uri": self._last_uri,
                     "context_uri": self._last_uri,
                 }
-                self._last_known_track_info = track_info
-                return track_info
+                if not _is_silent_placeholder(
+                    track_info.get("name"),
+                    track_info.get("artist"),
+                    track_info.get("uri"),
+                ):
+                    self._last_known_track_info = track_info
+                    return track_info
 
         # Extract track info and playback state from Spotify window titles
         titles = _find_spotify_window_titles(self._log)
         if titles:
+            saw_generic_spotify_title = False
             for t in titles:
                 clean = t.strip()
+                if _looks_like_helper_window(clean):
+                    continue
                 if clean and clean not in ("Spotify", "Spotify Free", "Spotify Premium"):
                     artist = ""
                     name = clean
@@ -1975,6 +2024,8 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
                         artist, name = clean.split(" - ", 1)
                         artist = artist.strip()
                         name = name.strip()
+                    if _is_silent_placeholder(name, artist):
+                        continue
                     is_playing = True
                     if getattr(self, "_playback_state_known", False):
                         is_playing = bool(getattr(self, "_is_playing", False))
@@ -1993,10 +2044,16 @@ WshShell.Run chr(34) & "{exe}" & chr(34) & " --uri={uri}", 0, False
                         self._remember_playback_state(True)
                     self._last_known_track_info = track_info
                     return track_info
+                if clean:
+                    saw_generic_spotify_title = True
 
-            # All titles were "Spotify", so Spotify is paused (unless we have
-            # explicit command state that says otherwise).
-            if not getattr(self, "_playback_state_known", False):
+            # Only infer "paused" when Spotify actually exposed a generic
+            # "Spotify" title. If every visible title was a Chromium helper or
+            # the silent device-registration track, the state is unknown and
+            # must not overwrite a known playing state.
+            if saw_generic_spotify_title and not getattr(
+                self, "_playback_state_known", False
+            ):
                 self._remember_playback_state(False)
             last = getattr(self, "_last_known_track_info", None)
             if last:
