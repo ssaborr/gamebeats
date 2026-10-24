@@ -1014,8 +1014,88 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
     def test_desktop_puppy_cadence_is_not_a_twitch(self):
         from ui.mascot_notifier import PUPPY_ANIMATION_INTERVAL
 
-        self.assertGreaterEqual(PUPPY_ANIMATION_INTERVAL, 100)
-        self.assertLessEqual(PUPPY_ANIMATION_INTERVAL, 220)
+        # Small local changes can run at 10 fps; a full pose swap cannot.
+        self.assertGreaterEqual(PUPPY_ANIMATION_INTERVAL, 80)
+        self.assertLessEqual(PUPPY_ANIMATION_INTERVAL, 140)
+
+    def test_desktop_puppy_does_not_restack_on_every_audio_tick(self):
+        from ui.mascot_notifier import (
+            PUPPY_TOPMOST_REASSERT_SEC,
+            PuppySingingOverlay,
+        )
+
+        overlay = PuppySingingOverlay.__new__(PuppySingingOverlay)
+        overlay._win = MagicMock()
+        overlay._visible = True
+        overlay._last_raise = 100.0
+        overlay._raise_safe = MagicMock()
+
+        with patch("ui.mascot_notifier.time.monotonic", return_value=100.4):
+            overlay.show()
+        overlay._raise_safe.assert_not_called()
+
+        with patch(
+            "ui.mascot_notifier.time.monotonic",
+            return_value=100.0 + PUPPY_TOPMOST_REASSERT_SEC + 0.1,
+        ):
+            overlay.show()
+        overlay._raise_safe.assert_called_once()
+
+    def test_desktop_puppy_animation_uses_a_steady_deadline(self):
+        from ui.mascot_notifier import (
+            PUPPY_ANIMATION_INTERVAL,
+            PuppySingingOverlay,
+        )
+
+        overlay = PuppySingingOverlay.__new__(PuppySingingOverlay)
+        overlay._win = MagicMock()
+        overlay._label = MagicMock()
+        overlay._photos = ["a", "b", "c"]
+        overlay._idx = 0
+        overlay._after = None
+        overlay._anim_next = None
+        overlay._visible = True
+
+        interval = PUPPY_ANIMATION_INTERVAL / 1000.0
+        with patch("ui.mascot_notifier.time.monotonic", return_value=100.0):
+            overlay._animate()
+        # First call only arms the deadline; no frame change yet.
+        overlay._label.configure.assert_not_called()
+        self.assertAlmostEqual(overlay._anim_next, 100.0 + interval)
+        self.assertEqual(
+            overlay._win.after.call_args.args[0], PUPPY_ANIMATION_INTERVAL
+        )
+
+        # A tick 10 ms late advances exactly one beat and shortens the wait.
+        with patch("ui.mascot_notifier.time.monotonic", return_value=100.11):
+            overlay._animate()
+        self.assertEqual(overlay._idx, 1)
+        self.assertEqual(overlay._label.configure.call_count, 1)
+        self.assertEqual(overlay._win.after.call_args.args[0], 90)
+
+    def test_desktop_puppy_animation_drops_beats_after_a_long_stall(self):
+        from ui.mascot_notifier import (
+            PUPPY_ANIMATION_INTERVAL,
+            PuppySingingOverlay,
+        )
+
+        overlay = PuppySingingOverlay.__new__(PuppySingingOverlay)
+        overlay._win = MagicMock()
+        overlay._label = MagicMock()
+        overlay._photos = ["a", "b", "c"]
+        overlay._idx = 1
+        overlay._after = None
+        overlay._anim_next = 100.0
+        overlay._visible = True
+
+        interval = PUPPY_ANIMATION_INTERVAL / 1000.0
+        with patch("ui.mascot_notifier.time.monotonic", return_value=112.0):
+            overlay._animate()
+
+        # Never burst through 120 skipped beats: resume cleanly instead.
+        self.assertEqual(overlay._idx, 1)
+        overlay._label.configure.assert_not_called()
+        self.assertAlmostEqual(overlay._anim_next, 112.0 + interval)
 
     def test_singing_puppy_shows_without_a_detected_game(self):
         app = self._make_app()

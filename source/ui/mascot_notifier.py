@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 import tkinter as tk
 import customtkinter as ctk
@@ -46,17 +47,26 @@ NOTIFIER_TEXT_MUTED = T.TEXT_MUTED
 NOTIFIER_BTN_HOVER = T.SURFACE3
 
 # The desktop singer uses the same 64x72 authored frames as the room mascot.
-# Eight frames would loop in a blink, so this is a 12-beat phrase.
+# Every frame in this phrase shares one held pose; only the jaw (and one blink)
+# changes, so stepping through them reads as motion instead of a pose swap.
+# 24 beats at 100 ms is a 2.4-second phrase.
 PUPPY_SINGING_FRAMES = (
-    "sing_0", "sing_1", "sing_2", "sing_1",
-    "sing_0", "sing_1", "sing_3", "sing_1",
-    "sing_2", "sing_1", "sing_0", "sing_1",
+    "talk_open", "talk_mid", "talk_low", "talk_mid",
+    "talk_open", "talk_mid", "talk_low", "talk_mid",
+    "talk_open", "talk_mid", "talk_low", "talk_mid",
+    "talk_open", "talk_blink", "talk_blink", "talk_mid",
+    "talk_open", "talk_mid", "talk_low", "talk_mid",
+    "talk_open", "talk_mid", "talk_low", "talk_mid",
 )
 PUPPY_IDLE_FRAME = "idle_0"
-# The desktop singer used to step every 66ms (15 changes per second), which
-# read as a twitch because each authored frame also shifts the mic and head.
-# 140ms keeps the same 12-beat phrase but at a calm, readable cadence.
-PUPPY_ANIMATION_INTERVAL = 140
+# 10 frames per second of small, local pixel changes.  The old sequence swapped
+# between two different full-body illustrations every 140 ms, which flickered
+# even at a "safe" interval.
+PUPPY_ANIMATION_INTERVAL = 100
+# Re-asserting topmost restacks the layered window; doing that on every audio
+# meter tick visibly hitched the animation.  Twice per second is plenty to stay
+# above a fullscreen game, so re-assert on a much slower cadence instead.
+PUPPY_TOPMOST_REASSERT_SEC = 4.0
 PUPPY_OVERLAY_ALPHA = 0.80
 
 
@@ -116,12 +126,15 @@ def _build_singing_photos(frame_names, max_size):
         return []
 
     source_dir = T.assets_dir() / "puppy_design" / "anim"
+    cache = {}
     images = []
     for name in frame_names:
-        path = source_dir / f"{name}.png"
-        if not path.exists():
-            return []
-        images.append(Image.open(path).convert("RGBA"))
+        if name not in cache:
+            path = source_dir / f"{name}.png"
+            if not path.exists():
+                return []
+            cache[name] = Image.open(path).convert("RGBA")
+        images.append(cache[name])
     if not images:
         return []
 
@@ -129,19 +142,25 @@ def _build_singing_photos(frame_names, max_size):
     height = max(img.height for img in images)
     max_w, max_h = max_size
     scale = max(1, min(int(max_w // width), int(max_h // height)))
+    photos_by_key = {}
     photos = []
     for img in images:
-        if img.size != (width, height):
-            canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-            canvas.alpha_composite(
-                img, ((width - img.width) // 2, (height - img.height) // 2)
-            )
-            img = canvas
-        if scale != 1:
-            img = img.resize(
-                (width * scale, height * scale), Image.Resampling.NEAREST
-            )
-        photos.append(ImageTk.PhotoImage(img))
+        key = id(img)
+        photo = photos_by_key.get(key)
+        if photo is None:
+            frame = img
+            if frame.size != (width, height):
+                frame = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+                frame.alpha_composite(
+                    img, ((width - img.width) // 2, (height - img.height) // 2)
+                )
+            if scale != 1:
+                frame = frame.resize(
+                    (width * scale, height * scale), Image.Resampling.NEAREST
+                )
+            photo = ImageTk.PhotoImage(frame)
+            photos_by_key[key] = photo
+        photos.append(photo)
     return photos
 
 
@@ -165,6 +184,8 @@ class PuppySingingOverlay:
         self._idx = 0
         self._after = None
         self._fade_after = None
+        self._anim_next = None
+        self._last_raise = 0.0
         self._visible = False
         self._drag_x = 0
         self._drag_y = 0
@@ -306,10 +327,14 @@ class PuppySingingOverlay:
             return
         if self._visible:
             # The window may have been pushed behind a fullscreen game even
-            # though we still consider it visible. Re-assert it.
-            self._raise_safe()
+            # though we still consider it visible.  Re-assert occasionally,
+            # not on every audio-meter tick: restacking the layered window is
+            # what made the animation hitch.
+            self._ensure_topmost()
             return
         self._visible = True
+        self._idx = 0
+        self._anim_next = None
         self._cancel_fade()
         try:
             win = self._win
@@ -332,7 +357,23 @@ class PuppySingingOverlay:
         except Exception:
             pass
         self._fade_to(PUPPY_OVERLAY_ALPHA, 180)
+        self._last_raise = time.monotonic()
         self._animate()
+
+    def _ensure_topmost(self):
+        """Keep an always-on-top overlay above fullscreen games, slowly.
+
+        ``show()`` is called about twice per second while music plays.  Each
+        ``lift``/``SetWindowPos`` restack used to repaint the layered window
+        and visibly stutter the frame animation, so throttle it.
+        """
+        if self._win is None:
+            return
+        now = time.monotonic()
+        if now - self._last_raise < PUPPY_TOPMOST_REASSERT_SEC:
+            return
+        self._last_raise = now
+        self._raise_safe()
 
     def _raise_safe(self):
         if not self._visible or self._win is None:
@@ -424,14 +465,32 @@ class PuppySingingOverlay:
     def _animate(self):
         if not self._visible or self._win is None or self._label is None:
             return
-        if self._photos:
+        if not self._photos:
+            # Text fallback (Pillow or assets unavailable): nothing to cycle.
+            return
+        now = time.monotonic()
+        interval = max(0.01, PUPPY_ANIMATION_INTERVAL / 1000.0)
+        if self._anim_next is None:
+            self._anim_next = now + interval
+        # If the main UI was busy for a long stretch, drop the missed beats
+        # instead of bursting through them.
+        if now - self._anim_next > 0.35:
+            self._anim_next = now + interval
+        advanced = 0
+        while now >= self._anim_next and advanced < 3:
             self._idx = (self._idx + 1) % len(self._photos)
+            self._anim_next += interval
+            advanced += 1
+        if advanced:
             try:
                 self._label.configure(image=self._photos[self._idx])
             except Exception:
                 return
+        # Schedule against the wall-clock deadline so Tk timer drift, a heavy
+        # room repaint, or a slow frame never stretches one beat.
+        delay = int(round((self._anim_next - now) * 1000))
         try:
-            self._after = self._win.after(PUPPY_ANIMATION_INTERVAL, self._animate)
+            self._after = self._win.after(max(5, delay), self._animate)
         except Exception:
             pass
 

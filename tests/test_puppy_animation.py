@@ -179,6 +179,88 @@ class TestPuppyAnimator(unittest.TestCase):
         self.assertIn(frame, self._frames("idle"))
 
 
+class TestDesktopOverlayFrames(unittest.TestCase):
+    """The small desktop singer must move without swapping whole poses."""
+
+    # The removed headset painted its band across this strip.  The base plates
+    # never use the hardware ramp there, so any hit means a headset came back.
+    HEADBAND = (16, 8, 50, 15)
+    HARDWARE = {
+        (42, 23, 58),
+        (58, 43, 58),
+        (107, 90, 107),
+        (199, 184, 176),
+    }
+
+    def _load(self, name):
+        path = os.path.join(ANIM_DIR, f"{name}.png")
+        self.assertTrue(os.path.exists(path), name)
+        return Image.open(path).convert("RGBA")
+
+    def test_phrase_frames_are_hard_pixel_sprites_on_the_baseline(self):
+        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
+
+        for name in set(PUPPY_SINGING_FRAMES):
+            img = self._load(name)
+            self.assertEqual(img.size, (64, 72), name)
+            alpha = img.getchannel("A")
+            self.assertTrue(set(_pixels(alpha)) <= {0, 255}, name)
+            colors = {p[:3] for p in _pixels(img) if p[3] == 255}
+            self.assertLessEqual(len(colors), 19, name)
+            rows = [
+                y for y in range(img.height)
+                if any(img.getpixel((x, y))[3] for x in range(img.width))
+            ]
+            self.assertEqual(max(rows) + 1, 70, f"{name} feet drifted")
+
+    def test_every_frame_keeps_the_same_silhouette(self):
+        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
+
+        first = self._load(PUPPY_SINGING_FRAMES[0])
+        alpha = first.getchannel("A").tobytes()
+        bbox = first.getchannel("A").getbbox()
+        for name in set(PUPPY_SINGING_FRAMES):
+            img = self._load(name)
+            # Only jaw/eye pixels may change: no bob, sway, or pose swap.
+            self.assertEqual(img.getchannel("A").tobytes(), alpha, name)
+            self.assertEqual(img.getchannel("A").getbbox(), bbox, name)
+
+    def test_consecutive_beats_are_small_local_changes(self):
+        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
+
+        previous_name = None
+        previous = None
+        for name in PUPPY_SINGING_FRAMES:
+            img = self._load(name)
+            if previous is not None and name != previous_name:
+                changed = sum(
+                    1 for a, b in zip(_pixels(previous), _pixels(img)) if a != b
+                )
+                # A full pose swap changes ~1100 pixels; jaw/eye beats stay
+                # under 300, so the overlay reads as motion rather than a cut.
+                self.assertLess(changed, 300, f"{previous_name} -> {name}")
+            previous, previous_name = img, name
+
+    def test_no_frame_wears_the_removed_headset(self):
+        names = [
+            p[:-4] for p in os.listdir(ANIM_DIR)
+            if p.endswith(".png") and p != "contact_sheet.png"
+        ]
+        self.assertGreaterEqual(len(names), 12)
+        x0, y0, x1, y1 = self.HEADBAND
+        for name in names:
+            img = self._load(name)
+            for y in range(y0, y1):
+                for x in range(x0, x1):
+                    pixel = img.getpixel((x, y))
+                    if pixel[3] == 0:
+                        continue
+                    self.assertNotIn(
+                        pixel[:3], self.HARDWARE,
+                        f"{name} still draws headset hardware at {(x, y)}",
+                    )
+
+
 class TestPuppyCanvasNeverMoves(unittest.TestCase):
     def test_animation_swaps_image_without_touching_coordinates(self):
         from ui.app import GameBeatsApp

@@ -7,11 +7,13 @@ legacy art into the GameBeats puppy ramp and authors the in-place expressions
 used by :mod:`ui.puppy_anim`.
 
 Rules baked into the output:
-  * every frame is 128x144 with a binary alpha channel;
-  * the paws never leave rows 132-138, so the sprite can stay at a fixed canvas
+  * every frame is 64x72 with a binary alpha channel;
+  * the paws never leave rows 66-69, so the sprite can stay at a fixed canvas
     position forever;
   * no frame contains a drop shadow, halo, glow, or semi-transparent pixel;
-  * frames advance on twos from the single 30 Hz clock.
+  * frames advance on twos from the single 30 Hz clock;
+  * the puppy never wears headphones.  The legacy plates are already drawn
+    bare-headed, so no headset overlay is applied.
 
 Run from the project root:
     py source/scripts/generate_puppy_animation.py
@@ -71,14 +73,14 @@ CREAM_HI = PALETTE[9]
 WHITE = PALETTE[10]
 PINK = PALETTE[11]
 PINK_DARK = PALETTE[12]
-MIC_DARK = PALETTE[13]
-MIC_MID = PALETTE[14]
-MIC_LIGHT = PALETTE[15]
-GOLD = PALETTE[17]
 MAGENTA = PALETTE[18]
 
 EYE_L = (30, 30, 44, 49)   # exclusive box
 EYE_R = (62, 33, 79, 52)
+
+# The singing mouth on the final 64x72 grid.  Used by the desktop overlay to
+# close the jaw while keeping every other pixel of the pose fixed.
+MOUTH_BOX = (18, 22, 28, 38)
 
 
 def _palette_image() -> Image.Image:
@@ -267,38 +269,47 @@ def _downsample(master: Image.Image) -> Image.Image:
     return rgb
 
 
-def _add_headphones(img: Image.Image) -> Image.Image:
-    """Add the room mascot's signature hard-edged headphones.
+def _mouth_frame(base: Image.Image, open_rows: int) -> Image.Image:
+    """Return *base* with the singing mouth closed to *open_rows* pixels.
 
-    The overlay is applied after downsampling so the cups stay aligned to the
-    final 64x72 grid. It uses only the existing 19-colour puppy ramp.
+    The desktop singer has to animate without swapping between two different
+    illustrations: the legacy ``sing`` and ``mic`` plates pose the paw, head
+    and microphone differently, so alternating them reads as a twitch.  Instead
+    we keep one held pose and squash only the open mouth, which is the one
+    region that actually changes while singing.  The vacated rows are filled
+    with the chin colour taken just below the mouth, so no new colours and no
+    semi-transparent pixels are introduced.
     """
-    d = ImageDraw.Draw(img)
-    # A low band that leaves the top tuft visible.
-    band = (
-        (16, 14), (17, 12), (18, 11), (19, 10), (21, 9), (23, 8), (25, 8),
-        (39, 8), (41, 8), (43, 9), (45, 10), (46, 11), (47, 12), (48, 14),
+    out = base.copy()
+    x0, y0, x1, y1 = MOUTH_BOX
+    # Fill with the muzzle's dominant chin colour.  Stretching a single row
+    # would carry its left-edge shadow down the chin as an orange stripe.
+    chin_row = [base.getpixel((x, y1)) for x in range(x0, x1)]
+    chin_row = [p for p in chin_row if p[3] > 0] or [(255, 244, 209, 255)]
+    fill = max(set(chin_row), key=chin_row.count)
+    ImageDraw.Draw(out).rectangle((x0, y0, x1 - 1, y1 - 1), fill=fill)
+    mouth = base.crop(MOUTH_BOX).resize(
+        (x1 - x0, max(1, open_rows)), Image.Resampling.NEAREST
     )
-    for x, y in band:
-        d.rectangle((x, y, x + 1, y + 1), fill=MIC_DARK)
-    for x, y in band:
-        d.point((x, y), fill=MIC_MID)
-    # Side arms connecting the band to the cups.
-    d.rectangle((13, 14, 15, 23), fill=MIC_DARK)
-    d.rectangle((14, 15, 14, 22), fill=MIC_MID)
-    d.rectangle((49, 14, 51, 23), fill=MIC_DARK)
-    d.rectangle((50, 15, 50, 22), fill=MIC_MID)
-    d.point((13, 15), fill=GOLD)
-    d.point((50, 15), fill=GOLD)
-    # Over-ear cups with a metal ring and a gold hinge.
-    for x0 in (8, 48):
-        d.rectangle((x0, 22, x0 + 8, 34), fill=MIC_DARK)
-        d.rectangle((x0 + 1, 23, x0 + 7, 33), fill=MIC_MID)
-        d.rectangle((x0 + 2, 24, x0 + 6, 32), fill=MIC_LIGHT)
-        d.rectangle((x0 + 3, 26, x0 + 5, 30), fill=MIC_MID)
-        d.point((x0 + 4, 27), fill=GOLD)
-        d.point((x0 + 4, 28), fill=GOLD)
-    return img
+    out.paste(mouth, (x0, y0))
+    return out
+
+
+def build_overlay_frames(frames: dict[str, Image.Image]) -> dict[str, Image.Image]:
+    """Author the small desktop singer's four-frame jaw cycle.
+
+    All four frames share the exact same body, head and microphone pixels.
+    Only the jaw height and (for the blink) the eyes change, which is what
+    makes the overlay read as smooth motion instead of a strobing pose swap.
+    """
+    open_frame = frames["sing_0"]
+    return {
+        "talk_open": open_frame.copy(),
+        "talk_mid": _mouth_frame(open_frame, 12),
+        "talk_low": _mouth_frame(open_frame, 9),
+        # A blink reuses the existing eyes-closed pose of the same plate.
+        "talk_blink": frames["sing_3"].copy(),
+    }
 
 
 def build_frames() -> dict[str, Image.Image]:
@@ -356,26 +367,32 @@ SPEC = {
     "baseline_y": BASELINE_Y,
     "fps": 30,
     "on_twos": 2,
+    "audio": {
+        "open_level": 0.30,
+        "close_level": 0.14,
+        "min_hold": 15,
+        "min_frame_hold": 6,
+    },
     "states": {
         "idle": {
             "frames": ["idle_0", "idle_1", "idle_0", "idle_blink",
                        "idle_0", "idle_flick", "idle_1", "idle_tilt"],
-            "hold": [12, 12, 14, 2, 14, 4, 12, 8],
+            "hold": [12, 12, 14, 2, 14, 8, 12, 16],
             "static": "idle_0",
         },
         "singing_open": {
             "frames": ["sing_0", "sing_2"],
-            "hold": [2, 2],
+            "hold": [12, 12],
             "static": "sing_0",
         },
         "singing_closed": {
             "frames": ["sing_1"],
-            "hold": [4],
+            "hold": [8],
             "static": "sing_1",
         },
         "singing_eyes_closed": {
             "frames": ["sing_3"],
-            "hold": [6],
+            "hold": [12],
             "static": "sing_3",
         },
         "paused": {
@@ -385,13 +402,13 @@ SPEC = {
         },
         "alert": {
             "frames": ["alert_0", "alert_1"],
-            "hold": [4, 4],
+            "hold": [16, 16],
             "static": "alert_0",
         },
         "reaction": {
-            "frames": ["alert_1", "alert_0"],
-            "hold": [2, 2],
-            "static": "alert_0",
+            "frames": ["alert_1"],
+            "hold": [30],
+            "static": "alert_1",
         },
         "happy": {
             "frames": ["happy"],
@@ -423,6 +440,7 @@ def build_contact_sheet(frames: dict[str, Image.Image]) -> None:
         "idle_flick", "sing_0", "sing_1", "sing_2",
         "sing_3", "sing_4", "paused_0", "paused_1",
         "alert_0", "alert_1", "happy", "encore",
+        "talk_open", "talk_mid", "talk_low", "talk_blink",
     ]
     cell_w, cell_h = FRAME_W * SCALE, FRAME_H * SCALE
     pad, label_h = 24, 34
@@ -457,9 +475,12 @@ def build_contact_sheet(frames: dict[str, Image.Image]) -> None:
 def main() -> None:
     master_frames = build_frames()
     frames = {
-        name: _add_headphones(_downsample(img))
+        name: _downsample(img)
         for name, img in master_frames.items()
     }
+    # Overlay-only frames are authored on the final grid so the jaw squash
+    # never reshuffles the body pixels.
+    frames.update(build_overlay_frames(frames))
     OUT.mkdir(parents=True, exist_ok=True)
     bottoms = {}
     for name, img in frames.items():
