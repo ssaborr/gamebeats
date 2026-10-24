@@ -173,6 +173,7 @@ WOOD       = T.WOOD
 DECK       = T.DECK
 DECK_TOP   = T.DECK_TOP
 ROSE       = T.ROSE
+DUST       = T.DUST
 MAGENTA    = T.MAGENTA
 SIDEBAR    = T.SIDEBAR
 SURFACE    = T.SURFACE
@@ -207,6 +208,42 @@ PLAYLIST_END_NORMAL_EXTRA_SEC = 4.0
 PLAYLIST_END_RETRY_EXTRA_SEC = 10.0
 SPOTIFY_UI_AUDIO_ON_THRESHOLD = 0.0001
 SPOTIFY_UI_AUDIO_OFF_THRESHOLD = 0.0
+
+# The room plate is authored at 400x250 logical pixels and scaled by four
+# before it reaches the app. All ambient overlays use these logical
+# coordinates, so they stay locked to the same grid as the art.
+ROOM_SOURCE_W = 400
+ROOM_SOURCE_H = 250
+ROOM_WINDOW_PANES = (
+    (135, 42, 172, 81),
+    (179, 42, 218, 81),
+    (225, 42, 263, 81),
+    (135, 88, 172, 124),
+    (179, 88, 218, 124),
+    (225, 88, 263, 124),
+)
+ROOM_HOTSPOTS = {
+    # x0, y0, x1, y1 in room-logical pixels.
+    "shelf": (285, 60, 380, 103),
+    "panel": (290, 109, 376, 161),
+    "crate": (308, 164, 384, 188),
+    "crt": (32, 86, 108, 146),
+}
+ROOM_SHELF_CASES = (
+    (292, 72, 298, 90),
+    (300, 84, 316, 90),
+    (318, 79, 324, 90),
+    (326, 85, 344, 90),
+    (348, 77, 354, 90),
+    (356, 80, 372, 90),
+)
+ROOM_RECORD_SLEEVES = (
+    (312, 164, 319, 176, MINT),
+    (320, 165, 327, 177, GOLD),
+    (328, 166, 335, 178, ORANGE),
+)
+ROOM_KNOBS = ((303, 136), (315, 136), (341, 136), (353, 136))
+MASTER_TICK_MS = 33
 
 F_FALLBACK = T.F_FALLBACK
 F_TITLE    = T.F_TITLE
@@ -1157,6 +1194,18 @@ class GameBeatsApp:
         self._puppy_frame = 0
         self._vu_job = None
         self._clock_job = None
+        self._anim_tick = 0
+        self._ambient = {}
+        self._room_layout_info = None
+        self._room_hotspots = {}
+        self._room_hover = None
+        self._crt_boost_until = 0.0
+        self._vu_items = []
+        self._vu_key = None
+        self._vu_colors = []
+        self._vu_heights = []
+        self._cart_items = None
+        self._cart_key = None
         self._heart_until = 0.0
         self._footer_buttons = {}
         self._footer_tools = {}
@@ -1595,10 +1644,8 @@ class GameBeatsApp:
         if page == "main":
             self._redraw_room()
             self._start_puppy_animation()
-            self._start_vu_animation()
         else:
             self._stop_puppy_animation()
-            self._stop_vu_animation()
 
         if page == "playlists" and getattr(self, "spotify", None):
             self._load_playlists()
@@ -1711,6 +1758,8 @@ class GameBeatsApp:
         self._room_canvas.grid(row=0, column=0, sticky="nsew")
         self._room_canvas.bind("<Configure>", self._on_room_canvas_configure)
         self._room_canvas.bind("<Button-1>", self._on_room_canvas_click)
+        self._room_canvas.bind("<Motion>", self._on_room_canvas_motion)
+        self._room_canvas.bind("<Leave>", self._on_room_canvas_leave)
         self._room_image_item = None
         self._puppy_bbox = (0, 0, 0, 0)
         self._room_puppy_item = None
@@ -2103,7 +2152,7 @@ class GameBeatsApp:
             return "mic"
         return "idle"
 
-    def _animate_room_puppy(self):
+    def _animate_room_puppy(self, now=None):
         """Swap in-place frames; the mascot never moves on the canvas."""
         canvas = getattr(self, "_room_canvas", None)
         if canvas is None or self._room_puppy_item is None:
@@ -2115,7 +2164,7 @@ class GameBeatsApp:
             if pw <= 0 or ph <= 0:
                 return
 
-            now = time.time()
+            now = time.time() if now is None else now
             sprite_name = self._puppy_frame_name(now)
             key = (sprite_name, int(pw), int(ph))
             if key != self._room_puppy_sprite_key:
@@ -2131,35 +2180,369 @@ class GameBeatsApp:
         except Exception:
             pass
 
-    def _draw_room_dust(self, canvas, w, h, now, playing):
-        """Tiny drifting dust motes give the den a lit, lived-in feel."""
+    @staticmethod
+    def _room_layout(w, h):
+        """Map the 400x250 authored room plate onto a canvas rectangle.
+
+        ImageOps.fit scales by the larger axis and centres the crop, so the
+        same transform is needed for every ambient overlay.
+        """
+        w = max(1, int(w))
+        h = max(1, int(h))
+        scale = max(w / float(ROOM_SOURCE_W), h / float(ROOM_SOURCE_H))
+        visible_w = w / scale
+        visible_h = h / scale
+        left = (ROOM_SOURCE_W - visible_w) / 2.0
+        top = (ROOM_SOURCE_H - visible_h) / 2.0
+        return scale, left, top
+
+    @staticmethod
+    def _room_rect(layout, x0, y0, x1, y1, min_w=1, min_h=1):
+        scale, left, top = layout
+        cx0 = int(round((x0 - left) * scale))
+        cy0 = int(round((y0 - top) * scale))
+        cx1 = int(round((x1 - left) * scale))
+        cy1 = int(round((y1 - top) * scale))
+        if cx1 <= cx0:
+            cx1 = cx0 + max(1, int(min_w))
+        if cy1 <= cy0:
+            cy1 = cy0 + max(1, int(min_h))
+        return cx0, cy0, cx1, cy1
+
+    def _build_room_ambient(self, canvas, w, h):
+        """Create the pooled ambient canvas items once per room layout.
+
+        Nothing here runs on the animation tick. The master clock only moves
+        and recolours these existing items.
+        """
         try:
-            canvas.delete("dust")
-            speed = 7.0 if playing else 2.5
-            for i in range(16):
-                seed = i * 37.17
-                x = int(
-                    (seed * 41.0 + now * speed * (0.35 + (i % 4) * 0.12))
-                    % max(1, w)
-                )
-                y = int(
-                    (
-                        h * 0.12
-                        + (seed * 29.0) % max(1, int(h * 0.62))
-                        + math.sin(now * 0.7 + i) * 6
-                    )
-                    % max(1, h)
-                )
-                size = 2 if i % 3 == 0 else 1
-                color = GOLD if i % 4 == 0 else (MINT if i % 5 == 0 else ROSE)
-                canvas.create_rectangle(
-                    x, y, x + size, y + size, fill=color, outline="",
-                    tags=("dust",),
-                )
-            if self._room_puppy_item is not None:
-                canvas.tag_lower("dust", self._room_puppy_item)
+            canvas.delete("ambient")
         except Exception:
             pass
+
+        layout = self._room_layout(w, h)
+        self._room_layout_info = layout
+        reduce_motion = self._reduce_motion_enabled()
+        self._room_hotspots = {
+            name: self._room_rect(layout, *zone)
+            for name, zone in ROOM_HOTSPOTS.items()
+        }
+
+        outlines = {}
+        outline_width = max(1, int(round(layout[0] * 0.32)))
+        for name, zone in ROOM_HOTSPOTS.items():
+            rect = self._room_rect(layout, *zone)
+            outlines[name] = canvas.create_rectangle(
+                *rect, fill="", outline=ACCENT, width=outline_width,
+                state="hidden", tags=("ambient", "hotspot_outline", f"hotspot_{name}"),
+            )
+
+        dust = []
+        for i in range(14):
+            bx = 20.0 + ((i * 53) % 360)
+            by = 66.0 + ((i * 29) % 112)
+            size = 1.35 if i % 4 == 0 else 1.0
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=(GOLD, MINT, ROSE, DUST)[i % 4],
+                outline="", tags=("ambient", "ambient_motion", "dust"),
+            )
+            dust.append({
+                "id": item, "bx": bx, "by": by, "phase": i * 0.83,
+                "speed": 0.45 + (i % 4) * 0.12, "size": size,
+            })
+
+        rain = []
+        for i in range(10):
+            pane = ROOM_WINDOW_PANES[i % len(ROOM_WINDOW_PANES)]
+            pane_w = max(1, pane[2] - pane[0] - 1)
+            pane_h = max(1, pane[3] - pane[1] - 3)
+            bx = pane[0] + (i * 7) % pane_w
+            by = pane[1] + (i * 11) % pane_h
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=(ROSE, CREAM, MINT)[i % 3],
+                outline="", tags=("ambient", "ambient_motion", "rain"),
+            )
+            rain.append({
+                "id": item, "pane": pane, "bx": bx, "by": by,
+                "speed": 18.0 + (i % 4) * 3.5, "length": 2.0 + (i % 3),
+            })
+
+        crt_scan = []
+        for i in range(2):
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=ACCENT_DIM, outline="",
+                tags=("ambient", "ambient_motion", "crt_scan"),
+            )
+            crt_scan.append({"id": item, "offset": i * 19})
+        crt_glitch = canvas.create_rectangle(
+            0, 0, 1, 1, fill=GOLD, outline="", state="hidden",
+            tags=("ambient", "ambient_motion", "crt_glitch"),
+        )
+
+        lamp = canvas.create_rectangle(
+            0, 0, 1, 1, fill=GOLD, outline="",
+            tags=("ambient", "ambient_motion", "lamp"),
+        )
+
+        plant = []
+        for i, (px, py) in enumerate(((104, 109), (127, 110), (123, 103))):
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=MINT, outline="",
+                tags=("ambient", "ambient_motion", "plant"),
+            )
+            plant.append({"id": item, "x": px, "y": py, "phase": i * 1.7})
+
+        mug = []
+        for i in range(3):
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=(CREAM, DUST, ROSE)[i % 3], outline="",
+                tags=("ambient", "ambient_motion", "mug_steam"),
+            )
+            mug.append({"id": item, "x": 114 + i * 2, "phase": i * 1.6})
+
+        shelf = []
+        for x0, y0, x1, _y1 in ROOM_SHELF_CASES:
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=CREAM, outline="", state="hidden",
+                tags=("ambient", "hover_fx", "shelf_case"),
+            )
+            shelf.append({"id": item, "rect": (x0, y0, x1)})
+
+        records = []
+        for x0, y0, x1, y1, color in ROOM_RECORD_SLEEVES:
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=color, outline="", state="hidden",
+                tags=("ambient", "hover_fx", "record_sleeve"),
+            )
+            records.append({"id": item, "rect": (x0, y0, x1, y1)})
+
+        knobs = []
+        for cx, cy in ROOM_KNOBS:
+            item = canvas.create_rectangle(
+                0, 0, 1, 1, fill=NIGHT, outline="", state="hidden",
+                tags=("ambient", "hover_fx", "panel_knob"),
+            )
+            knobs.append({"id": item, "cx": cx, "cy": cy})
+
+        self._ambient = {
+            "layout": layout,
+            "reduce": reduce_motion,
+            "outlines": outlines,
+            "dust": dust,
+            "rain": rain,
+            "crt_scan": crt_scan,
+            "crt_glitch": crt_glitch,
+            "lamp": lamp,
+            "plant": plant,
+            "mug": mug,
+            "shelf": shelf,
+            "records": records,
+            "knobs": knobs,
+        }
+
+        # Outlines sit above the rest of the ambient layer but still below
+        # the puppy and the UI copy.
+        for item in outlines.values():
+            canvas.tag_raise(item)
+
+        # Seed every pooled item with a real position. The clock will move
+        # them from here without creating or deleting anything.
+        self._animate_room_ambient(time.time(), 0)
+        if reduce_motion:
+            for entry in rain:
+                canvas.itemconfigure(entry["id"], state="hidden")
+            for entry in mug:
+                canvas.itemconfigure(entry["id"], state="hidden")
+        self._apply_room_hover()
+
+    def _animate_room_ambient(self, now, tick=None):
+        ambient = getattr(self, "_ambient", None)
+        canvas = getattr(self, "_room_canvas", None)
+        if not ambient or canvas is None:
+            return
+        layout = ambient.get("layout")
+        if not layout:
+            return
+        tick = int(self._anim_tick if tick is None else tick)
+
+        if ambient.get("reduce"):
+            self._update_hover_overlays(tick, static=True)
+            return
+
+        try:
+            if tick % 2 == 0:
+                for mote in ambient["dust"]:
+                    x = 12.0 + (
+                        (mote["bx"] - 12.0 + tick * mote["speed"] * 0.055) % 376.0
+                    )
+                    y = mote["by"] + math.sin(tick * 0.03 + mote["phase"]) * 2.4
+                    rect = self._room_rect(
+                        layout, x, y, x + mote["size"], y + mote["size"]
+                    )
+                    canvas.coords(mote["id"], *rect)
+
+            for drop in ambient["rain"]:
+                pane_x0, pane_y0, pane_x1, pane_y1 = drop["pane"]
+                travel = max(1.0, pane_y1 - pane_y0 - drop["length"])
+                y = pane_y0 + (
+                    (drop["by"] - pane_y0 + tick * drop["speed"] / 30.0) % travel
+                )
+                x = drop["bx"]
+                rect = self._room_rect(
+                    layout, x - 0.35, y, x + 0.35, y + drop["length"]
+                )
+                canvas.coords(drop["id"], *rect)
+
+            hot_crt = self._room_hover == "crt"
+            crt_boost = now < getattr(self, "_crt_boost_until", 0.0)
+            scan_speed = 5.2 if (hot_crt or crt_boost) else 2.2
+            scan_color = MINT if (hot_crt or crt_boost) else ACCENT_DIM
+            for scan in ambient["crt_scan"]:
+                y = 94.0 + ((tick * scan_speed + scan["offset"]) % 38.0)
+                rect = self._room_rect(layout, 40.5, y, 99.5, y + 0.55)
+                canvas.coords(scan["id"], *rect)
+                canvas.itemconfigure(scan["id"], fill=scan_color)
+
+            show_glitch = (
+                hot_crt or crt_boost or (tick % 37 in (0, 1, 2))
+            )
+            glitch = ambient["crt_glitch"]
+            if show_glitch:
+                gx = 42.0 + ((tick * 13) % 54)
+                gy = 95.0 + ((tick * 7) % 34)
+                rect = self._room_rect(layout, gx, gy, gx + 3.0, gy + 0.55)
+                canvas.coords(glitch, *rect)
+                canvas.itemconfigure(
+                    glitch, state="normal",
+                    fill=GOLD if (tick // 3) % 2 else MINT,
+                )
+            else:
+                canvas.itemconfigure(glitch, state="hidden")
+
+            if tick % 6 == 0:
+                lamp_color = CREAM if (tick // 6) % 9 < 2 else GOLD
+                rect = self._room_rect(layout, 272, 70, 280, 72)
+                canvas.coords(ambient["lamp"], *rect)
+                canvas.itemconfigure(ambient["lamp"], fill=lamp_color)
+
+            if tick % 3 == 0:
+                for leaf in ambient["plant"]:
+                    dx = int(round(math.sin(tick * 0.06 + leaf["phase"])))
+                    dy = int(round(math.cos(tick * 0.045 + leaf["phase"]) * 0.5))
+                    rect = self._room_rect(
+                        layout, leaf["x"] + dx, leaf["y"] + dy,
+                        leaf["x"] + dx + 1, leaf["y"] + dy + 1,
+                    )
+                    canvas.coords(leaf["id"], *rect)
+
+            if tick % 2 == 0:
+                for steam in ambient["mug"]:
+                    phase = (tick * 0.08 + steam["phase"]) % 7.0
+                    sy = 175.0 - phase
+                    sx = steam["x"] + math.sin(tick * 0.05 + steam["phase"]) * 0.45
+                    rect = self._room_rect(layout, sx, sy, sx + 1, sy + 1)
+                    canvas.coords(steam["id"], *rect)
+
+            self._update_hover_overlays(tick, static=False)
+        except Exception:
+            pass
+
+    def _update_hover_overlays(self, tick, static=False):
+        ambient = getattr(self, "_ambient", None)
+        canvas = getattr(self, "_room_canvas", None)
+        if not ambient or canvas is None:
+            return
+        layout = ambient.get("layout")
+        if not layout:
+            return
+        hover = self._room_hover
+
+        for idx, entry in enumerate(ambient.get("shelf", ())):
+            if hover == "shelf":
+                dy = 0 if static else (-1 if ((tick // 4) + idx) % 2 else 0)
+                x0, y0, x1 = entry["rect"]
+                rect = self._room_rect(layout, x0, y0 - 1 + dy, x1, y0 + 0.45 + dy)
+                canvas.coords(entry["id"], *rect)
+                canvas.itemconfigure(entry["id"], state="normal")
+            else:
+                canvas.itemconfigure(entry["id"], state="hidden")
+
+        for idx, entry in enumerate(ambient.get("records", ())):
+            if hover == "crate":
+                dy = 0 if static else (-1 if ((tick // 5) + idx) % 2 else 0)
+                x0, y0, x1, y1 = entry["rect"]
+                rect = self._room_rect(layout, x0, y0 + dy, x1, y1 + dy)
+                canvas.coords(entry["id"], *rect)
+                canvas.itemconfigure(entry["id"], state="normal")
+            else:
+                canvas.itemconfigure(entry["id"], state="hidden")
+
+        knob_steps = ((0, -2), (2, 0), (0, 2), (-2, 0))
+        for idx, entry in enumerate(ambient.get("knobs", ())):
+            if hover == "panel":
+                step = 0 if static else (tick // 6 + idx) % 4
+                dx, dy = knob_steps[step]
+                cx, cy = entry["cx"], entry["cy"]
+                rect = self._room_rect(
+                    layout, cx + dx, cy + dy, cx + dx + 1, cy + dy + 1
+                )
+                canvas.coords(entry["id"], *rect)
+                canvas.itemconfigure(entry["id"], state="normal")
+            else:
+                canvas.itemconfigure(entry["id"], state="hidden")
+
+    def _apply_room_hover(self):
+        ambient = getattr(self, "_ambient", None)
+        canvas = getattr(self, "_room_canvas", None)
+        if not ambient or canvas is None:
+            return
+        hover = self._room_hover
+        for name, item in ambient.get("outlines", {}).items():
+            try:
+                if name == hover:
+                    canvas.itemconfigure(
+                        item, state="normal",
+                        outline=CREAM if name != "crt" else GOLD,
+                        width=max(1, int(round(ambient["layout"][0] * 0.42))),
+                    )
+                else:
+                    canvas.itemconfigure(item, state="hidden")
+            except Exception:
+                pass
+
+    def _set_room_hover(self, zone):
+        if zone == self._room_hover:
+            return
+        self._room_hover = zone
+        self._apply_room_hover()
+        canvas = getattr(self, "_room_canvas", None)
+        if canvas is not None:
+            try:
+                if zone in ("shelf", "panel", "crate"):
+                    canvas.configure(cursor="hand2")
+                elif zone == "crt":
+                    canvas.configure(cursor="crosshair")
+                else:
+                    canvas.configure(cursor="")
+            except Exception:
+                pass
+        try:
+            self._update_hover_overlays(
+                self._anim_tick, static=self._reduce_motion_enabled()
+            )
+        except Exception:
+            pass
+
+    def _on_room_canvas_motion(self, event):
+        zone = None
+        for name, bbox in getattr(self, "_room_hotspots", {}).items():
+            if bbox[0] <= event.x <= bbox[2] and bbox[1] <= event.y <= bbox[3]:
+                zone = name
+                break
+        self._set_room_hover(zone)
+
+    def _on_room_canvas_leave(self, _event=None):
+        self._set_room_hover(None)
 
     @staticmethod
     def _game_label(game):
@@ -2245,6 +2628,11 @@ class GameBeatsApp:
             canvas.delete("overlay")
         except Exception:
             return
+
+        # Pooled ambient layer: dust, rain, CRT scanlines, lamp pulse,
+        # plant highlights, mug steam, and hover reactions. It is created
+        # here (layout changes only) and moved by the master clock.
+        self._build_room_ambient(canvas, w, h)
 
         # The puppy lives on its own canvas image item, so the animation loop
         # can swap frames without re-rendering the entire room. The item's
@@ -2422,12 +2810,23 @@ class GameBeatsApp:
                 canvas.configure(cursor="")
         except Exception:
             pass
+        zone = {"lbl_shelf": "shelf", "lbl_board": "panel",
+                "lbl_crate": "crate"}.get(tag)
+        if zone:
+            self._set_room_hover(zone if entering else None)
 
     def _on_room_canvas_click(self, event):
         try:
             x0, y0, x1, y1 = self._puppy_bbox
             if x0 <= event.x <= x1 and y0 <= event.y <= y1:
                 self._pet_puppy()
+                return
+        except Exception:
+            pass
+        try:
+            if self._room_hover == "crt":
+                self._crt_boost_until = time.time() + 0.9
+                self._on_room_canvas_motion(event)
         except Exception:
             pass
 
@@ -2444,39 +2843,68 @@ class GameBeatsApp:
             pass
 
     def _draw_cart_cassette(self, canvas):
+        """Build the cassette once; the master clock only turns its spokes."""
         if canvas is None:
             return
         try:
-            canvas.delete("all")
             w = canvas.winfo_width()
             h = canvas.winfo_height()
             if w < 20 or h < 10:
                 return
-            canvas.create_rectangle(0, 0, w, h, fill=NIGHT, outline="")
-            canvas.create_line(4, 4, w - 4, 4, fill=WOOD)
-            canvas.create_line(4, h - 4, w - 4, h - 4, fill=WOOD)
-            cy = h // 2
-            playing = bool(
-                getattr(self, "_is_playing", False)
-                or getattr(self, "_spotify_audio_active", False)
-            )
-            phase = time.time() * 5.2 if playing else 0.0
-            for idx, cx in enumerate((int(w * 0.30), int(w * 0.70))):
-                canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7,
-                                   fill=GOLD, outline=WOOD)
-                # Three little spokes make the reels visibly rotate while
-                # music is playing. Static when paused.
-                a0 = phase + idx * 0.7
-                for k in range(3):
-                    a = a0 + k * (2 * math.pi / 3)
-                    canvas.create_line(
-                        cx, cy,
-                        cx + 5 * math.cos(a), cy + 5 * math.sin(a),
-                        fill=WOOD, width=1,
+            key = (int(w), int(h))
+            if self._cart_key != key or self._cart_items is None:
+                canvas.delete("cart")
+                cy = h // 2
+                items = {"cy": cy, "reels": []}
+                canvas.create_rectangle(
+                    0, 0, w, h, fill=NIGHT, outline="", tags=("cart",),
+                )
+                canvas.create_line(4, 4, w - 4, 4, fill=WOOD, tags=("cart",))
+                canvas.create_line(4, h - 4, w - 4, h - 4, fill=WOOD, tags=("cart",))
+                for idx, cx in enumerate((int(w * 0.30), int(w * 0.70))):
+                    canvas.create_oval(
+                        cx - 7, cy - 7, cx + 7, cy + 7,
+                        fill=GOLD, outline=WOOD, tags=("cart",),
                     )
-                canvas.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
-                                   fill=NIGHT, outline="")
-            canvas.create_line(6, cy, w - 6, cy, fill=WOOD)
+                    spokes = []
+                    for _k in range(3):
+                        spokes.append(canvas.create_line(
+                            cx, cy, cx, cy, fill=WOOD, width=1, tags=("cart",)
+                        ))
+                    canvas.create_oval(
+                        cx - 2, cy - 2, cx + 2, cy + 2,
+                        fill=NIGHT, outline="", tags=("cart",),
+                    )
+                    items["reels"].append({"cx": cx, "spokes": spokes})
+                canvas.create_line(6, cy, w - 6, cy, fill=WOOD, tags=("cart",))
+                self._cart_items = items
+                self._cart_key = key
+            self._update_cart_cassette(time.time())
+        except Exception:
+            pass
+
+    def _update_cart_cassette(self, now):
+        items = getattr(self, "_cart_items", None)
+        canvas = getattr(self, "_cart_canvas", None)
+        if not items or canvas is None:
+            return
+        playing = bool(
+            getattr(self, "_is_playing", False)
+            or getattr(self, "_spotify_audio_active", False)
+        )
+        phase = now * 5.2 if playing else 0.0
+        cy = items["cy"]
+        try:
+            for idx, reel in enumerate(items["reels"]):
+                cx = reel["cx"]
+                for k, spoke in enumerate(reel["spokes"]):
+                    angle = phase + idx * 0.7 + k * (2 * math.pi / 3)
+                    canvas.coords(
+                        spoke,
+                        cx, cy,
+                        cx + 5 * math.cos(angle),
+                        cy + 5 * math.sin(angle),
+                    )
         except Exception:
             pass
 
@@ -2486,7 +2914,8 @@ class GameBeatsApp:
         if getattr(self, "_puppy_job", None) is not None:
             return
         try:
-            self._puppy_job = self.root.after(380, self._animate_puppy)
+            # One 30 Hz clock for every animated element in the room.
+            self._puppy_job = self.root.after(380, self._master_clock)
         except Exception:
             self._puppy_job = None
 
@@ -2498,32 +2927,51 @@ class GameBeatsApp:
             pass
         self._puppy_job = None
 
-    def _animate_puppy(self):
+    def _master_clock(self):
         self._puppy_job = None
         if getattr(self, "_closing", False):
             return
         if getattr(self, "_current_page", "") != "main":
             return
-        if self._room_puppy_item is None:
-            self._redraw_room()
-        else:
-            self._animate_room_puppy()
+
+        now = time.time()
+        self._anim_tick = getattr(self, "_anim_tick", 0) + 1
+        tick = self._anim_tick
+
         try:
-            # One 30 Hz master tick. Sprite frames are held for an even number
-            # of ticks ("on twos"); the canvas item itself never moves.
-            self._puppy_job = self.root.after(33, self._animate_puppy)
+            if self._room_puppy_item is None:
+                self._redraw_room()
+            else:
+                self._animate_room_puppy(now)
+        except Exception:
+            pass
+
+        try:
+            self._animate_vu_tick(now)
+        except Exception:
+            pass
+
+        try:
+            self._update_cart_cassette(now)
+        except Exception:
+            pass
+
+        try:
+            self._animate_room_ambient(now, tick)
+        except Exception:
+            pass
+
+        try:
+            self._puppy_job = self.root.after(MASTER_TICK_MS, self._master_clock)
         except Exception:
             self._puppy_job = None
 
-    def _start_vu_animation(self):
-        if getattr(self, "_vu_job", None) is not None:
-            return
-        try:
-            self._vu_job = self.root.after(120, self._animate_vu)
-        except Exception:
-            self._vu_job = None
+    def _animate_puppy(self):
+        """Backwards-compatible entry point for the single master clock."""
+        self._master_clock()
 
     def _stop_vu_animation(self):
+        # The VU rides the master clock now; keep this hook for old callers.
         try:
             if getattr(self, "_vu_job", None):
                 self.root.after_cancel(self._vu_job)
@@ -2531,27 +2979,21 @@ class GameBeatsApp:
             pass
         self._vu_job = None
 
-    def _animate_vu(self):
-        self._vu_job = None
-        if getattr(self, "_closing", False):
-            return
-        if getattr(self, "_current_page", "") != "main":
-            return
-        playing = bool(getattr(self, "_is_playing", False))
+    def _animate_vu_tick(self, now):
+        playing = bool(
+            getattr(self, "_is_playing", False)
+            or getattr(self, "_spotify_audio_active", False)
+        )
         peak = float(getattr(self, "_last_spotify_peak", 0.0) or 0.0)
         target = min(1.0, peak / 0.18) if playing else 0.0
-        self._vu_level = getattr(self, "_vu_level", 0.0) * 0.55 + target * 0.45
+        if self._reduce_motion_enabled():
+            level = target
+        else:
+            level = getattr(self, "_vu_level", 0.0) * 0.55 + target * 0.45
+        if target <= 0.0 and level < 0.005:
+            level = 0.0
+        self._vu_level = max(0.0, min(1.0, level))
         self._draw_vu()
-        # Spin the cassette reels at a modest rate (every other VU frame).
-        self._vu_frame = (getattr(self, "_vu_frame", 0) + 1) % 2
-        if self._vu_frame == 0 or not playing:
-            self._draw_cart_cassette(getattr(self, "_cart_canvas", None))
-        try:
-            self._vu_job = self.root.after(
-                120 if playing else 480, self._animate_vu
-            )
-        except Exception:
-            self._vu_job = None
 
     def _draw_vu(self):
         canvas = getattr(self, "_vu_canvas", None)
@@ -2562,12 +3004,28 @@ class GameBeatsApp:
             h = canvas.winfo_height()
             if w < 20 or h < 6:
                 return
-            canvas.delete("all")
             bars = 21
             gap = 2
             bw = max(2, (w - (bars - 1) * gap) // bars)
+            key = (int(w), int(h), bars, gap, bw)
+            if self._vu_key != key:
+                canvas.delete("vu_bars")
+                self._vu_items = []
+                self._vu_colors = []
+                self._vu_heights = []
+                for i in range(bars):
+                    x = i * (bw + gap)
+                    item = canvas.create_rectangle(
+                        x, h - 3, x + bw, h, fill=SURFACE4, outline="",
+                        tags=("vu_bars",),
+                    )
+                    self._vu_items.append(item)
+                    self._vu_colors.append(SURFACE4)
+                    self._vu_heights.append(3)
+                self._vu_key = key
+
             level = max(0.0, min(1.0, getattr(self, "_vu_level", 0.0)))
-            for i in range(bars):
+            for i, item in enumerate(self._vu_items):
                 frac = i / max(1, bars - 1)
                 lit = frac <= level
                 bh = 3 + int((h - 4) * (0.35 + 0.65 * frac)) if lit else 3
@@ -2579,10 +3037,13 @@ class GameBeatsApp:
                     color = GOLD
                 else:
                     color = ORANGE
-                x = i * (bw + gap)
-                canvas.create_rectangle(
-                    x, h - bh, x + bw, h, fill=color, outline="",
-                )
+                if self._vu_colors[i] != color:
+                    canvas.itemconfigure(item, fill=color)
+                    self._vu_colors[i] = color
+                if self._vu_heights[i] != bh:
+                    x = i * (bw + gap)
+                    canvas.coords(item, x, h - bh, x + bw, h)
+                    self._vu_heights[i] = bh
         except Exception:
             pass
 
