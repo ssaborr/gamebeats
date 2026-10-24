@@ -45,6 +45,7 @@ from core.audio_monitor import (
 from ui.onboarding import OnboardingOverlay
 from ui.games_page import GamesPage, get_game_square_icon_image, _generate_gradient_fallback
 from ui.mascot_notifier import MascotNotifier, PuppySingingOverlay
+from ui.puppy_anim import PuppyAnimator
 from ui.runtime_overlay import RuntimeOverlay
 from ui import theme as T
 
@@ -146,6 +147,17 @@ def _load_design_sprite(name):
         return None
     try:
         return Image.open(path).convert("RGBA")
+    except Exception:
+        return None
+
+
+def _load_design_json(name):
+    path = _design_asset_path("puppy_design", name)
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
     except Exception:
         return None
 
@@ -1106,11 +1118,36 @@ class GameBeatsApp:
         # ── Room assets ───────────────────────────────────────────────────────
         self._room_pil = _load_design_room("den_room.png")
         self._room_dim_pil = _load_design_room("den_room_dim.png")
-        self._puppy_sprites = {
-            name: _load_design_sprite(name)
-            for name in ("idle", "mic", "sing", "encore")
-        }
+        self._puppy_anim_spec = _load_design_json("puppy_anim.json")
+        self._puppy_anim = None
+        if self._puppy_anim_spec:
+            try:
+                self._puppy_anim = PuppyAnimator(self._puppy_anim_spec)
+            except Exception:
+                self._puppy_anim = None
+        if self._puppy_anim is not None:
+            frame_names = set()
+            for state in self._puppy_anim_spec.get("states", {}).values():
+                frame_names.update(state.get("frames", ()))
+                if state.get("static"):
+                    frame_names.add(state["static"])
+            self._puppy_sprites = {
+                name: _load_design_sprite(f"anim/{name}")
+                for name in sorted(frame_names)
+            }
+            self._puppy_sprites = {
+                name: sprite for name, sprite in self._puppy_sprites.items()
+                if sprite is not None
+            }
+        else:
+            self._puppy_sprites = {
+                name: _load_design_sprite(name)
+                for name in ("idle", "mic", "sing", "encore")
+            }
         self._puppy_photo_cache = {}
+        self._puppy_mood_until = 0.0
+        self._puppy_reaction_until = 0.0
+        self._last_np_key = None
         self._room_image_item = None
         self._room_photo = None
         self._room_base_cache = None
@@ -1151,10 +1188,14 @@ class GameBeatsApp:
         brand_logo = None
         self._brand_puppy_photo = None
         try:
-            sprite = _load_design_sprite("idle")
+            sprite = (
+                self._puppy_sprites.get("idle_0")
+                or self._puppy_sprites.get("idle")
+                or _load_design_sprite("idle")
+            )
             if sprite is not None:
                 resampling = getattr(Image, "Resampling", Image)
-                logo = sprite.resize((36, 40), resampling.NEAREST)
+                logo = sprite.resize((32, 36), resampling.NEAREST)
                 self._brand_puppy_photo = ImageTk.PhotoImage(logo)
                 brand_logo = tk.Label(
                     brand, image=self._brand_puppy_photo, bg=NIGHT,
@@ -2009,8 +2050,61 @@ class GameBeatsApp:
         except Exception:
             pass
 
+    def _reduce_motion_enabled(self):
+        try:
+            return bool(self.configure.get("reduce_motion", False))
+        except Exception:
+            return False
+
+    def _puppy_audio_level(self):
+        try:
+            peak = float(getattr(self, "_last_spotify_peak", 0.0) or 0.0)
+        except Exception:
+            peak = 0.0
+        return max(0.0, min(1.0, peak / 0.18))
+
+    def _puppy_animation_mode(self, now=None):
+        now = time.time() if now is None else now
+        if now < getattr(self, "_puppy_mood_until", 0.0):
+            return "happy"
+        if now < getattr(self, "_puppy_reaction_until", 0.0):
+            return "reaction"
+        try:
+            playing = bool(
+                getattr(self, "_is_playing", False)
+                or getattr(self, "_spotify_audio_active", False)
+            ) and not self._intentional_pause_active()
+        except Exception:
+            playing = bool(getattr(self, "_is_playing", False))
+        if playing:
+            return "singing"
+        if getattr(self, "current_game", None):
+            return "alert"
+        try:
+            if self._intentional_pause_active():
+                return "paused"
+        except Exception:
+            pass
+        return "idle"
+
+    def _puppy_frame_name(self, now=None):
+        now = time.time() if now is None else now
+        mode = self._puppy_animation_mode(now)
+        animator = getattr(self, "_puppy_anim", None)
+        if animator is not None:
+            return animator.frame(
+                int(now * 30), mode, self._puppy_audio_level(),
+                self._reduce_motion_enabled(),
+            )
+        # Legacy fallback if the animation spec was not packaged.
+        if mode == "singing":
+            return "sing" if int(now * 6.0) % 4 < 2 else "mic"
+        if mode in ("alert", "reaction"):
+            return "mic"
+        return "idle"
+
     def _animate_room_puppy(self):
-        """Smoothly bob/sway the in-room puppy without repainting the room."""
+        """Swap in-place frames; the mascot never moves on the canvas."""
         canvas = getattr(self, "_room_canvas", None)
         if canvas is None or self._room_puppy_item is None:
             return
@@ -2020,28 +2114,9 @@ class GameBeatsApp:
             px, py, pw, ph = getattr(self, "_room_puppy_base", (0, 0, 0, 0))
             if pw <= 0 or ph <= 0:
                 return
-            now = time.time()
-            playing = bool(
-                getattr(self, "_is_playing", False)
-                or getattr(self, "_spotify_audio_active", False)
-            ) and not self._intentional_pause_active()
-            phase = now * (3.6 if playing else 1.8)
-            bob = math.sin(phase) * (3.4 if playing else 2.2)
-            sway = math.sin(phase * 0.5 + 0.8) * (1.6 if playing else 0.8)
-            nx = int(round(px + sway))
-            ny = int(round(py + bob))
-            canvas.coords(self._room_puppy_item, nx, ny)
-            self._puppy_bbox = (nx, ny, nx + pw, ny + ph)
 
-            # Swap mouth poses a little slower than the bob so the motion
-            # reads as singing rather than a strobing two-frame flip.
-            cycle = int(now * (6.0 if playing else 2.0)) % 4
-            if playing:
-                sprite_name = "sing" if cycle < 2 else "mic"
-            elif getattr(self, "current_game", None):
-                sprite_name = "mic"
-            else:
-                sprite_name = "idle"
+            now = time.time()
+            sprite_name = self._puppy_frame_name(now)
             key = (sprite_name, int(pw), int(ph))
             if key != self._room_puppy_sprite_key:
                 sprite = self._puppy_image_for(sprite_name, (pw, ph))
@@ -2050,9 +2125,8 @@ class GameBeatsApp:
                     self._room_puppy_photo = photo
                     canvas.itemconfigure(self._room_puppy_item, image=photo)
                     self._room_puppy_sprite_key = key
-            self._draw_room_dust(
-                canvas, canvas.winfo_width(), canvas.winfo_height(), now, playing
-            )
+            # Feet are locked: coordinates and bbox never change after layout.
+            self._puppy_bbox = (px, py, px + pw, py + ph)
             canvas.tag_raise("puppy")
         except Exception:
             pass
@@ -2143,30 +2217,17 @@ class GameBeatsApp:
             return
 
         now = time.time()
-        playing = bool(
-            getattr(self, "_is_playing", False)
-            or getattr(self, "_spotify_audio_active", False)
-        ) and not self._intentional_pause_active()
-        if playing:
-            beat = int(now * 2.0) % 4
-            sprite_name = "sing" if beat < 2 else "mic"
-            bob = (0, 2, 3, 1)[beat]
-        elif getattr(self, "current_game", None):
-            sprite_name = "mic"
-            bob = int(round(1.5 + 1.5 * math.sin(now * 1.7)))
-        else:
-            sprite_name = "idle"
-            bob = int(round(1.5 + 1.5 * math.sin(now * 1.6)))
+        sprite_name = self._puppy_frame_name(now)
 
         # The mascot is the big in-room puppy, centred over the player deck.
-        # The sprite has a five-pixel transparent margin under the paws; tuck
-        # that under the canvas edge so the paws visually rest on the dock.
-        pw = max(96, int(w * 0.145))
-        ph = int(pw * 144 / 128)
+        # 64x72 authored pixels at 3x keeps the character on the same pixel
+        # grid as the 400x250 room plate. The feet baseline is fixed.
+        pw = max(96, int(round(w * 0.15)))
+        ph = int(round(pw * 72 / 64))
         px = (w - pw) // 2
-        paw_margin = int(round(ph * 5.0 / 144.0))
+        paw_margin = int(round(ph * 2.0 / 72.0))
         perch_y = h - ph + paw_margin - 1
-        py = max(0, min(perch_y + bob, perch_y))
+        py = max(0, perch_y)
         px = max(0, min(px, w - pw - 4))
         self._puppy_bbox = (px, py, px + pw, py + ph)
         self._room_puppy_base = (px, py, pw, ph)
@@ -2186,13 +2247,14 @@ class GameBeatsApp:
             return
 
         # The puppy lives on its own canvas image item, so the animation loop
-        # can bob it smoothly without re-rendering the entire room.
+        # can swap frames without re-rendering the entire room. The item's
+        # coordinates are written once here and never touched by the loop.
         self._draw_room_puppy(canvas, sprite_name, (px, py, pw, ph))
 
         # Small, dark contact shadow under the paws. The old gold/mint oval
         # read as an orange circle behind the mascot, so the glow is gone.
         try:
-            sy = min(h - 1, py + ph - 2)
+            sy = min(h - 1, py + ph - paw_margin)
             shadow_w = int(pw * 0.62)
             sx = px + (pw - shadow_w) // 2
             layers = (
@@ -2276,28 +2338,8 @@ class GameBeatsApp:
                               "DIG FOR A VIBE", "lbl_crate",
                               lambda: self._nav("playlists"))
 
-        # Puppy caption + pet heart
+        # Pet heart (tap feedback only; the mascot itself never floats).
         try:
-            if playing:
-                canvas.create_text(
-                    px + pw // 2, py - 8, text="\u266a  that's my jam",
-                    anchor="s", font=(F_RETRO, -max(12, int(w * 0.009))),
-                    fill=GOLD, tags=("overlay",),
-                )
-                # Floating notes drift up beside the puppy while music plays.
-                note_size = max(12, int(w * 0.010))
-                for i in range(3):
-                    drift = int((now * 26 + i * 17) % 52)
-                    nx = px + pw + 2 + int(7 * math.sin(now * 2.1 + i * 1.7))
-                    ny = py + ph * 0.52 - drift
-                    if ny < py - 30:
-                        ny = py + ph * 0.52
-                    canvas.create_text(
-                        nx, ny, text="\u266a", anchor="w",
-                        font=(F_RETRO, -note_size),
-                        fill=(GOLD, ROSE, MINT)[i],
-                        tags=("overlay",),
-                    )
             if time.time() < getattr(self, "_heart_until", 0.0):
                 canvas.create_text(
                     px + pw // 2, py - 26, text="\u2665",
@@ -2390,7 +2432,9 @@ class GameBeatsApp:
             pass
 
     def _pet_puppy(self):
-        self._heart_until = time.time() + 1.2
+        now = time.time()
+        self._heart_until = now + 1.2
+        self._puppy_mood_until = now + 1.2
         if hasattr(self, "status_log_lbl"):
             self.status_log_lbl.configure(text="Puppy says hi.", text_color=GOLD)
         self._redraw_room()
@@ -2460,20 +2504,14 @@ class GameBeatsApp:
             return
         if getattr(self, "_current_page", "") != "main":
             return
-        playing = bool(
-            getattr(self, "_is_playing", False)
-            or getattr(self, "_spotify_audio_active", False)
-        )
         if self._room_puppy_item is None:
             self._redraw_room()
         else:
             self._animate_room_puppy()
         try:
-            # Smooth continuous motion; the heavy room image is only rebuilt
-            # on actual state changes, so this is cheap.
-            self._puppy_job = self.root.after(
-                90 if playing else 180, self._animate_puppy
-            )
+            # One 30 Hz master tick. Sprite frames are held for an even number
+            # of ticks ("on twos"); the canvas item itself never moves.
+            self._puppy_job = self.root.after(33, self._animate_puppy)
         except Exception:
             self._puppy_job = None
 
@@ -5262,6 +5300,18 @@ class GameBeatsApp:
     def _update_np(self, t):
         self._last_track_info = t
         self._last_track_info_ts = time.time()
+        try:
+            key = (
+                str(t.get("uri") or ""),
+                str(t.get("name") or "").strip(),
+                str(t.get("artist") or "").strip(),
+            )
+            if self._last_np_key is not None and key != self._last_np_key:
+                # In-place track-change reaction: head turn + ear perk.
+                self._puppy_reaction_until = time.time() + 1.15
+            self._last_np_key = key
+        except Exception:
+            pass
         if not hasattr(self, "track_lbl"):
             return
         playlist_uri = t.get("playlist_uri") or t.get("context_uri")

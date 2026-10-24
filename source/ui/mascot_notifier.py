@@ -1,5 +1,4 @@
 import json
-import math
 import os
 import sys
 from pathlib import Path
@@ -46,9 +45,15 @@ NOTIFIER_TEXT_SUB = T.GOLD
 NOTIFIER_TEXT_MUTED = T.TEXT_MUTED
 NOTIFIER_BTN_HOVER = T.SURFACE3
 
-PUPPY_SINGING_FRAMES = ("puppy_sing_open.png", "puppy_sing_closed.png")
-PUPPY_IDLE_FRAME = "puppy_idle.png"
-PUPPY_ANIMATION_INTERVAL = 85
+# The desktop singer uses the same 64x72 authored frames as the room mascot.
+# Eight frames would loop in a blink, so this is a 12-beat phrase.
+PUPPY_SINGING_FRAMES = (
+    "sing_0", "sing_1", "sing_2", "sing_1",
+    "sing_0", "sing_1", "sing_3", "sing_1",
+    "sing_2", "sing_1", "sing_0", "sing_1",
+)
+PUPPY_IDLE_FRAME = "idle_0"
+PUPPY_ANIMATION_INTERVAL = 66   # one frame on twos at 30 Hz
 PUPPY_OVERLAY_ALPHA = 0.80
 
 
@@ -75,90 +80,53 @@ def _apply_noactivate(hwnd: int):
         pass
 
 
-def _asset_path(filename: str) -> Path:
-    candidates = []
-    if getattr(sys, "frozen", False):
-        bundle_dir = getattr(sys, "_MEIPASS", "")
-        if bundle_dir:
-            candidates.append(Path(bundle_dir) / "assets" / "puppy" / filename)
-        candidates.append(Path(sys.executable).resolve().parent / "assets" / "puppy" / filename)
-
-    here = Path(__file__).resolve()
-    candidates.append(here.parents[2] / "assets" / "puppy" / filename)
-    candidates.append(Path.cwd() / "assets" / "puppy" / filename)
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
-def _alpha_bbox(images, threshold: int = 5, padding: int = 16):
-    boxes = []
-    for img in images:
-        if img.mode != "RGBA":
-            continue
-        alpha = img.getchannel("A").point(lambda px: 255 if px > threshold else 0)
-        box = alpha.getbbox()
-        if box:
-            boxes.append(box)
-    if not boxes:
+def _load_pixel_puppy_photo(name, max_size):
+    """Load the hard-edged idle frame for the notifier card."""
+    if not HAS_PIL:
+        return None
+    path = T.assets_dir() / "puppy_design" / "anim" / f"{name}.png"
+    if not path.exists():
+        return None
+    try:
+        img = Image.open(path).convert("RGBA")
+        max_w, max_h = max_size
+        scale = max(1, min(int(max_w // img.width), int(max_h // img.height)))
+        if scale != 1:
+            img = img.resize(
+                (img.width * scale, img.height * scale),
+                Image.Resampling.NEAREST,
+            )
+        return ImageTk.PhotoImage(img)
+    except Exception:
         return None
 
-    width, height = images[0].size
-    left = max(0, min(box[0] for box in boxes) - padding)
-    top = max(0, min(box[1] for box in boxes) - padding)
-    right = min(width, max(box[2] for box in boxes) + padding)
-    bottom = min(height, max(box[3] for box in boxes) + padding)
-    return left, top, right, bottom
 
+def _build_singing_photos(frame_names, max_size):
+    """Load hard-edged animation frames, scaled by a whole-number factor.
 
-def _load_puppy_photos(filenames, max_size):
-    if not HAS_PIL:
-        return []
-
-    images = []
-    for filename in filenames:
-        path = _asset_path(filename)
-        if not path.exists():
-            return []
-        images.append(Image.open(path).convert("RGBA"))
-
-    box = _alpha_bbox(images)
-    photos = []
-    for img in images:
-        if box:
-            img = img.crop(box)
-        img.thumbnail(max_size, Image.LANCZOS)
-        photos.append(ImageTk.PhotoImage(img))
-    return photos
-
-
-def _build_singing_photos(filenames, max_size, frame_count=18):
-    """Turn the two mouth poses into a smooth, lively singing loop.
-
-    The source art only ships an open and a closed mouth. Blending those two
-    poses with a cosine curve, then adding a small bob / sway / pulse, removes
-    the hard two-frame flip and makes the puppy read as actually singing.
+    The old overlay blended two high-resolution poses and bobbed the result.
+    This keeps the same draggable desktop-puppy behaviour while honouring the
+    pixel rules: nearest-neighbour scaling, binary sprite alpha, no drop shadow,
+    no sway, no vertical bob, no smooth cross-fade.
     """
     if not HAS_PIL:
         return []
 
+    source_dir = T.assets_dir() / "puppy_design" / "anim"
     images = []
-    for filename in filenames:
-        path = _asset_path(filename)
+    for name in frame_names:
+        path = source_dir / f"{name}.png"
         if not path.exists():
             return []
         images.append(Image.open(path).convert("RGBA"))
+    if not images:
+        return []
 
-    box = _alpha_bbox(images)
-    if box:
-        images = [img.crop(box) for img in images]
-
-    # Image.blend() needs identical dimensions; pad any odd export.
     width = max(img.width for img in images)
     height = max(img.height for img in images)
-    normalized = []
+    max_w, max_h = max_size
+    scale = max(1, min(int(max_w // width), int(max_h // height)))
+    photos = []
     for img in images:
         if img.size != (width, height):
             canvas = Image.new("RGBA", (width, height), (0, 0, 0, 0))
@@ -166,52 +134,11 @@ def _build_singing_photos(filenames, max_size, frame_count=18):
                 img, ((width - img.width) // 2, (height - img.height) // 2)
             )
             img = canvas
-        normalized.append(img)
-    if not normalized:
-        return []
-    if len(normalized) == 1:
-        normalized = normalized * 2
-
-    open_img, closed_img = normalized[0], normalized[1]
-    max_w, max_h = max_size
-    fit = min((max_w - 10) / width, (max_h - 10) / height, 1.0)
-    base_w = max(1, int(round(width * fit)))
-    base_h = max(1, int(round(height * fit)))
-
-    photos = []
-    for i in range(frame_count):
-        t = i / frame_count
-        # Two soft open/close cycles per loop. The cosine blend is continuous,
-        # so no frame ever snaps from open straight to closed.
-        mouth = 0.5 - 0.5 * math.cos(4.0 * math.pi * t)
-        frame = Image.blend(open_img, closed_img, mouth)
-        frame = frame.resize((base_w, base_h), Image.LANCZOS)
-
-        bob = math.sin(2.0 * math.pi * t) * 2.6
-        sway = math.sin(2.0 * math.pi * t + 1.1) * 1.4
-        pulse = 1.0 + math.sin(2.0 * math.pi * t + 0.6) * 0.012
-
-        frame_w = max(1, int(round(base_w * pulse)))
-        frame_h = max(1, int(round(base_h * pulse)))
-        frame = frame.resize((frame_w, frame_h), Image.LANCZOS)
-
-        canvas = Image.new("RGBA", (max_w, max_h), (0, 0, 0, 0))
-        x = (max_w - frame_w) // 2 + int(round(sway))
-        y = (max_h - frame_h) // 2 + int(round(bob))
-
-        # Soft pixel drop-shadow so the overlay reads as a physical sticker
-        # floating above the app instead of a flat cutout.
-        try:
-            silhouette = Image.new("RGBA", (frame_w, frame_h), (8, 4, 12, 0))
-            silhouette.putalpha(
-                frame.getchannel("A").point(lambda p: int(p * 0.42))
+        if scale != 1:
+            img = img.resize(
+                (width * scale, height * scale), Image.Resampling.NEAREST
             )
-            canvas.alpha_composite(silhouette, (x + 3, y + 4))
-        except Exception:
-            pass
-
-        canvas.alpha_composite(frame, (x, y))
-        photos.append(ImageTk.PhotoImage(canvas))
+        photos.append(ImageTk.PhotoImage(img))
     return photos
 
 
@@ -613,9 +540,9 @@ class MascotNotifier:
             text_color=T.MINT,
         ).pack(padx=18, pady=(12, 2))
 
-        photos = _load_puppy_photos((PUPPY_IDLE_FRAME,), (96, 96))
-        if photos:
-            self._puppy_photo = photos[0]
+        photo = _load_pixel_puppy_photo(PUPPY_IDLE_FRAME, (96, 96))
+        if photo:
+            self._puppy_photo = photo
             tk.Label(
                 card,
                 image=self._puppy_photo,

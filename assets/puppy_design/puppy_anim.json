@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "size": [
+    64,
+    72
+  ],
+  "baseline_y": 70,
+  "fps": 30,
+  "on_twos": 2,
+  "states": {
+    "idle": {
+      "frames": [
+        "idle_0",
+        "idle_1",
+        "idle_0",
+        "idle_blink",
+        "idle_0",
+        "idle_flick",
+        "idle_1",
+        "idle_tilt"
+      ],
+      "hold": [
+        12,
+        12,
+        14,
+        2,
+        14,
+        4,
+        12,
+        8
+      ],
+      "static": "idle_0"
+    },
+    "singing_open": {
+      "frames": [
+        "sing_0",
+        "sing_2"
+      ],
+      "hold": [
+        2,
+        2
+      ],
+      "static": "sing_0"
+    },
+    "singing_closed": {
+      "frames": [
+        "sing_1"
+      ],
+      "hold": [
+        4
+      ],
+      "static": "sing_1"
+    },
+    "singing_eyes_closed": {
+      "frames": [
+        "sing_3"
+      ],
+      "hold": [
+        6
+      ],
+      "static": "sing_3"
+    },
+    "paused": {
+      "frames": [
+        "paused_0",
+        "paused_1"
+      ],
+      "hold": [
+        30,
+        30
+      ],
+      "static": "paused_0"
+    },
+    "alert": {
+      "frames": [
+        "alert_0",
+        "alert_1"
+      ],
+      "hold": [
+        4,
+        4
+      ],
+      "static": "alert_0"
+    },
+    "reaction": {
+      "frames": [
+        "alert_1",
+        "alert_0"
+      ],
+      "hold": [
+        2,
+        2
+      ],
+      "static": "alert_0"
+    },
+    "happy": {
+      "frames": [
+        "happy"
+      ],
+      "hold": [
+        10
+      ],
+      "static": "happy"
+    },
+    "encore": {
+      "frames": [
+        "encore"
+      ],
+      "hold": [
+        8
+      ],
+      "static": "encore"
+    }
+  }
+}
