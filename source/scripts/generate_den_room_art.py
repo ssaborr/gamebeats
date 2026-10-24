@@ -1,10 +1,20 @@
-"""Generate the pixel-art den background used by the main GameBeats page.
+"""Generate GameBeats' 16-bit den background.
 
-The room is drawn procedurally so it can evolve with the app and still ship as
-plain PNG assets.  Everything is snapped to a small pixel grid; no photographic
-or anti-aliased elements are used.
+The artwork is authored on a strict 400x250 logical pixel canvas and scaled x4
+with nearest-neighbour sampling to 1600x1000. Every visible edge therefore sits
+on the same 4-pixel grid in the final plate.
 
-Usage (from the project root):
+The composition keeps the live-UI safe zones:
+
+    upper-left wall .... greeting
+    top centre ......... city window
+    left middle ........ CRT station
+    right upper ........ game shelf / hotspot at ~79%w, 36%h
+    right middle ....... control panel / hotspot at ~79%w, 60%h
+    right lower ........ record crate / hotspot at ~78%w, 84.5%h
+    centre bottom ...... big puppy, kept visually quiet
+
+Run from the project root:
     py source/scripts/generate_den_room_art.py
 """
 
@@ -14,10 +24,22 @@ import math
 import random
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageColor, ImageDraw, ImageFont
 
 
-# ── Palette (mirrors source/ui/theme.py) ─────────────────────────────────────
+# ── Final size / logical pixel grid ─────────────────────────────────────────
+SCALE = 4
+GW, GH = 400, 250
+W, H = GW * SCALE, GH * SCALE
+
+ROOT = Path(__file__).resolve().parents[2]
+OUT_PATH = ROOT / "assets" / "room" / "den_room.png"
+DIM_PATH = ROOT / "assets" / "room" / "den_room_dim.png"
+PREVIEW_PATH = ROOT / "assets" / "room" / "den_room_safe_zones.png"
+BEFORE_AFTER_PATH = ROOT / "assets" / "room" / "den_room_before_after.png"
+
+
+# ── Palette: four-tone material ramps, all derived from the app palette ──────
 PLUM = "#1B1030"
 NIGHT = "#1A1111"
 WALL = "#28182F"
@@ -33,663 +55,767 @@ MINT = "#7CFFC4"
 ROSE = "#D8B7B4"
 DUST = "#C79AA5"
 
-# Shade steps derived from the core palette. Keeping these close to the eight
-# UI colours is what makes the room read as one piece of art rather than a
-# collage of unrelated sprites.
-INK = "#100812"
-VOID = "#160C1E"
-WALL_TOP = "#1B0E27"
-WALL_MID = "#24142D"
-WALL_LOW = "#301A35"
-WALL_PANEL = "#39203C"
-WALL_PANEL_HI = "#452847"
-WALL_LINE = "#170B20"
+RAMPS = {
+    "ink":      ("#0E0712", "#160C1E", "#241329", "#35203C"),
+    "wall":     ("#170C21", "#24142D", "#32203A", "#452847"),
+    "wall_hi":  ("#24142D", "#35203C", "#452847", "#5A3552"),
+    "wood":     ("#32170F", "#532711", "#7A3E0E", "#A85B1E"),
+    "wood_hi":  ("#532711", "#7A3E0E", "#A85B1E", "#D27B2F"),
+    "deck":     ("#2A121C", "#54303A", "#75403F", "#9A5A5B"),
+    "fabric":   ("#2A1233", "#45204A", "#632D5D", "#7A2E5B"),
+    "fabric_hi":("#45204A", "#632D5D", "#7A2E5B", "#A04A78"),
+    "mint":     ("#173B35", "#2C6B5A", "#7CFFC4", "#B6FFE0"),
+    "mint_dim": ("#102A28", "#1A463C", "#2C6B5A", "#7CFFC4"),
+    "gold":     ("#5E2D14", "#8A4A17", "#FDB75C", "#FFE3A6"),
+    "orange":   ("#5A2412", "#8A3A17", "#FF8A3D", "#FFC07A"),
+    "rose":     ("#3A202B", "#573B45", "#865C64", "#D8B7B4"),
+    "purple":   ("#1D1128", "#2A173A", "#3C2350", "#58306A"),
+    "blue":     ("#1B1133", "#2F1B42", "#4B2A5A", "#6B3E6B"),
+    "metal":    ("#120A18", "#241321", "#3B273B", "#5A3E54"),
+    "cream":    ("#8C7A58", "#C9B58B", "#FFF3D0", "#FFFBE9"),
+}
 
-WOOD_DEEP = "#32170F"
-WOOD_SHADE = "#532711"
-WOOD_MID = "#7A3E0E"
-WOOD_LIGHT = "#A85B1E"
-WOOD_HI = "#D27B2F"
+INK = RAMPS["ink"][0]
+WALL_DARK = RAMPS["wall"][0]
+WALL_BASE = RAMPS["wall"][1]
+WALL_LIGHT = RAMPS["wall"][2]
+WALL_HI = RAMPS["wall"][3]
+WOOD_DEEP = RAMPS["wood"][0]
+WOOD_SHADE = RAMPS["wood"][1]
+WOOD_MID = RAMPS["wood"][2]
+WOOD_LIGHT = RAMPS["wood"][3]
+DECK_DEEP = RAMPS["deck"][0]
+DECK_MID = RAMPS["deck"][1]
+DECK_LIGHT = RAMPS["deck"][2]
+DECK_HI = RAMPS["deck"][3]
+FAB_DARK = RAMPS["fabric"][0]
+FAB_MID = RAMPS["fabric"][1]
+FAB_LIGHT = RAMPS["fabric"][2]
+MINT_DARK = RAMPS["mint"][0]
+MINT_MID = RAMPS["mint"][1]
+MINT_LIGHT = RAMPS["mint"][2]
+MINT_GLOW = RAMPS["mint"][3]
+GOLD_DARK = RAMPS["gold"][0]
+GOLD_MID = RAMPS["gold"][1]
+GOLD_LIGHT = RAMPS["gold"][2]
+GOLD_GLOW = RAMPS["gold"][3]
+ORANGE_DARK = RAMPS["orange"][0]
+ORANGE_MID = RAMPS["orange"][1]
+ORANGE_LIGHT = RAMPS["orange"][2]
+ROSE_DARK = RAMPS["rose"][0]
+ROSE_MID = RAMPS["rose"][1]
+ROSE_LIGHT = RAMPS["rose"][2]
+PURPLE_DARK = RAMPS["purple"][0]
+PURPLE_MID = RAMPS["purple"][1]
+PURPLE_LIGHT = RAMPS["purple"][2]
+BLUE_DARK = RAMPS["blue"][0]
+BLUE_MID = RAMPS["blue"][1]
+BLUE_LIGHT = RAMPS["blue"][2]
+METAL_DARK = RAMPS["metal"][0]
+METAL_MID = RAMPS["metal"][1]
+METAL_LIGHT = RAMPS["metal"][2]
+CREAM_DARK = RAMPS["cream"][0]
+CREAM_MID = RAMPS["cream"][1]
+CREAM_LIGHT = RAMPS["cream"][2]
 
-MINT_DARK = "#2C6B5A"
-MINT_SHADOW = "#1A463C"
-MINT_GLOW = "#B6FFE0"
-GOLD_DARK = "#8A4A17"
-ROSE_DARK = "#865C64"
-ROSE_SHADOW = "#573B45"
-PURPLE_DARK = "#2A1233"
-PURPLE_MID = "#45204A"
-PURPLE_LIGHT = "#632D5D"
-
-W, H = 1600, 1000
-ROOT = Path(__file__).resolve().parents[2]
-FONT_PATH = ROOT / "assets" / "fonts" / "Silkscreen-Regular.ttf"
-FONT_BOLD_PATH = ROOT / "assets" / "fonts" / "Silkscreen-Bold.ttf"
-OUT_PATH = ROOT / "assets" / "room" / "den_room.png"
-DIM_PATH = ROOT / "assets" / "room" / "den_room_dim.png"
-
-
-def _rgb(value: str) -> tuple[int, int, int]:
-    value = value.lstrip("#")
-    return tuple(int(value[i:i + 2], 16) for i in (0, 2, 4))
-
-
-def _mix(a: str, b: str, t: float) -> str:
-    ca, cb = _rgb(a), _rgb(b)
-    return "#%02X%02X%02X" % tuple(
-        int(round(ca[i] + (cb[i] - ca[i]) * t)) for i in range(3)
-    )
+BAYER = (
+    (0, 8, 2, 10),
+    (12, 4, 14, 6),
+    (3, 11, 1, 9),
+    (15, 7, 13, 5),
+)
 
 
 class Canvas:
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.img = Image.new("RGB", (width, height), WALL_MID)
+    """A 400x250 pixel surface with a deliberately tiny primitive set."""
+
+    def __init__(self, width: int = GW, height: int = GH):
+        self.w = width
+        self.h = height
+        self.img = Image.new("RGB", (width, height), WALL_BASE)
         self.d = ImageDraw.Draw(self.img)
-        self.rng = random.Random(4127)
+        self.rng = random.Random(2404)
 
-    # ── primitives ───────────────────────────────────────────────────────────
+    def px(self, x: int, y: int, color: str):
+        if 0 <= x < self.w and 0 <= y < self.h:
+            self.img.putpixel((int(x), int(y)), ImageColor.getrgb(color))
+
     def rect(self, box, fill, outline=None, width=1):
-        self.d.rectangle(box, fill=fill, outline=outline, width=width)
+        x0, y0, x1, y1 = box
+        self.d.rectangle(
+            (int(x0), int(y0), int(x1), int(y1)),
+            fill=fill,
+            outline=outline,
+            width=max(1, int(width)),
+        )
 
-    def line(self, xy, fill, width=1):
-        self.d.line(xy, fill=fill, width=width)
+    def line(self, points, fill, width=1):
+        self.d.line(
+            [(int(x), int(y)) for x, y in points],
+            fill=fill,
+            width=max(1, int(width)),
+        )
 
     def poly(self, points, fill, outline=None, width=1):
-        self.d.polygon(points, fill=fill, outline=outline, width=width)
+        self.d.polygon(
+            [(int(x), int(y)) for x, y in points],
+            fill=fill,
+            outline=outline,
+            width=max(1, int(width)),
+        )
 
-    def text(self, xy, value, size=10, fill=CREAM, bold=False):
-        font_path = FONT_BOLD_PATH if bold else FONT_PATH
-        try:
-            font = ImageFont.truetype(str(font_path), size)
-        except Exception:
-            self.d.text(xy, value, fill=fill)
-            return
-        # Render the pixel font through a hard alpha mask so it never looks
-        # blurry when the UI nearest-neighbour-scales the room.
-        probe = Image.new("L", (max(1, self.width), max(1, self.height)), 0)
-        ImageDraw.Draw(probe).text((0, 0), value, font=font, fill=255)
-        bbox = probe.getbbox()
-        if not bbox:
-            return
-        mask = Image.new("L", (bbox[2], bbox[3]), 0)
-        ImageDraw.Draw(mask).text((-bbox[0], -bbox[1]), value, font=font, fill=255)
-        mask = mask.point(lambda v: 255 if v >= 96 else 0)
-        self.img.paste(fill, (int(xy[0]), int(xy[1])), mask)
-
-    def bevel(self, box, fill, hi, lo, border=INK, thickness=3, inner=2):
-        x0, y0, x1, y1 = box
+    def bevel(self, box, fill, hi, lo, border=INK, thickness=1, inner=1):
+        x0, y0, x1, y1 = map(int, box)
         self.rect(box, fill, outline=border, width=thickness)
-        self.line([(x0 + thickness, y0 + thickness), (x1 - thickness, y0 + thickness)], hi, inner)
-        self.line([(x0 + thickness, y0 + thickness), (x0 + thickness, y1 - thickness)], hi, inner)
-        self.line([(x0 + thickness, y1 - thickness), (x1 - thickness, y1 - thickness)], lo, inner)
-        self.line([(x1 - thickness, y0 + thickness), (x1 - thickness, y1 - thickness)], lo, inner)
+        if inner:
+            self.line([(x0 + thickness, y0 + thickness), (x1 - thickness, y0 + thickness)], hi)
+            self.line([(x0 + thickness, y0 + thickness), (x0 + thickness, y1 - thickness)], hi)
+            self.line([(x0 + thickness, y1 - thickness), (x1 - thickness, y1 - thickness)], lo)
+            self.line([(x1 - thickness, y0 + thickness), (x1 - thickness, y1 - thickness)], lo)
 
-    def dither(self, box, color, step=8, phase=0, mask=None):
+    def checker(self, box, color, density=0.25, phase=0):
         x0, y0, x1, y1 = box
-        for y in range(int(y0), int(y1), step):
-            for x in range(int(x0), int(x1), step):
-                if mask == "diag" and ((x // step + y // step + phase) % 2):
-                    continue
-                if mask == "sparse" and ((x // step * 3 + y // step * 5 + phase) % 4):
-                    continue
-                self.rect((x, y, min(x + 2, x1), min(y + 2, y1)), color)
+        for y in range(int(y0), int(y1)):
+            for x in range(int(x0), int(x1)):
+                if (BAYER[(y + phase) % 4][(x + phase) % 4] / 15.0) < density:
+                    self.px(x, y, color)
 
-    def speckle(self, box, colors, count=90, step=4, seed=0):
+    def bayer_rect(self, box, color, density=0.5, phase=0):
         x0, y0, x1, y1 = box
-        rng = random.Random(seed or self.rng.randrange(1 << 30))
+        for y in range(int(y0), int(y1)):
+            row = BAYER[(y + phase) % 4]
+            for x in range(int(x0), int(x1)):
+                if row[(x + phase) % 4] / 15.0 < density:
+                    self.px(x, y, color)
+
+    def light_pool(self, cx, cy, rx, ry, color, strength=0.85, phase=0):
+        cx, cy = float(cx), float(cy)
+        rgb = ImageColor.getrgb(color)
+        for y in range(max(0, int(cy - ry)), min(self.h, int(cy + ry) + 1)):
+            dy = (y - cy) / max(1.0, ry)
+            for x in range(max(0, int(cx - rx)), min(self.w, int(cx + rx) + 1)):
+                dx = (x - cx) / max(1.0, rx)
+                dist = min(1.0, (dx * dx + dy * dy) ** 0.5)
+                if (BAYER[(y + phase) % 4][(x + phase) % 4] / 15.0) < (1.0 - dist) * strength:
+                    self.img.putpixel((x, y), rgb)
+
+    def speckle(self, x0, y0, x1, y1, colors, count=100, seed=1, step=1):
+        rng = random.Random(seed)
         for _ in range(count):
             x = rng.randrange(int(x0), max(int(x0) + 1, int(x1)), step)
             y = rng.randrange(int(y0), max(int(y0) + 1, int(y1)), step)
-            c = colors[rng.randrange(len(colors))]
-            self.rect((x, y, x + 2, y + 2), c)
+            self.px(x, y, colors[rng.randrange(len(colors))])
 
-    def wood_plank(self, box, fill, hi, lo, grain=None):
-        x0, y0, x1, y1 = box
-        self.rect(box, fill, outline=INK, width=2)
-        self.line([(x0 + 2, y0 + 2), (x1 - 2, y0 + 2)], hi, 2)
-        self.line([(x0 + 2, y1 - 2), (x1 - 2, y1 - 2)], lo, 2)
-        if grain:
-            for y in range(y0 + 6, y1 - 3, 8):
-                x = x0 + 8 + ((y * 17) % max(8, (x1 - x0) // 2))
-                self.line([(x, y), (min(x + 24, x1 - 8), y)], grain, 1)
+    def wood_grain(self, x0, y0, x1, y1, dark, light, seed=1):
+        rng = random.Random(seed)
+        for y in range(int(y0) + 2, int(y1) - 1, 3):
+            run = rng.randrange(5, 14)
+            x = rng.randrange(int(x0) + 2, max(int(x0) + 3, int(x1) - run - 2))
+            self.line([(x, y), (x + run, y)], dark)
+            if y % 2 == 0:
+                self.line([(x + 2, y + 1), (x + run - 2, y + 1)], light)
+
+    def contact_shadow(self, x0, y0, x1, y1, opacity="half"):
+        if opacity == "half":
+            self.bayer_rect((x0, y0, x1, y1), INK, 0.55)
+        else:
+            self.bayer_rect((x0, y0, x1, y1), INK, 0.28)
+
+
+def _build_room() -> Canvas:
+    c = Canvas()
+    d = c.d
+
+    # ── Back wall ────────────────────────────────────────────────────────────
+    for y in range(0, 188, 16):
+        t = y / 188.0
+        if t < 0.35:
+            col = WALL_DARK
+        elif t < 0.70:
+            col = WALL_BASE
+        else:
+            col = WALL_LIGHT
+        c.rect((0, y, GW - 1, y + 15), col)
+    # Big quiet upper-left wall for the live greeting.
+    c.bayer_rect((0, 20, 126, 86), WALL_DARK, 0.18)
+    # Sparse wallpaper texture.
+    for y in range(28, 166, 14):
+        for x in range(10, 390, 18):
+            if x < 130 and y < 94:
+                continue
+            if (x + y) % 5 != 0:
+                c.px(x, y, WALL_HI)
+            if (x + y) % 7 == 0:
+                c.px(x + 2, y + 1, WALL_LIGHT)
+    # Vertical seams.
+    for x in (0, 56, 112, 272, 330, 388):
+        c.line([(x, 0), (x, 186)], INK)
+        c.line([(x + 1, 0), (x + 1, 186)], WALL_DARK)
+    # Dark vignette.
+    c.checker((0, 20, 18, 188), INK, 0.65)
+    c.checker((382, 20, 400, 188), INK, 0.65)
+
+    # ── Wainscoting and floor ────────────────────────────────────────────────
+    c.rect((0, 164, 399, 185), WALL_LIGHT)
+    c.line([(0, 163), (399, 163)], INK)
+    c.line([(0, 164), (399, 164)], WALL_HI)
+    c.line([(0, 184), (399, 184)], INK)
+    for x in range(4, 400, 52):
+        c.bevel((x, 169, x + 44, 181), WALL_BASE, WALL_HI, WALL_DARK, INK, 1, 1)
+        c.line([(x + 6, 174), (x + 38, 174)], WALL_LIGHT)
+    # floor
+    c.rect((0, 185, 399, 249), "#2B172E")
+    for row, (y0, y1, base) in enumerate((
+        (185, 198, "#2B172E"),
+        (198, 214, "#321A31"),
+        (214, 232, "#3A1E38"),
+        (232, 249, "#43233F"),
+    )):
+        c.rect((0, y0, 399, y1), base)
+        c.line([(0, y0), (399, y0)], "#1C0F22")
+        c.line([(0, y0 + 1), (399, y0 + 1)], "#4A2A3F")
+        for x in range((row * 53) % 72 - 72, 400, 72):
+            c.line([(x, y0 + 2), (x, y1 - 1)], "#1D0F21")
+            c.px(x + 1, y0 + 5, "#4B2A40")
+        for x in range(12 + row * 17, 400, 61):
+            c.line([(x, y0 + 5), (x + 13, y0 + 5)], "#1E1124")
+            c.line([(x + 2, y0 + 6), (x + 10, y0 + 6)], "#522D46")
+    c.speckle(0, 186, 400, 250, ("#1B0D1F", "#4A2840", "#32182F"), 150, 7)
+
+    # ── Three light sources: window, CRT, lamp ────────────────────────────────
+    c.light_pool(196, 92, 92, 64, BLUE_MID, 0.62, 0)
+    c.light_pool(68, 118, 52, 50, MINT_MID, 0.37, 1)
+    c.light_pool(276, 124, 34, 82, GOLD_DARK, 0.42, 2)
+    c.light_pool(276, 190, 32, 18, GOLD_DARK, 0.35, 3)
+
+    # ── City window ──────────────────────────────────────────────────────────
+    c.contact_shadow(122, 130, 277, 136, "half")
+    c.bevel((123, 30, 277, 136), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.bevel((128, 35, 272, 131), WOOD_DEEP, WOOD_LIGHT, "#241015", INK, 1, 1)
+    # curtains behind frame
+    for x0, dark in ((119, FAB_MID), (269, FAB_MID)):
+        c.rect((x0, 33, x0 + 9, 130), dark)
+        for fx in range(x0 + 1, x0 + 9, 3):
+            c.line([(fx, 34), (fx, 129)], FAB_DARK)
+            c.px(fx + 1, 40, FAB_LIGHT)
+        c.rect((x0 - 1, 91, x0 + 10, 95), GOLD_MID)
+        c.line([(x0 - 1, 91), (x0 + 10, 91)], GOLD_LIGHT)
+    # sky
+    c.rect((132, 39, 265, 126), BLUE_DARK)
+    for y in range(40, 127, 8):
+        c.rect((132, y, 265, y + 7), BLUE_MID if y > 70 else BLUE_DARK)
+    c.bayer_rect((132, 88, 265, 126), BLUE_LIGHT, 0.22)
+    # moon + stars: a stepped crescent with a sparse dithered halo
+    moon = ((252, 47), (254, 46), (256, 47), (258, 49), (259, 51),
+            (259, 54), (258, 57), (256, 59), (253, 60), (250, 59),
+            (248, 57), (247, 54), (247, 51))
+    for mx, my in moon:
+        c.px(mx, my, CREAM_LIGHT)
+    c.rect((253, 48, 257, 51), CREAM_LIGHT)
+    c.rect((255, 52, 258, 55), CREAM_LIGHT)
+    c.rect((254, 56, 256, 58), CREAM_MID)
+    c.rect((251, 52, 254, 57), BLUE_DARK)
+    c.rect((250, 54, 253, 57), BLUE_MID)
+    c.px(249, 53, CREAM_LIGHT)
+    c.checker((242, 42, 266, 66), CREAM_LIGHT, 0.055)
+    c.px(243, 61, CREAM_MID)
+    c.px(262, 63, MINT_LIGHT)
+    c.px(238, 49, CREAM_MID)
+    stars = ((141, 50), (154, 60), (167, 46), (185, 55), (198, 45),
+             (212, 59), (226, 48), (238, 70), (174, 69), (149, 80),
+             (195, 79), (218, 84), (257, 82))
+    for sx, sy in stars:
+        col = MINT_LIGHT if (sx + sy) % 3 == 0 else CREAM_MID
+        c.px(sx, sy, col)
+        if (sx + sy) % 4 == 0:
+            c.px(sx - 1, sy, col)
+            c.px(sx + 1, sy, col)
+            c.px(sx, sy - 1, col)
+            c.px(sx, sy + 1, col)
+    # layered skyline
+    far = ((134, 94, 146, 126), (148, 88, 158, 126), (160, 98, 174, 126),
+           (176, 84, 188, 126), (190, 92, 200, 126), (202, 100, 216, 126),
+           (218, 86, 232, 126), (234, 94, 248, 126), (250, 90, 264, 126))
+    mid = ((134, 107, 149, 126), (152, 101, 166, 126), (170, 112, 184, 126),
+           (188, 104, 202, 126), (206, 110, 222, 126), (226, 101, 242, 126),
+           (246, 107, 264, 126))
+    near = ((132, 116, 150, 126), (154, 112, 174, 126), (178, 118, 196, 126),
+            (200, 111, 220, 126), (224, 117, 242, 126), (246, 113, 264, 126))
+    for x0, y0, x1, y1 in far:
+        c.rect((x0, y0, x1, y1), BLUE_MID)
+        c.line([(x0, y0), (x1, y0)], BLUE_LIGHT)
+    for x0, y0, x1, y1 in mid:
+        c.rect((x0, y0, x1, y1), PURPLE_MID)
+        c.line([(x0, y0), (x1, y0)], PURPLE_LIGHT)
+    for x0, y0, x1, y1 in near:
+        c.rect((x0, y0, x1, y1), PURPLE_DARK)
+        c.line([(x0, y0), (x1, y0)], PURPLE_MID)
+    rng = random.Random(915)
+    for x0, y0, x1, y1 in far + mid + near:
+        for yy in range(y0 + 3, min(y1, 124), 7):
+            for xx in range(x0 + 3, x1 - 2, 6):
+                if rng.random() < 0.32:
+                    c.px(xx, yy, GOLD_LIGHT if rng.random() < 0.6 else MINT_LIGHT)
+    # antenna / water tower
+    c.line([(186, 84), (186, 76)], INK)
+    c.line([(183, 76), (189, 76)], INK)
+    c.rect((158, 78, 164, 88), PURPLE_MID)
+    c.rect((156, 75, 166, 79), PURPLE_LIGHT)
+    # rain streaks
+    rain = random.Random(77)
+    for _ in range(44):
+        x = rain.randrange(135, 264)
+        y = rain.randrange(42, 123)
+        length = rain.choice((2, 3, 4))
+        col = BLUE_LIGHT if rain.random() < 0.55 else MINT_MID
+        for i in range(length):
+            c.px(x - i // 2, y + i, col)
+    # window mullions
+    for x in (174, 220):
+        c.rect((x, 38, x + 2, 130), WOOD_MID)
+        c.line([(x, 38), (x, 130)], WOOD_LIGHT)
+        c.line([(x + 2, 38), (x + 2, 130)], WOOD_DEEP)
+    c.rect((132, 83, 265, 85), WOOD_MID)
+    c.line([(132, 83), (265, 83)], WOOD_LIGHT)
+    # glass glints
+    c.line([(137, 76), (147, 66)], MINT_GLOW)
+    c.line([(142, 76), (149, 69)], BLUE_LIGHT)
+    c.line([(246, 118), (258, 106)], BLUE_LIGHT)
+    # sill
+    c.bevel((119, 127, 280, 137), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.line([(124, 131), (275, 131)], GOLD_DARK)
+    c.line([(124, 134), (275, 134)], WOOD_DEEP)
+    # sill props: plant, cassette, candle
+    c.contact_shadow(133, 127, 147, 130, "half")
+    c.rect((134, 123, 145, 128), ORANGE_MID)
+    c.rect((133, 121, 146, 124), ORANGE_LIGHT)
+    c.line([(138, 121), (138, 116)], MINT_MID)
+    c.line([(138, 118), (134, 114)], MINT_MID)
+    c.line([(138, 117), (142, 112)], MINT_MID)
+    for bx, by in ((132, 112), (136, 108), (140, 111), (143, 114), (134, 115)):
+        c.rect((bx, by, bx + 3, by + 3), MINT_LIGHT)
+        c.px(bx + 1, by + 1, MINT_GLOW)
+    c.contact_shadow(188, 127, 202, 130, "half")
+    c.rect((188, 124, 202, 129), PURPLE_MID)
+    c.line([(189, 125), (201, 125)], GOLD_MID)
+    c.px(193, 127, CREAM_MID)
+    c.px(198, 127, CREAM_MID)
+    c.contact_shadow(244, 126, 252, 130, "half")
+    c.rect((244, 119, 252, 129), METAL_MID)
+    c.rect((246, 121, 250, 127), CREAM_MID)
+    c.px(247, 123, GOLD_LIGHT)
+    c.line([(248, 118), (248, 115)], INK)
+
+    # ── Left CRT game station ────────────────────────────────────────────────
+    c.contact_shadow(28, 178, 122, 186, "half")
+    # desk
+    c.bevel((24, 144, 122, 153), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.line([(29, 147), (117, 147)], WOOD_LIGHT)
+    c.line([(29, 151), (117, 151)], WOOD_DEEP)
+    for lx in (31, 109):
+        c.bevel((lx, 154, lx + 6, 183), WOOD_SHADE, WOOD_MID, WOOD_DEEP, INK, 1, 1)
+        c.line([(lx + 2, 157), (lx + 2, 180)], WOOD_DEEP)
+    # under-desk shelf
+    c.bevel((38, 158, 108, 177), METAL_DARK, METAL_LIGHT, INK, INK, 1, 1)
+    c.bevel((47, 164, 78, 175), METAL_MID, METAL_LIGHT, METAL_DARK, INK, 1, 1)
+    c.rect((53, 167, 65, 172), MINT_DARK)
+    c.rect((55, 168, 63, 171), MINT_LIGHT)
+    c.px(72, 167, ORANGE_LIGHT)
+    c.px(72, 171, ROSE_LIGHT)
+    for gx, gc in ((83, MAGENTA), (89, GOLD_MID), (95, MINT_MID)):
+        c.rect((gx, 162, gx + 4, 174), INK)
+        c.rect((gx + 1, 163, gx + 3, 170), gc)
+    # cables
+    c.line([(67, 177), (62, 184), (71, 189), (64, 194)], INK, 2)
+    c.line([(68, 177), (63, 184), (72, 189), (65, 194)], METAL_LIGHT)
+    # CRT
+    c.bevel((32, 86, 108, 146), METAL_MID, METAL_LIGHT, METAL_DARK, INK, 1, 1)
+    c.bevel((37, 91, 103, 140), INK, METAL_LIGHT, INK, INK, 1, 1)
+    c.rect((40, 94, 100, 133), MINT_DARK)
+    # screen gradient + scanlines
+    for y in range(95, 133, 3):
+        c.rect((40, y, 100, y + 2), MINT_MID)
+        c.line([(41, y + 2), (99, y + 2)], MINT_DARK)
+    c.bayer_rect((40, 94, 100, 110), MINT_LIGHT, 0.10)
+    # screen city / hills
+    c.rect((44, 114, 97, 124), "#173B35")
+    for x0, w in ((46, 8), (56, 6), (66, 10), (78, 7), (88, 6)):
+        c.rect((x0, 108 + (x0 % 3) * 2, x0 + w, 124), MINT_DARK)
+        c.rect((x0 + 1, 106 + (x0 % 3) * 2, x0 + w - 1, 110), MINT_MID)
+        for wy in range(112, 123, 3):
+            for wx in range(x0 + 2, x0 + w - 1, 3):
+                c.px(wx, wy, GOLD_LIGHT if (wx + wy) % 5 else MINT_GLOW)
+    # tiny platformer character / equalizer
+    c.rect((70, 120, 74, 124), ROSE_LIGHT)
+    c.rect((71, 117, 73, 120), CREAM_LIGHT)
+    c.px(72, 118, INK)
+    c.rect((45, 96, 56, 98), MINT_LIGHT)
+    c.rect((52, 92, 62, 94), MINT_DARK)
+    # scanline roll
+    c.line([(41, 101), (99, 101)], MINT_GLOW)
+    c.line([(41, 126), (99, 126)], MINT_DARK)
+    # glass highlight (curved corner implied by stepped pixels)
+    c.line([(43, 99), (50, 95), (54, 95)], MINT_GLOW)
+    c.line([(44, 101), (49, 98)], MINT_LIGHT)
+    # bezel hardware
+    c.rect((37, 137, 99, 140), METAL_DARK)
+    c.px(41, 138, MINT_LIGHT)
+    c.px(45, 138, ROSE_MID)
+    c.rect((50, 138, 76, 139), WOOD_DEEP)
+    for bx in range(82, 96, 4):
+        c.px(bx, 138, METAL_LIGHT)
+    # controller on desk
+    c.bevel((82, 137, 100, 143), METAL_MID, METAL_LIGHT, METAL_DARK, INK, 1, 1)
+    c.rect((85, 139, 90, 141), ORANGE_LIGHT)
+    c.rect((94, 139, 98, 141), CREAM_MID)
+    c.rect((90, 141, 94, 142), INK)
+    # mint glow pool from CRT
+    c.bayer_rect((30, 92, 116, 150), MINT_DARK, 0.09, 1)
+    c.bayer_rect((90, 100, 124, 142), MINT_DARK, 0.07, 2)
+
+    # ── Tall plant between CRT and window ────────────────────────────────────
+    c.contact_shadow(106, 145, 128, 150, "half")
+    c.rect((112, 132, 124, 146), ORANGE_MID)
+    c.rect((111, 130, 125, 134), ORANGE_LIGHT)
+    c.line([(118, 130), (116, 119), (111, 111)], MINT_MID, 2)
+    c.line([(118, 124), (123, 114), (126, 109)], MINT_MID, 2)
+    c.line([(117, 121), (111, 119), (106, 115)], MINT_MID)
+    for bx, by, bw, bh in ((105, 108, 7, 5), (110, 104, 8, 6), (114, 110, 6, 5),
+                           (120, 104, 6, 8), (123, 110, 5, 6), (108, 116, 6, 4)):
+        c.rect((bx, by, bx + bw, by + bh), MINT_LIGHT)
+        c.line([(bx + 1, by + 1), (bx + bw - 1, by + 1)], MINT_GLOW)
+        c.line([(bx + 1, by + bh - 1), (bx + bw - 2, by + bh - 1)], MINT_MID)
+    # dark lower leaves
+    for bx, by in ((107, 112), (118, 111), (121, 115)):
+        c.rect((bx, by, bx + 4, by + 3), MINT_MID)
+        c.px(bx + 1, by + 1, MINT_LIGHT)
+
+    # ── Right game shelf ─────────────────────────────────────────────────────
+    c.contact_shadow(286, 99, 380, 106, "half")
+    c.bevel((285, 38, 380, 103), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.rect((289, 42, 376, 96), WALL_DARK)
+    c.line([(289, 66), (376, 66)], WOOD_DARK)
+    c.line([(289, 92), (376, 92)], WOOD_DARK)
+    # cases upper shelf
+    cases = (
+        (291, 49, 5, 15, MINT_MID, MINT_LIGHT),
+        (297, 46, 7, 18, GOLD_MID, GOLD_LIGHT),
+        (305, 52, 5, 12, MAGENTA, ROSE_LIGHT),
+        (311, 44, 7, 20, ORANGE_MID, ORANGE_LIGHT),
+        (319, 50, 5, 14, CREAM_LIGHT, CREAM_LIGHT),
+        (325, 47, 8, 17, PURPLE_LIGHT, FAB_LIGHT),
+        (334, 53, 5, 11, MINT_MID, MINT_GLOW),
+        (340, 45, 6, 19, GOLD_MID, CREAM_MID),
+    )
+    for x, y, w, h, col, hi in cases:
+        c.rect((x, y, x + w, y + h), col)
+        c.line([(x, y), (x + w, y)], hi)
+        c.line([(x + 1, y + 3), (x + w - 1, y + 3)], INK)
+        c.line([(x + 1, y + 7), (x + w - 2, y + 7)], INK)
+        c.px(x + w // 2, y + h - 3, INK)
+    # tiny boombox
+    c.bevel((348, 52, 372, 65), METAL_MID, METAL_LIGHT, METAL_DARK, INK, 1, 1)
+    c.rect((351, 55, 357, 61), INK)
+    c.rect((363, 55, 369, 61), INK)
+    c.rect((353, 57, 355, 59), WOOD_MID)
+    c.rect((365, 57, 367, 59), WOOD_MID)
+    c.px(360, 62, MINT_LIGHT)
+    # figurines / books lower shelf
+    c.rect((292, 72, 298, 90), FAB_MID)
+    c.rect((293, 69, 297, 75), ROSE_LIGHT)
+    c.px(294, 72, INK)
+    c.px(296, 72, INK)
+    c.rect((300, 84, 316, 90), GOLD_DARK)
+    c.rect((302, 82, 314, 86), MAGENTA)
+    c.rect((318, 79, 324, 90), PURPLE_LIGHT)
+    c.rect((326, 85, 344, 90), WOOD_DEEP)
+    c.rect((328, 82, 342, 86), MINT_MID)
+    c.rect((348, 77, 354, 90), CREAM_MID)
+    c.rect((356, 80, 372, 90), ROSE_DARK)
+    c.rect((358, 82, 370, 86), ROSE_LIGHT)
+    c.line([(292, 91), (376, 91)], WOOD_LIGHT)
+    # hanging headphones
+    c.line([(378, 70), (384, 70), (384, 80)], METAL_LIGHT)
+    c.rect((382, 80, 388, 87), METAL_MID)
+    c.rect((383, 82, 387, 85), METAL_DARK)
+    c.px(385, 80, GOLD_LIGHT)
+
+    # ── Right control panel ──────────────────────────────────────────────────
+    c.contact_shadow(291, 159, 374, 166, "half")
+    c.bevel((290, 109, 376, 161), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.bevel((295, 114, 371, 156), METAL_DARK, METAL_LIGHT, INK, INK, 1, 1)
+    # VU meters
+    for vx in (300, 338):
+        c.rect((vx, 118, vx + 28, 126), INK)
+        for i in range(9):
+            c.rect((vx + 2 + i * 3, 124 - i, vx + 3 + i * 3, 125), MINT_LIGHT if i < 6 else GOLD_LIGHT)
+        c.line([(vx + 1, 126), (vx + 27, 126)], ROSE_DARK)
+    # knobs
+    for kx, ky, col in ((303, 136, GOLD_LIGHT), (315, 136, ORANGE_LIGHT),
+                        (341, 136, MINT_LIGHT), (353, 136, GOLD_LIGHT)):
+        c.rect((kx - 3, ky - 3, kx + 3, ky + 3), INK)
+        c.rect((kx - 2, ky - 2, kx + 2, ky + 2), col)
+        c.line([(kx, ky - 2), (kx, ky)], INK)
+    # sliders / LEDs
+    for sx in (326, 330, 334):
+        c.line([(sx, 132), (sx, 148)], INK)
+        c.rect((sx - 1, 139, sx + 1, 141), CREAM_LIGHT)
+    for row in range(3):
+        for col in range(3):
+            c.px(299 + col * 5, 144 + row * 4, (MINT_LIGHT, GOLD_LIGHT, ROSE_LIGHT)[(row + col) % 3])
+    # sticky note + cable plug
+    c.rect((359, 114, 370, 122), CREAM_MID)
+    c.line([(361, 116), (367, 116)], ROSE_DARK)
+    c.line([(361, 119), (365, 119)], ROSE_DARK)
+    c.line([(371, 146), (381, 151), (379, 161), (372, 164)], METAL_LIGHT)
+    c.rect((370, 163, 374, 167), METAL_MID)
+
+    # ── Right record crate ───────────────────────────────────────────────────
+    c.contact_shadow(306, 203, 384, 211, "half")
+    # records
+    for i, col in enumerate((MINT_MID, GOLD_MID, MAGENTA, ORANGE_MID,
+                             CREAM_MID, PURPLE_LIGHT, ROSE_MID, MINT_MID)):
+        x = 312 + i * 8
+        top = 164 + (i % 3)
+        c.rect((x, top, x + 7, 186), col)
+        c.line([(x, top), (x + 7, top)], CREAM_MID)
+        c.rect((x + 2, top + 5, x + 5, top + 10), INK)
+        c.px(x + 3, top + 7, col)
+    c.bevel((308, 182, 384, 210), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.rect((312, 186, 380, 205), WOOD_DARK)
+    for x in (312, 329, 346, 363, 380):
+        c.line([(x, 186), (x, 205)], WOOD_LIGHT)
+    c.line([(312, 196), (380, 196)], WOOD_MID)
+    # scattered sleeve + headphones on floor
+    c.rect((290, 203, 307, 213), INK)
+    c.rect((292, 204, 305, 211), MAGENTA)
+    c.rect((295, 205, 302, 210), PURPLE_DARK)
+    c.rect((294, 207, 301, 209), MINT_LIGHT)
+    c.rect((282, 205, 291, 211), GOLD_DARK)
+    c.rect((283, 206, 290, 208), GOLD_LIGHT)
+    c.line([(277, 204), (282, 201), (285, 204), (290, 201)], METAL_MID)
+    c.rect((278, 204, 281, 207), METAL_DARK)
+    c.rect((287, 204, 290, 207), METAL_DARK)
+
+    # ── Floor lamp ───────────────────────────────────────────────────────────
+    c.contact_shadow(266, 187, 286, 194, "half")
+    c.line([(275, 84), (275, 187)], METAL_DARK, 2)
+    c.line([(276, 84), (276, 187)], GOLD_DARK)
+    c.rect((268, 185, 283, 189), METAL_MID)
+    c.poly([(265, 77), (286, 77), (282, 65), (269, 65)], WOOD_MID, INK)
+    c.poly([(268, 75), (283, 75), (280, 68), (271, 68)], GOLD_LIGHT, INK)
+    c.poly([(270, 73), (281, 73), (279, 70), (272, 70)], GOLD_GLOW)
+    c.line([(265, 77), (286, 77)], WOOD_LIGHT)
+    for sx in range(268, 284, 4):
+        c.line([(sx, 78), (sx, 82)], GOLD_DARK)
+    c.bayer_rect((262, 78, 292, 190), GOLD_DARK, 0.045, 0)
+    c.bayer_rect((266, 180, 288, 198), GOLD_DARK, 0.09, 1)
+
+    # ── Centre: quiet listening nest, mostly under the live mascot ────────────
+    c.bayer_rect((158, 156, 246, 212), INK, 0.16, 2)
+    # beanbag, deliberately low-contrast behind the puppy
+    c.poly([(164, 187), (171, 170), (184, 162), (220, 162), (235, 170),
+            (242, 187), (236, 200), (218, 205), (183, 205), (169, 198)],
+           FAB_MID, INK)
+    c.poly([(171, 184), (177, 173), (188, 166), (216, 166), (230, 173),
+            (236, 184), (230, 195), (215, 199), (184, 199), (175, 195)],
+           FAB_LIGHT)
+    c.poly([(180, 181), (188, 172), (216, 172), (228, 181), (222, 190),
+            (188, 190), (176, 186)], FAB_MID, INK)
+    c.line([(188, 176), (216, 176)], FAB_LIGHT)
+    # cushion
+    c.bevel((196, 180, 226, 195), FAB_LIGHT, RAMPS["fabric_hi"][2], FAB_DARK, INK, 1, 1)
+    c.line([(200, 183), (222, 183)], RAMPS["fabric_hi"][2])
+    # rug
+    c.bevel((140, 194, 268, 214), FAB_DARK, RAMPS["fabric_hi"][2], PURPLE_DARK, INK, 1, 1)
+    c.rect((144, 197, 264, 211), FAB_MID)
+    for x in range(150, 264, 14):
+        c.rect((x, 199, x + 5, 201), GOLD_DARK)
+        c.rect((x + 3, 207, x + 8, 209), MINT_DARK)
+    for x in range(142, 270, 5):
+        c.px(x, 214, ROSE_DARK)
+    # side table + record player left of the nest
+    c.bevel((132, 160, 166, 188), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
+    c.rect((137, 165, 161, 183), WOOD_DARK)
+    c.bevel((138, 154, 160, 165), METAL_DARK, METAL_LIGHT, INK, INK, 1, 1)
+    c.rect((141, 157, 157, 163), PURPLE_DARK)
+    c.rect((146, 156, 153, 164), ROSE_MID)
+    c.rect((147, 158, 152, 162), ROSE_LIGHT)
+    c.line([(143, 155), (143, 150), (147, 150)], GOLD_DARK)
+    c.rect((146, 148, 150, 151), GOLD_LIGHT)
+    # speaker + cassettes below
+    c.bevel((136, 174, 150, 186), METAL_MID, METAL_LIGHT, INK, INK, 1, 1)
+    for sx in range(139, 148, 3):
+        c.line([(sx, 177), (sx, 183)], WOOD_DEEP)
+    for i, col in enumerate((GOLD_MID, MINT_MID, MAGENTA)):
+        c.rect((154 + i * 4, 178, 157 + i * 4, 186), col)
+        c.px(155 + i * 4, 181, CREAM_MID)
+
+    # ── Lived-in props (small, strong silhouettes, contact shadows) ──────────
+    # mug on the floor by the CRT
+    c.contact_shadow(112, 183, 122, 186, "half")
+    c.rect((112, 176, 120, 183), CREAM_MID)
+    c.rect((113, 177, 119, 180), ROSE_LIGHT)
+    c.rect((113, 181, 119, 183), CREAM_LIGHT)
+    c.line([(121, 178), (123, 178), (123, 182), (121, 182)], INK)
+    c.line([(122, 178), (124, 178), (124, 182), (122, 182)], CREAM_MID)
+    # polaroids / stickers on the wall (right of greeting, left of window)
+    for px, py, col in ((105, 87, ROSE_MID), (111, 85, GOLD_LIGHT), (117, 87, MINT_MID)):
+        c.rect((px, py, px + 5, py + 6), CREAM_MID)
+        c.rect((px + 1, py + 1, px + 4, py + 4), col)
+        c.px(px + 2, py + 5, INK)
+    # sticky notes on wall near shelf
+    c.rect((386, 86, 392, 92), CREAM_MID)
+    c.line([(387, 88), (390, 88)], ROSE_DARK)
+    c.rect((388, 94, 394, 100), GOLD_LIGHT)
+    c.line([(389, 96), (392, 96)], ORANGE_DARK)
+    # cable run across floor
+    c.line([(24, 234), (54, 230), (72, 235), (98, 228), (130, 234),
+            (160, 231), (196, 238), (232, 232), (262, 236), (292, 231),
+            (320, 238), (352, 232), (386, 236)], INK, 2)
+    c.line([(24, 235), (54, 231), (72, 236), (98, 229), (130, 235),
+            (160, 232), (196, 239), (232, 233), (262, 237), (292, 232),
+            (320, 239), (352, 233), (386, 237)], METAL_LIGHT)
+    # sneakers by the crate
+    c.contact_shadow(286, 220, 312, 226, "half")
+    for sx in (288, 300):
+        c.rect((sx, 216, sx + 9, 221), CREAM_MID)
+        c.rect((sx + 1, 218, sx + 8, 221), ROSE_MID)
+        c.line([(sx, 221), (sx + 10, 221)], INK)
+        c.px(sx + 2, 217, CREAM_LIGHT)
+    # cassette stack near the plant / floor
+    c.contact_shadow(104, 195, 118, 198, "half")
+    for i, col in enumerate((GOLD_MID, MAGENTA, MINT_MID)):
+        c.rect((104 + i, 191 + i * 3, 117 + i, 194 + i * 3), col)
+        c.px(108 + i, 192 + i * 3, INK)
+        c.px(113 + i, 192 + i * 3, INK)
+    # game cartridge on desk
+    c.rect((26, 139, 35, 145), METAL_MID)
+    c.rect((28, 137, 33, 141), GOLD_LIGHT)
+    c.px(30, 139, INK)
+    # soda can on floor near record crate
+    c.contact_shadow(374, 220, 382, 223, "half")
+    c.rect((374, 214, 380, 222), ROSE_DARK)
+    c.rect((375, 215, 379, 219), ROSE_LIGHT)
+    c.line([(374, 215), (380, 215)], CREAM_MID)
+    c.px(377, 218, INK)
+    # little cable plug dangling from control panel
+    c.line([(389, 162), (395, 166), (393, 173)], METAL_LIGHT)
+    c.rect((391, 172, 395, 176), METAL_MID)
+    c.px(393, 174, GOLD_LIGHT)
+    # books stacked near floor lamp
+    c.contact_shadow(252, 208, 268, 212, "half")
+    for i, col in enumerate((MAGENTA, GOLD_MID, MINT_MID)):
+        c.rect((253, 201 + i * 3, 267, 204 + i * 3), col)
+        c.line([(254, 202 + i * 3), (264, 202 + i * 3)], CREAM_MID)
+
+    # ── Final material / light polish ────────────────────────────────────────
+    # wood grain runs
+    c.wood_grain(25, 145, 121, 152, WOOD_DEEP, WOOD_LIGHT, 3)
+    c.wood_grain(286, 39, 379, 102, WOOD_DEEP, WOOD_LIGHT, 4)
+    c.wood_grain(309, 183, 383, 209, WOOD_DEEP, WOOD_LIGHT, 5)
+    c.wood_grain(124, 31, 276, 135, WOOD_SHADE, WOOD_LIGHT, 6)
+    # fabric folds
+    c.line([(174, 189), (182, 199)], FAB_LIGHT)
+    c.line([(230, 188), (224, 201)], FAB_DARK)
+    c.line([(150, 199), (164, 210)], RAMPS["fabric_hi"][2])
+    c.line([(247, 199), (238, 210)], RAMPS["fabric_hi"][2])
+    # Contact shadows under the big furniture.
+    c.contact_shadow(34, 144, 108, 148, "half")
+    c.contact_shadow(289, 103, 376, 106, "half")
+    c.contact_shadow(293, 158, 372, 162, "half")
+    c.contact_shadow(310, 183, 382, 186, "half")
+    c.contact_shadow(132, 186, 164, 189, "half")
+    # Tiny highlights on metal / glass / lamp.
+    c.px(34, 88, METAL_LIGHT)
+    c.px(104, 143, METAL_LIGHT)
+    c.line([(269, 66), (282, 66)], GOLD_GLOW)
+    c.line([(130, 37), (132, 39)], CREAM_MID)
+    c.line([(263, 128), (267, 130)], BLUE_LIGHT)
+    # Quiet the centre behind the mascot one last time.
+    c.bayer_rect((168, 148, 236, 198), INK, 0.08, 0)
+    return c
 
 
 def build_room() -> Image.Image:
-    c = Canvas(W, H)
-    d = c.d
-
-    # ── Back wall with a soft, banded gradient and panelled texture ─────────
-    for y in range(0, 740, 8):
-        t = min(1.0, y / 740.0)
-        col = _mix(WALL_TOP, WALL_LOW, t)
-        d.rectangle((0, y, W, y + 7), fill=col)
-    # Broad vertical wall panels.
-    for x in (0, 190, 390, 540, 1080, 1260, 1440):
-        d.rectangle((x, 0, x + 3, 730), fill=WALL_LINE)
-        d.rectangle((x + 3, 0, x + 6, 730), fill=_mix(WALL_MID, WALL_PANEL, 0.35))
-    # Subtle wallpaper motif: tiny diamonds / dots, kept out of the reading
-    # zone on the upper left so the greeting stays crisp.
-    for y in range(198, 690, 30):
-        for x in range(24, 1580, 38):
-            if x < 560 and y < 330:
-                continue
-            if (x // 38 + y // 30) % 3 == 0:
-                c.rect((x, y, x + 2, y + 2), WALL_PANEL)
-                c.rect((x + 4, y + 5, x + 5, y + 6), _mix(WALL_MID, WALL_PANEL, 0.5))
-    # Darker vignette toward the edges.
-    c.dither((0, 180, 46, 740), VOID, 8, 0)
-    c.dither((1554, 180, 1600, 740), VOID, 8, 1)
-    c.dither((0, 0, 1600, 40), VOID, 8, 0)
-
-    # Wainscoting / lower wall panelling.
-    d.rectangle((0, 606, W, 738), fill=WALL_PANEL)
-    for y in (612, 688, 714, 732):
-        d.rectangle((0, y, W, y + 3), fill=WALL_LINE)
-        d.rectangle((0, y + 3, W, y + 5), fill=WALL_PANEL_HI)
-    for x in range(22, 1600, 132):
-        c.bevel((x, 622, x + 110, 706), _mix(WALL_PANEL, WALL_MID, 0.25),
-                WALL_PANEL_HI, WALL_LINE, INK, 2, 1)
-        c.line([(x + 14, 637), (x + 96, 637)], _mix(WALL_PANEL, WALL_PANEL_HI, 0.5), 1)
-
-    # ── Floorboards ─────────────────────────────────────────────────────────
-    d.rectangle((0, 738, W, H), fill="#2B172E")
-    floor_rows = [(738, 772), (772, 812), (812, 862), (862, 918), (918, 1000)]
-    for idx, (y0, y1) in enumerate(floor_rows):
-        base = _mix("#2B172E", "#412238", 0.11 * idx)
-        d.rectangle((0, y0, W, y1), fill=base)
-        d.rectangle((0, y0, W, y0 + 3), fill="#4A2A3F")
-        d.rectangle((0, y1 - 3, W, y1), fill="#1E1022")
-        # Staggered board seams + little highlight ticks.
-        offset = (idx * 211) % 320
-        for x in range(-offset, W, 320):
-            d.rectangle((x, y0 + 3, x + 4, y1 - 3), fill="#1D0F21")
-            d.rectangle((x + 4, y0 + 3, x + 6, y1 - 3), fill="#4B2A40")
-        for x in range(40 + idx * 73, W, 150):
-            c.line([(x, y0 + 15), (x + 56, y0 + 15)], "#1E1124", 2)
-            c.line([(x + 8, y0 + 16), (x + 48, y0 + 16)], "#522D46", 1)
-    # Grain and scuffs.
-    c.speckle((0, 750, 1600, 1000), ("#1C0E20", "#4B2940", "#3A1D33"), 200, 4, 21)
-
-    # Soft pools of light from the window and floor lamp.
-    c.dither((500, 520, 1090, 850), "#3B243D", 10, 0, "sparse")
-    c.dither((1010, 470, 1230, 840), "#5A3A30", 12, 0, "sparse")
-
-    # ── City window ─────────────────────────────────────────────────────────
-    # Wall glow / shadow around the frame.
-    c.dither((470, 136, 1120, 560), "#3A1F43", 12, 0, "sparse")
-    c.dither((490, 150, 1098, 532), "#5A3826", 10, 1, "sparse")
-
-    # Curtains sit behind the wooden frame.
-    for side, x0 in (("left", 484), ("right", 1050)):
-        x1 = x0 + 45
-        d.rectangle((x0, 148, x1, 510), fill=MAGENTA, outline=INK, width=3)
-        for fx in range(x0 + 4, x1 - 3, 9):
-            d.rectangle((fx, 152, fx + 3, 506), fill=_mix(MAGENTA, PURPLE_DARK, 0.44))
-            d.rectangle((fx + 3, 152, fx + 5, 506), fill=_mix(MAGENTA, PURPLE_LIGHT, 0.28))
-        # gold tie-back
-        d.rectangle((x0 - 4, 382, x1 + 4, 396), fill=GOLD_DARK)
-        d.rectangle((x0 - 4, 382, x1 + 4, 388), fill=GOLD)
-        d.rectangle((x0 + 12, 389, x1 - 8, 394), fill=ORANGE)
-
-    # Frame body.
-    c.bevel((500, 150, 1080, 530), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 4, 3)
-    c.bevel((520, 170, 1060, 510), WOOD_DEEP, WOOD_LIGHT, "#241015", INK, 3, 2)
-    # Sill.
-    c.bevel((458, 505, 1120, 544), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 3, 3)
-    d.rectangle((470, 512, 1108, 518), fill=GOLD_DARK)
-    d.rectangle((470, 518, 1108, 526), fill=WOOD_MID)
-    d.rectangle((470, 526, 1108, 535), fill=WOOD_DEEP)
-    for x in range(492, 1100, 96):
-        d.rectangle((x, 534, x + 6, 544), fill=INK)
-
-    # Night sky.
-    d.rectangle((540, 190, 1040, 500), fill="#1D1236")
-    for y in range(190, 500, 24):
-        t = (y - 190) / 310.0
-        d.rectangle((540, y, 1040, y + 23), fill=_mix("#1B1133", "#2F1B42", t))
-    # Window glow near the horizon.
-    c.dither((540, 360, 1040, 500), "#5E2C43", 10, 0, "sparse")
-
-    # Stars (2/3 px crosses) and a big cream moon.
-    stars = [
-        (580, 225, 4), (640, 268, 3), (705, 212, 4), (760, 250, 3),
-        (820, 220, 4), (882, 260, 3), (935, 230, 4), (1008, 274, 3),
-        (610, 315, 3), (730, 330, 3), (864, 314, 4), (1000, 320, 3),
-        (672, 370, 3), (790, 382, 3), (918, 370, 3),
-    ]
-    for sx, sy, size in stars:
-        col = MINT if (sx + sy) % 3 == 0 else CREAM
-        c.rect((sx - size, sy, sx + size + 1, sy + 2), col)
-        c.rect((sx - 1, sy - size, sx + 2, sy + size + 1), col)
-    # Moon.
-    d.rectangle((976, 222, 1008, 254), fill=CREAM)
-    d.rectangle((970, 228, 1014, 248), fill=CREAM)
-    d.rectangle((982, 216, 1002, 260), fill=CREAM)
-    d.rectangle((984, 236, 1002, 250), fill="#E8D9B6")
-    d.rectangle((992, 224, 1006, 232), fill="#E8D9B6")
-    c.dither((958, 208, 1026, 276), "#FFF3D0", 12, 0, "sparse")
-
-    # Skyline. Solid silhouettes with tiny lit windows.
-    skyline = [
-        (542, 438, 568, 500, "#2B193C"), (570, 414, 600, 500, "#25152F"),
-        (602, 448, 622, 500, "#341D43"), (624, 390, 660, 500, "#2A173A"),
-        (662, 430, 690, 500, "#241430"), (692, 404, 720, 500, "#2E193D"),
-        (722, 454, 744, 500, "#281636"), (746, 420, 782, 500, "#341B43"),
-        (784, 382, 812, 500, "#281537"), (814, 438, 838, 500, "#301A3E"),
-        (840, 410, 874, 500, "#241431"), (876, 448, 902, 500, "#341D42"),
-        (904, 400, 936, 500, "#281638"), (938, 430, 966, 500, "#2D193B"),
-        (968, 452, 996, 500, "#24142F"), (998, 418, 1038, 500, "#301A40"),
-    ]
-    for x0, y0, x1, y1, col in skyline:
-        d.rectangle((x0, y0, x1, y1), fill=col)
-        d.rectangle((x0, y0, x1, y0 + 3), fill=_mix(col, "#5A3552", 0.5))
-    # Antenna, water tower and bridge silhouette.
-    c.line([(800, 382), (800, 344)], INK, 3)
-    c.line([(788, 344), (812, 344)], INK, 2)
-    d.rectangle((632, 350, 656, 390), fill="#25152F")
-    d.rectangle((626, 342, 662, 352), fill="#351D43")
-    c.line([(640, 390), (628, 412), (652, 390), (664, 412)], INK, 2)
-    c.line([(542, 480), (1038, 480)], "#3B2248", 3)
-    c.line([(590, 480), (590, 468), (640, 468)], "#3B2248", 2)
-    # Lit windows.
-    rng = random.Random(88)
-    lit = (GOLD, ORANGE, MINT, "#E8C27C")
-    for x0, y0, x1, y1, col in skyline:
-        for yy in range(y0 + 12, min(y1 - 4, 488), 14):
-            for xx in range(x0 + 8, x1 - 5, 12):
-                if rng.random() < 0.34:
-                    d.rectangle((xx, yy, xx + 3, yy + 4), fill=lit[rng.randrange(len(lit))])
-    # A couple of tiny skyline details.
-    d.rectangle((580, 386, 600, 402), fill="#3B2048")
-    d.rectangle((936, 365, 952, 388), fill="#3B2048")
-
-    # Window mullions and inner bevel.
-    for x in (700, 860):
-        d.rectangle((x, 182, x + 9, 505), fill=WOOD_MID, outline=INK, width=2)
-        d.rectangle((x + 2, 184, x + 4, 503), fill=WOOD_HI)
-        d.rectangle((x + 7, 184, x + 9, 503), fill=WOOD_DEEP)
-    d.rectangle((540, 342, 1040, 351), fill=WOOD_MID, outline=INK, width=2)
-    d.rectangle((540, 344, 1040, 346), fill=WOOD_HI)
-    # Glass corner glints.
-    c.line([(548, 386), (576, 358)], "#B6A6C1", 2)
-    c.line([(596, 386), (624, 358)], "#8C7898", 2)
-    c.line([(1000, 206), (1028, 234)], "#8C7898", 2)
-
-    # Sill clutter.
-    c.bevel((536, 462, 584, 506), "#9A4A2C", "#D27A45", "#4A231B", INK, 2, 2)
-    d.rectangle((528, 456, 592, 468), fill="#C66A3B", outline=INK, width=2)
-    d.rectangle((532, 458, 588, 461), fill="#E18B4E")
-    # plant
-    c.line([(560, 456), (558, 426), (548, 410)], MINT_DARK, 3)
-    c.line([(560, 442), (570, 426), (582, 414)], MINT_DARK, 3)
-    for bx, by, bw, bh in ((538, 402, 16, 13), (546, 390, 16, 14), (558, 410, 18, 14),
-                           (566, 394, 13, 24), (574, 406, 16, 16), (542, 420, 16, 12)):
-        d.rectangle((bx, by, bx + bw, by + bh), fill=MINT, outline=MINT_SHADOW, width=2)
-        d.rectangle((bx + 3, by + 3, bx + bw - 4, by + 5), fill=MINT_GLOW)
-    # cassette + candle jar
-    c.bevel((742, 482, 802, 507), "#2B1832", "#5A3552", "#180C1E", INK, 2, 1)
-    d.rectangle((750, 489, 794, 493), fill=GOLD_DARK)
-    d.rectangle((752, 495, 758, 501), fill=CREAM)
-    d.rectangle((786, 495, 792, 501), fill=CREAM)
-    c.bevel((996, 454, 1040, 508), "#3A2730", "#71545C", "#1C1018", INK, 2, 1)
-    d.rectangle((1000, 470, 1036, 506), fill="#C68B4A")
-    d.rectangle((1002, 474, 1034, 480), fill="#E9B160")
-    c.line([(1018, 466), (1018, 458)], INK, 2)
-    d.rectangle((1015, 454, 1021, 468), fill=GOLD)
-    # little figurine
-    d.rectangle((866, 472, 890, 505), fill="#3B2550", outline=INK, width=2)
-    d.rectangle((872, 462, 884, 476), fill=ROSE, outline=INK, width=2)
-    d.rectangle((875, 467, 878, 470), fill=INK)
-    d.rectangle((881, 467, 884, 470), fill=INK)
-
-    # ── Left: CRT game station ──────────────────────────────────────────────
-    # Keep the upper-left wall quiet: the live greeting is drawn there by the
-    # UI, and a poster behind it made the copy hard to read.
-
-    # Screen glow behind the television.
-    c.dither((92, 342, 456, 650), "#234D49", 10, 1, "sparse")
-    # Desk.
-    c.bevel((80, 588, 456, 632), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 3, 3)
-    d.rectangle((94, 596, 442, 603), fill=WOOD_LIGHT)
-    d.rectangle((94, 620, 442, 628), fill=WOOD_DEEP)
-    for lx in (110, 404):
-        c.bevel((lx, 632, lx + 30, 706), WOOD_SHADE, WOOD_MID, WOOD_DEEP, INK, 3, 2)
-        d.rectangle((lx + 5, 638, lx + 9, 698), fill=WOOD_DEEP)
-    # Lower shelf / console.
-    c.bevel((112, 640, 416, 704), "#251522", "#4D2A40", "#130A18", INK, 3, 2)
-    c.bevel((146, 660, 292, 696), "#292033", "#5A3552", "#170D1E", INK, 2, 2)
-    d.rectangle((158, 668, 198, 688), fill=MINT_DARK, outline=INK, width=2)
-    d.rectangle((164, 674, 192, 682), fill=MINT)
-    d.rectangle((260, 670, 270, 676), fill=ORANGE)
-    d.rectangle((260, 682, 270, 688), fill=ROSE)
-    for gx, gc in ((306, MAGENTA), (328, GOLD), (350, MINT)):
-        c.bevel((gx, 654, gx + 18, 694), "#1D1124", "#4A2A40", "#0F0813", INK, 2, 1)
-        d.rectangle((gx + 4, 660, gx + 14, 676), fill=gc)
-        d.rectangle((gx + 5, 662, gx + 13, 664), fill=CREAM)
-    # Cables.
-    c.line([(182, 696), (164, 724), (196, 742), (178, 762)], INK, 3)
-    c.line([(183, 696), (165, 724), (197, 742), (179, 762)], "#4A2A40", 1)
-
-    # CRT case and screen.
-    c.bevel((116, 362, 414, 604), "#2A1726", "#5A3045", "#140A17", INK, 4, 3)
-    c.bevel((136, 382, 392, 568), "#1A0E1B", "#44273D", "#0E0710", INK, 3, 2)
-    # Mint screen with a tiny platformer scene.
-    d.rectangle((152, 398, 376, 548), fill="#255B54")
-    d.rectangle((156, 402, 372, 544), fill="#2E7568")
-    for yy in range(402, 544, 20):
-        d.rectangle((156, yy, 372, yy + 9), fill="#28675E")
-    c.dither((156, 402, 372, 460), MINT_DARK, 10, 0, "sparse")
-    # clouds / distant hills
-    for x0, y0, w, h in ((180, 426, 44, 12), (318, 414, 34, 10), (286, 440, 26, 8)):
-        d.rectangle((x0, y0 + 4, x0 + w, y0 + h), fill="#8FE6CF")
-        d.rectangle((x0 + 8, y0, x0 + w - 8, y0 + 8), fill="#B9F7E3")
-    # city blocks
-    d.rectangle((166, 486, 362, 514), fill="#173B3B")
-    d.rectangle((178, 468, 214, 514), fill="#1E4A47")
-    d.rectangle((234, 478, 272, 514), fill="#1E4A47")
-    d.rectangle((292, 460, 338, 514), fill="#173B3B")
-    for wx in range(184, 360, 18):
-        if wx % 36 == 4:
-            d.rectangle((wx, 472, wx + 6, 480), fill=GOLD)
-        else:
-            d.rectangle((wx, 492, wx + 6, 496), fill=MINT)
-    # player pixel sprite
-    d.rectangle((252, 488, 268, 512), fill=INK)
-    d.rectangle((256, 482, 268, 492), fill=CREAM)
-    d.rectangle((258, 486, 262, 489), fill=INK)
-    d.rectangle((266, 484, 268, 488), fill=INK)
-    d.rectangle((250, 500, 256, 512), fill=ROSE)
-    d.rectangle((268, 500, 274, 512), fill=ROSE)
-    # scanlines
-    for yy in range(404, 544, 6):
-        d.rectangle((156, yy, 372, yy + 1), fill="#1F4D49")
-    c.text((202, 520), "PLAYER 1", 10, "#D3FFEC", bold=True)
-    # glass glare
-    c.line([(162, 420), (206, 400)], "#A9FBE5", 2)
-    c.line([(168, 430), (190, 419)], "#A9FBE5", 1)
-    # TV hardware
-    d.rectangle((118, 586, 412, 596), fill="#170C1A")
-    for bx in range(142, 390, 28):
-        d.rectangle((bx, 586, bx + 12, 596), fill=WOOD_DEEP)
-    d.rectangle((136, 572, 146, 580), fill=MINT)
-    d.rectangle((154, 572, 176, 580), fill=ROSE_DARK)
-    d.rectangle((184, 572, 206, 580), fill=WOOD_DEEP)
-    # controller on the desk
-    c.bevel((296, 560, 382, 588), "#30243A", "#63415A", "#160C1D", INK, 2, 2)
-    d.rectangle((304, 568, 318, 578), fill=ORANGE)
-    d.rectangle((358, 568, 372, 578), fill=CREAM)
-    d.rectangle((326, 574, 350, 578), fill=INK)
-    # mug on floor beside desk
-    c.bevel((438, 716, 482, 766), "#2E2230", "#6A4A55", "#170D1C", INK, 2, 2)
-    d.rectangle((442, 720, 478, 742), fill=CREAM)
-    d.rectangle((446, 724, 474, 730), fill=ROSE)
-    d.rectangle((446, 748, 474, 758), fill=CREAM)
-    c.line([(482, 728), (496, 728), (496, 744), (482, 744)], INK, 3)
-
-    # ── Tall plant between TV and window ────────────────────────────────────
-    c.bevel((430, 528, 502, 612), "#8A4228", "#C86A3B", "#482116", INK, 3, 2)
-    d.rectangle((424, 520, 508, 540), fill="#A95231", outline=INK, width=3)
-    d.rectangle((430, 524, 502, 529), fill="#D27A45")
-    d.rectangle((446, 546, 486, 602), fill="#6E3222")
-    c.line([(466, 528), (462, 470), (452, 432)], "#1D5B46", 4)
-    c.line([(466, 502), (486, 466), (500, 438)], "#1D5B46", 4)
-    c.line([(462, 484), (438, 456), (424, 438)], "#1D5B46", 3)
-    leaves = [
-        (414, 420, 30, 18), (440, 404, 34, 22), (470, 416, 28, 18),
-        (486, 388, 24, 30), (450, 378, 22, 28), (414, 452, 24, 16),
-        (488, 448, 20, 22), (456, 446, 26, 16),
-    ]
-    for bx, by, bw, bh in leaves:
-        d.rectangle((bx, by, bx + bw, by + bh), fill=MINT, outline=MINT_SHADOW, width=2)
-        d.rectangle((bx + 4, by + 3, bx + bw - 5, by + 6), fill=MINT_GLOW)
-        d.rectangle((bx + 2, by + bh - 5, bx + bw - 3, by + bh - 3), fill=MINT_DARK)
-    # a couple of dark leaves for depth
-    for bx, by, bw, bh in ((426, 436, 20, 14), (474, 438, 22, 13), (440, 394, 16, 14)):
-        d.rectangle((bx, by, bx + bw, by + bh), fill=MINT_DARK, outline=INK, width=2)
-        d.rectangle((bx + 3, by + 2, bx + bw - 4, by + 4), fill=MINT)
-
-    # ── Right: game shelf ───────────────────────────────────────────────────
-    # back shadow
-    c.dither((1128, 176, 1510, 430), VOID, 10, 0, "sparse")
-    c.bevel((1140, 176, 1498, 410), "#2C182E", "#5A3552", "#160B1D", INK, 4, 3)
-    d.rectangle((1160, 196, 1478, 374), fill="#301A34")
-    # shelf top and bottom
-    c.bevel((1130, 374, 1508, 408), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 3, 3)
-    d.rectangle((1142, 382, 1496, 389), fill=WOOD_LIGHT)
-    for bx in (1160, 1464):
-        c.bevel((bx, 408, bx + 22, 428), WOOD_DARK, WOOD_MID, WOOD_DEEP, INK, 2, 1)
-    # game cases / books
-    cases = [
-        (1160, 120, MINT, 18), (1184, 138, GOLD, 20), (1210, 128, MAGENTA, 16),
-        (1232, 150, ORANGE, 18), (1257, 134, CREAM, 20), (1285, 144, PURPLE_MID, 17),
-        (1308, 124, MINT, 18), (1334, 152, GOLD, 16), (1358, 132, MAGENTA, 20),
-        (1388, 142, ORANGE, 16), (1411, 118, CREAM, 18), (1436, 148, MINT, 20),
-        (1462, 132, GOLD, 16),
-    ]
-    for gx, height, col, width in cases:
-        top = 360 - height
-        c.bevel((gx, top, gx + width, 366), col, _mix(col, CREAM, 0.38),
-                _mix(col, INK, 0.48), INK, 2, 1)
-        d.rectangle((gx + 4, top + 12, gx + width - 4, top + 54), fill=INK)
-        d.rectangle((gx + 6, top + 16, gx + width - 6, top + 21), fill=_mix(col, CREAM, 0.5))
-        d.rectangle((gx + 7, top + 28, gx + width - 7, top + 32), fill=_mix(col, INK, 0.5))
-        d.rectangle((gx + 7, top + 40, gx + width - 9, top + 44), fill=_mix(col, INK, 0.5))
-        d.rectangle((gx + width // 2 - 2, top + 58, gx + width // 2 + 2, top + 68), fill=INK)
-    # leaning case
-    c.poly([(1116, 366), (1134, 366), (1148, 250), (1132, 246)], "#26313A", INK, 2)
-    c.poly([(1123, 348), (1135, 348), (1144, 264), (1135, 262)], MINT_DARK)
-    # figurines on the shelf top edge
-    d.rectangle((1184, 342, 1216, 368), fill="#3B2050", outline=INK, width=2)
-    d.rectangle((1190, 328, 1210, 346), fill=ROSE, outline=INK, width=2)
-    d.rectangle((1194, 334, 1198, 338), fill=INK)
-    d.rectangle((1204, 334, 1208, 338), fill=INK)
-    d.rectangle((1192, 346, 1208, 362), fill=CREAM)
-    d.rectangle((1262, 346, 1286, 368), fill=MAGENTA, outline=INK, width=2)
-    d.rectangle((1268, 336, 1280, 350), fill=GOLD, outline=INK, width=2)
-    # tiny boombox on the left end of the shelf
-    c.bevel((1450, 330, 1510, 368), "#2F2130", "#654556", "#140C19", INK, 2, 2)
-    d.rectangle((1458, 338, 1474, 354), fill=INK)
-    d.rectangle((1482, 338, 1498, 354), fill=INK)
-    d.rectangle((1462, 342, 1470, 350), fill=WOOD_MID)
-    d.rectangle((1486, 342, 1494, 350), fill=WOOD_MID)
-    d.rectangle((1474, 356, 1482, 362), fill=MINT)
-
-    # ── Right: control panel ────────────────────────────────────────────────
-    c.dither((1160, 420, 1480, 648), VOID, 12, 0, "sparse")
-    c.bevel((1168, 430, 1466, 626), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 4, 3)
-    c.bevel((1190, 448, 1444, 608), "#241321", "#51304A", "#100812", INK, 3, 2)
-    # VU meters
-    for vx in (1208, 1360):
-        d.rectangle((vx, 462, vx + 58, 490), fill="#160C18", outline=INK, width=2)
-        for i in range(9):
-            d.rectangle((vx + 5 + i * 6, 480 - i * 2, vx + 8 + i * 6, 484), fill=MINT if i < 6 else GOLD)
-        d.rectangle((vx + 4, 486, vx + 54, 488), fill=ROSE_DARK)
-    # knobs
-    for kx, ky, col in ((1215, 526, GOLD), (1260, 526, ORANGE), (1368, 526, MINT), (1414, 526, GOLD)):
-        d.rectangle((kx - 15, ky - 15, kx + 15, ky + 15), fill="#160C18", outline=INK, width=2)
-        d.rectangle((kx - 11, ky - 11, kx + 11, ky + 11), fill=col, outline=INK, width=2)
-        d.rectangle((kx - 2, ky - 9, kx + 2, ky + 3), fill=INK)
-    # sliders / patch bay
-    for sx in (1306, 1322, 1338, 1354):
-        d.rectangle((sx, 512, sx + 3, 580), fill=INK)
-        d.rectangle((sx - 3, 548, sx + 6, 555), fill=CREAM)
-    for row in range(4):
-        for col in range(3):
-            d.rectangle((1220 + col * 18, 560 + row * 11, 1226 + col * 18, 566 + row * 11),
-                        fill=(MINT, GOLD, ROSE)[(row + col) % 3])
-    c.text((1200, 590), "GB-01", 8, GOLD, bold=True)
-    # cable snaking out of the panel
-    c.line([(1446, 590), (1480, 624), (1500, 676), (1472, 708)], INK, 4)
-    c.line([(1447, 591), (1481, 625), (1501, 677), (1473, 709)], "#4A2A40", 1)
-    # sticky note
-    d.rectangle((1390, 440, 1434, 466), fill="#E9C97B")
-    d.rectangle((1394, 446, 1424, 448), fill=ROSE_DARK)
-    d.rectangle((1394, 452, 1420, 454), fill=ROSE_DARK)
-    d.rectangle((1394, 458, 1416, 460), fill=ROSE_DARK)
-
-    # ── Right: record crate ─────────────────────────────────────────────────
-    c.dither((1200, 650, 1540, 840), VOID, 12, 0, "sparse")
-    # records poking out
-    record_cols = (MINT, GOLD, MAGENTA, ORANGE, CREAM, PURPLE_MID, ROSE, MINT)
-    for i, col in enumerate(record_cols):
-        x = 1244 + i * 28
-        top = 626 + (i % 3) * 8
-        c.bevel((x, top, x + 28, 728), col, _mix(col, CREAM, 0.3), _mix(col, INK, 0.4), INK, 2, 1)
-        d.rectangle((x + 6, top + 14, x + 22, top + 34), fill=INK)
-        d.rectangle((x + 10, top + 18, x + 18, top + 30), fill=_mix(col, CREAM, 0.4))
-    c.bevel((1228, 700, 1510, 822), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 4, 3)
-    d.rectangle((1242, 714, 1496, 808), fill=WOOD_DARK)
-    for x in (1242, 1326, 1410, 1494):
-        d.rectangle((x, 714, x + 4, 808), fill=WOOD_LIGHT)
-    d.rectangle((1242, 752, 1496, 760), fill=WOOD_MID)
-    c.text((1286, 770), "GOOD FINDS", 10, GOLD, bold=True)
-    # hardware corners
-    for x, y in ((1234, 706), (1502, 706), (1234, 814), (1502, 814)):
-        d.rectangle((x, y, x + 8, y + 8), fill=GOLD_DARK, outline=INK, width=1)
-    # scattered vinyl sleeves + headphones on the floor
-    c.bevel((1136, 780, 1222, 830), "#25142B", "#593453", "#120A18", INK, 2, 2)
-    d.rectangle((1146, 788, 1212, 822), fill=MAGENTA)
-    d.rectangle((1156, 794, 1202, 816), fill=PURPLE_DARK)
-    d.rectangle((1170, 798, 1188, 812), fill=MINT)
-    d.rectangle((1110, 800, 1150, 816), fill=INK, outline=INK, width=2)
-    d.rectangle((1122, 804, 1148, 813), fill=GOLD)
-    d.rectangle((1108, 792, 1132, 800), fill=ROSE_DARK)
-
-    # ── Floor lamp and light pool ───────────────────────────────────────────
-    c.dither((1042, 284, 1172, 394), GOLD, 10, 0, "sparse")
-    c.line([(1104, 382), (1104, 756)], "#24101A", 6)
-    c.line([(1101, 382), (1101, 756)], GOLD_DARK, 2)
-    c.bevel((1090, 740, 1122, 760), "#2B1622", "#5C3442", "#120A12", INK, 2, 2)
-    # shade
-    c.poly([(1058, 336), (1150, 336), (1126, 286), (1082, 286)], WOOD_MID, INK, 3)
-    c.poly([(1066, 330), (1142, 330), (1122, 294), (1086, 294)], GOLD, INK, 2)
-    c.poly([(1082, 324), (1126, 324), (1114, 302), (1094, 302)], "#FFD98A")
-    d.rectangle((1056, 334, 1152, 342), fill=WOOD_HI, outline=INK, width=2)
-    for sx in range(1064, 1146, 12):
-        d.rectangle((sx, 342, sx + 2, 354), fill=GOLD_DARK)
-    # light cone
-    c.dither((1070, 344, 1140, 800), "#6A4533", 14, 0, "sparse")
-    c.dither((1054, 760, 1160, 830), GOLD_DARK, 14, 0, "sparse")
-
-    # ── Centre: listening rug / low nest ────────────────────────────────────
-    # The mascot is drawn live on top of this, so keep the centre dark and
-    # uncluttered; the visible edges do the storytelling.
-    c.dither((588, 680, 1012, 840), VOID, 12, 0, "sparse")
-    # beanbag / floor cushion
-    c.poly([(626, 780), (676, 704), (742, 676), (848, 676), (920, 704), (966, 780),
-            (942, 824), (884, 840), (812, 846), (718, 838), (650, 820)], PURPLE_MID, INK, 4)
-    c.poly([(650, 774), (690, 716), (750, 694), (842, 694), (900, 716), (944, 774),
-            (914, 808), (842, 816), (750, 814), (682, 804)], PURPLE_LIGHT)
-    c.poly([(690, 748), (742, 716), (846, 718), (900, 750), (880, 778), (738, 780)], "#45204A", INK, 2)
-    c.line([(748, 724), (840, 726)], "#7A4170", 2)
-    # cushion
-    c.bevel((760, 744, 920, 804), "#5F2B52", "#9C527C", "#2C1233", INK, 3, 2)
-    d.rectangle((780, 754, 900, 758), fill="#B66A8C")
-    # rug in front / under the mascot
-    c.bevel((520, 770, 1084, 842), "#4C2342", "#8A4A6A", "#2A102A", INK, 4, 3)
-    d.rectangle((536, 780, 1068, 832), fill="#5E2B4E")
-    for x in range(550, 1068, 52):
-        d.rectangle((x, 786, x + 20, 792), fill=GOLD_DARK)
-        d.rectangle((x + 4, 814, x + 24, 820), fill=MINT_DARK)
-    d.rectangle((512, 770, 534, 842), fill=ROSE_DARK)
-    d.rectangle((1070, 770, 1092, 842), fill=ROSE_DARK)
-    for x in range(516, 1090, 18):
-        d.rectangle((x, 838, x + 8, 846), fill=ROSE_DARK)
-
-    # ── Side table + record player (left of the nest) ──────────────────────
-    c.bevel((548, 642, 702, 742), WOOD_MID, WOOD_HI, WOOD_DEEP, INK, 4, 3)
-    d.rectangle((562, 656, 688, 728), fill=WOOD_DARK)
-    c.bevel((574, 622, 676, 658), "#2A1A2D", "#5A3552", "#120A18", INK, 2, 2)
-    d.rectangle((584, 630, 666, 650), fill="#1A1020")
-    d.rectangle((594, 634, 656, 646), fill=INK)
-    d.rectangle((606, 632, 646, 650), fill=ROSE_DARK)
-    d.rectangle((614, 638, 638, 646), fill=ROSE)
-    c.line([(600, 624), (600, 606), (620, 606)], GOLD_DARK, 3)
-    d.rectangle((618, 600, 632, 610), fill=GOLD)
-    # tiny speaker + cassettes under the table
-    c.bevel((566, 688, 620, 724), "#2A1A2D", "#5A3552", "#120A18", INK, 2, 1)
-    for sx in range(574, 612, 8):
-        d.rectangle((sx, 696, sx + 4, 716), fill=WOOD_MID)
-    for i, col in enumerate((GOLD, MINT, MAGENTA)):
-        c.bevel((632 + i * 16, 696, 646 + i * 16, 724), col, _mix(col, CREAM, 0.4),
-                _mix(col, INK, 0.5), INK, 1, 1)
-
-    # ── Foreground clutter, cables, and little stories ─────────────────────
-    # A game controller on the floor to the left of the rug.
-    c.bevel((470, 800, 542, 832), "#2A2034", "#604666", "#120A18", INK, 2, 2)
-    d.rectangle((478, 808, 496, 818), fill=ORANGE)
-    d.rectangle((516, 808, 534, 818), fill=CREAM)
-    d.rectangle((498, 814, 512, 818), fill=INK)
-    # cassette tapes + a mug near the left edge.
-    c.bevel((340, 780, 418, 820), "#25142B", "#593453", "#120A18", INK, 2, 2)
-    d.rectangle((348, 788, 410, 814), fill=MAGENTA)
-    d.rectangle((360, 794, 398, 808), fill=CREAM)
-    d.rectangle((366, 796, 374, 806), fill=INK)
-    d.rectangle((384, 796, 392, 806), fill=INK)
-    c.bevel((250, 790, 300, 830), "#D8C5A2", "#FFF6D8", "#7D6A58", INK, 2, 2)
-    d.rectangle((256, 796, 294, 812), fill=CREAM)
-    c.line([(300, 800), (318, 800), (318, 820), (300, 820)], INK, 3)
-    c.line([(301, 801), (317, 801), (317, 819), (301, 819)], "#D8C5A2", 1)
-    # A little stack of game cases at the lower left.
-    for i, col in enumerate((MINT, GOLD, ROSE)):
-        c.bevel((54, 780 + i * 11, 178, 792 + i * 11), col, _mix(col, CREAM, 0.35),
-                _mix(col, INK, 0.4), INK, 1, 1)
-    # Cable across the floor.
-    c.line([(96, 928), (216, 908), (286, 930), (384, 900), (462, 928), (550, 912),
-            (660, 936), (820, 916), (1010, 936), (1140, 918), (1290, 946), (1500, 920)], INK, 4)
-    c.line([(96, 927), (216, 907), (286, 929), (384, 899), (462, 927), (550, 911),
-            (660, 935), (820, 915), (1010, 935), (1140, 917), (1290, 945), (1500, 919)],
-           "#4A2A40", 1)
-    # Subtle floor highlights / scuffs.
-    for x, y, w in ((640, 866, 44), (880, 892, 32), (1090, 872, 54), (1320, 892, 38),
-                    (240, 866, 48), (440, 900, 60)):
-        d.rectangle((x, y, x + w, y + 2), fill="#5F3550")
-        d.rectangle((x + 8, y + 4, x + w - 6, y + 5), fill="#2A152D")
-
-    # ── Final light and texture pass ────────────────────────────────────────
-    # A faint mint rim from the CRT and a warm rim from the lamp.
-    c.dither((80, 350, 470, 660), "#2B5A50", 16, 0, "sparse")
-    c.dither((1030, 300, 1180, 760), "#6C4A31", 16, 0, "sparse")
-    # Ceiling string lights, tucked above the main composition.
-    c.line([(300, 178), (340, 196), (382, 178), (426, 198), (470, 178)], INK, 2)
-    for lx, ly, col in ((340, 196, GOLD), (426, 198, MINT), (470, 178, ROSE), (382, 178, ORANGE)):
-        d.rectangle((lx - 3, ly, lx + 3, ly + 5), fill=col, outline=INK, width=1)
-        c.dither((lx - 8, ly + 2, lx + 8, ly + 14), col, 12, 0, "sparse")
-    # Fine grain on the largest flat areas (wall + floor) for a hand-made feel.
-    c.speckle((0, 200, 1600, 700), (WALL_PANEL, WALL_LINE, "#3C2144"), 160, 4, 5)
-    c.speckle((0, 740, 1600, 1000), ("#1B0D1F", "#4A2840", "#32182F"), 140, 4, 9)
-    # Edge vignette, stronger at the bottom corners.
-    c.dither((0, 680, 70, 1000), INK, 8, 0)
-    c.dither((1530, 680, 1600, 1000), INK, 8, 1)
-    c.dither((0, 900, 1600, 1000), VOID, 10, 0, "sparse")
-
-    return c.img
+    logical = _build_room().img
+    return logical.resize((W, H), Image.Resampling.NEAREST)
 
 
 def build_dim(room: Image.Image) -> Image.Image:
-    """A darker copy for the content-page backdrops."""
     overlay = Image.new("RGB", room.size, "#120A18")
     dimmed = Image.blend(room, overlay, 0.72)
-    # Keep a touch of the warm window/lamp pools alive.
     warm = Image.new("RGB", room.size, "#3A1E26")
     mask = Image.new("L", room.size, 0)
     md = ImageDraw.Draw(mask)
-    md.rectangle((490, 150, 1090, 535), fill=38)
-    md.rectangle((1020, 270, 1200, 800), fill=38)
-    md.rectangle((90, 340, 460, 660), fill=26)
-    dimmed = Image.composite(Image.blend(dimmed, warm, 0.16), dimmed, mask)
-    return dimmed
+    md.rectangle((480, 120, 1100, 560), fill=38)
+    md.rectangle((1020, 240, 1220, 800), fill=36)
+    md.rectangle((80, 320, 480, 660), fill=26)
+    return Image.composite(Image.blend(dimmed, warm, 0.16), dimmed, mask)
 
 
-def main():
+def _safe_zone_preview(room: Image.Image, before: Image.Image) -> None:
+    preview = room.copy()
+    d = ImageDraw.Draw(preview, "RGBA")
+    try:
+        font = ImageFont.truetype(str(ROOT / "assets" / "fonts" / "Silkscreen-Bold.ttf"), 26)
+    except OSError:
+        font = ImageFont.load_default()
+    # Logical room coordinates x4. These are the zones the live UI reserves.
+    zones = (
+        ((0, 30, 180, 92), (124, 255, 196, 205), "GREETING"),
+        ((120, 28, 280, 140), (124, 196, 255, 205), "WINDOW"),
+        ((22, 84, 124, 188), (124, 255, 196, 205), "CRT"),
+        ((282, 36, 382, 106), (255, 205, 124, 205), "SHELF"),
+        ((288, 107, 378, 165), (255, 205, 124, 205), "PANEL"),
+        ((304, 162, 388, 216), (255, 205, 124, 205), "CRATE"),
+        ((166, 128, 242, 204), (255, 124, 196, 205), "PUPPY"),
+    )
+    for box, color, label in zones:
+        x0, y0, x1, y1 = (int(v * SCALE) for v in box)
+        d.rectangle((x0, y0, x1, y1), outline=color, width=6)
+        tag_w = max(94, 12 + int(d.textlength(label, font=font)))
+        d.rectangle((x0 + 6, y0 + 6, x0 + 6 + tag_w, y0 + 40),
+                    fill=(8, 4, 12, 220))
+        d.text((x0 + 12, y0 + 12), label, font=font, fill=color)
+    # The three live hotspot label anchors, shown as pixel crosshairs.
+    for lx, ly in ((316, 90), (316, 150), (312, 211)):
+        x, y = int(lx * SCALE), int(ly * SCALE)
+        d.rectangle((x - 12, y - 2, x + 12, y + 2), fill=(255, 243, 208, 230))
+        d.rectangle((x - 2, y - 12, x + 2, y + 12), fill=(255, 243, 208, 230))
+    preview.save(PREVIEW_PATH, optimize=True)
+
+    # Report strip: before, after, and after with the reserved zones.
+    label_h = 44
+    gap = 20
+    canvas = Image.new("RGB", (room.width, room.height * 2 + gap + label_h * 2), "#120A18")
+    canvas.paste(before, (0, label_h))
+    canvas.paste(preview, (0, label_h * 2 + gap + room.height))
+    cd = ImageDraw.Draw(canvas)
+    cd.text((16, 8), "BEFORE", font=font, fill=(199, 154, 165))
+    cd.text((16, label_h + room.height + gap + 8), "AFTER + SAFE ZONES",
+            font=font, fill=(124, 255, 196))
+    canvas.save(BEFORE_AFTER_PATH, optimize=True)
+
+
+def main() -> None:
+    previous = None
+    backup = ROOT / "assets" / "_backup" / "room" / "den_room.png"
+    for candidate in (backup, OUT_PATH):
+        if candidate.exists():
+            previous = Image.open(candidate).convert("RGB")
+            if previous.size == (W, H):
+                break
     room = build_room()
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     room.save(OUT_PATH, optimize=True)
     build_dim(room).save(DIM_PATH, optimize=True)
-    print(f"wrote {OUT_PATH}")
+    if previous is not None and previous.size == room.size:
+        _safe_zone_preview(room, previous)
+    print(f"wrote {OUT_PATH} ({room.size[0]}x{room.size[1]})")
     print(f"wrote {DIM_PATH}")
+    print(f"wrote {PREVIEW_PATH}")
+    print(f"wrote {BEFORE_AFTER_PATH}")
 
 
 if __name__ == "__main__":
