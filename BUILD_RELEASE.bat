@@ -32,6 +32,15 @@ popd
 if exist "%~dp0dist_release" rmdir /s /q "%~dp0dist_release"
 if exist "%~dp0build_release" rmdir /s /q "%~dp0build_release"
 
+rem Art backups are local safety copies only. Stage a clean assets tree so
+rem assets\_backup never enters the Nuitka payload or the installer.
+if exist "%~dp0build_assets" rmdir /s /q "%~dp0build_assets"
+robocopy "%~dp0assets" "%~dp0build_assets" /E /XD "%~dp0assets\_backup" /NFL /NDL /NJH /NJS /NP >nul
+if errorlevel 8 (
+    echo ERROR: could not stage clean assets.
+    exit /b 1
+)
+
 pushd "%~dp0source"
 py -m pip install "nuitka==4.1.2" --quiet
 py -m nuitka ^
@@ -39,7 +48,7 @@ py -m nuitka ^
     --windows-console-mode=disable ^
     --enable-plugin=tk-inter ^
     --windows-icon-from-ico=..\assets\icon.ico ^
-    --include-data-dir=..\assets=assets ^
+    --include-data-dir=..\build_assets=assets ^
     --include-data-file=core\spotify_focus_guard.exe=core\spotify_focus_guard.exe ^
     --include-package-data=playwright ^
     --include-package=process_audio_capture ^
@@ -51,6 +60,7 @@ py -m nuitka ^
     main.py
 set BUILD_ERR=%ERRORLEVEL%
 popd
+if exist "%~dp0build_assets" rmdir /s /q "%~dp0build_assets"
 
 if not "%BUILD_ERR%"=="0" (
     echo ERROR: Nuitka build failed.

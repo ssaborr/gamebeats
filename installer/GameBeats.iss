@@ -29,7 +29,8 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Additional shortcuts:"; Flags: unchecked
 
 [Files]
-Source: "..\dist_release\GameBeats\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; assets\_backup is a local-only safety copy and must never ship.
+Source: "..\dist_release\GameBeats\*"; DestDir: "{app}"; Excludes: "\assets\_backup\*"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
