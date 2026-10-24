@@ -106,6 +106,57 @@ class TestPuppyAnimator(unittest.TestCase):
             self._frames("singing_eyes_closed"),
         )
 
+    def test_mouth_cadence_is_readable_not_a_twitch(self):
+        # Two poses alternating every 2 ticks (15 changes/sec) looked like a
+        # vibration.  Keep each authored pose on screen for at least a third
+        # of a second at 30 Hz.
+        open_holds = self.spec["states"]["singing_open"]["hold"]
+        self.assertTrue(all(int(hold) >= 10 for hold in open_holds), open_holds)
+        self.assertGreaterEqual(sum(int(h) for h in open_holds), 20)
+
+    def test_singing_mouth_uses_hysteresis_and_a_minimum_hold(self):
+        seen = []
+
+        self.anim.frame(0, "singing", audio_level=0.9)
+        seen.append(self.anim.state)
+        # Chatter right on the old 0.25 boundary must not flip the mouth.
+        for tick in range(1, 15):
+            level = 0.05 if tick % 2 else 0.9
+            self.anim.frame(tick, "singing", audio_level=level)
+            seen.append(self.anim.state)
+        self.assertEqual(set(seen), {"singing_open"}, seen)
+
+        # After the hold expires a genuinely quiet sample changes the state.
+        self.anim.frame(15, "singing", audio_level=0.0)
+        self.assertEqual(self.anim.state, "singing_closed")
+        # ...and a loud sample cannot immediately re-open it.
+        for tick in range(16, 30):
+            self.anim.frame(tick, "singing", audio_level=0.9)
+            self.assertEqual(self.anim.state, "singing_closed")
+        self.anim.frame(30, "singing", audio_level=0.9)
+        self.assertEqual(self.anim.state, "singing_open")
+
+    def test_no_mouth_frame_flashes_for_a_single_tick(self):
+        anim = PuppyAnimator(self.spec)
+        minimum = int(self.spec["audio"].get("min_frame_hold", 6))
+        last_frame = None
+        last_tick = 0
+        shortest = 10 ** 9
+        for tick in range(0, 120):
+            level = 0.9 if (tick // 10) % 2 == 0 else 0.0
+            frame = anim.frame(tick, "singing", audio_level=level)
+            if last_frame is None:
+                last_frame, last_tick = frame, tick
+            elif frame != last_frame:
+                shortest = min(shortest, tick - last_tick)
+                last_frame, last_tick = frame, tick
+        self.assertGreaterEqual(shortest, minimum)
+
+    def test_reaction_is_one_held_pose(self):
+        state = self.spec["states"]["reaction"]
+        self.assertEqual(len(state["frames"]), 1)
+        self.assertGreaterEqual(int(state["hold"][0]), 20)
+
     def test_reduce_motion_returns_one_static_frame_per_mode(self):
         for mode in ("idle", "paused", "alert", "reaction", "happy", "encore"):
             expected = self.spec["states"][mode]["static"]
@@ -147,6 +198,8 @@ class TestPuppyCanvasNeverMoves(unittest.TestCase):
 
         canvas.coords.assert_not_called()
         canvas.itemconfigure.assert_not_called()
+        # The 30 Hz tick must not re-stack the puppy above UI overlays.
+        canvas.tag_raise.assert_not_called()
         self.assertEqual(app._puppy_bbox, (100, 200, 292, 416))
 
     def test_missing_frame_never_moves_the_existing_image(self):
@@ -169,6 +222,77 @@ class TestPuppyCanvasNeverMoves(unittest.TestCase):
         canvas.coords.assert_not_called()
         canvas.itemconfigure.assert_not_called()
         self.assertEqual(app._puppy_bbox, (100, 200, 292, 416))
+
+    def test_audio_meter_dip_does_not_rebuild_the_room(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_audio_active = False
+        app._puppy_hide_job = None
+        app._puppy_last_loud_ts = 0.0
+        app._mascot_notifier = None
+        app._intentional_pause_active = lambda: False
+        app._schedule_room_redraw = MagicMock()
+        app.root = MagicMock()
+
+        GameBeatsApp._set_puppy_singing_visible.__get__(
+            app, GameBeatsApp
+        )(True)
+
+        app._puppy_singing_overlay.show.assert_called_once()
+        # The master clock polls the play state; a full room rebuild here made
+        # the den flicker every time the meter dipped.
+        app._schedule_room_redraw.assert_not_called()
+
+    def test_petting_uses_a_small_overlay_item_without_redrawing(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        canvas = MagicMock()
+        canvas.winfo_width.return_value = 2240
+        app._room_canvas = canvas
+        app._puppy_bbox = (960, 452, 1280, 812)
+        app._redraw_room = MagicMock()
+        app._pet_heart_job = None
+        app._heart_until = 0.0
+        app._puppy_mood_until = 0.0
+        app.status_log_lbl = MagicMock()
+        app.root = MagicMock()
+        app.root.after.return_value = "heart-job"
+
+        GameBeatsApp._pet_puppy.__get__(app, GameBeatsApp)()
+
+        app._redraw_room.assert_not_called()
+        canvas.delete.assert_called_with("pet_heart")
+        args, kwargs = canvas.create_text.call_args
+        self.assertEqual(args[:2], (1120, 426))
+        self.assertEqual(kwargs["text"], "\u2665")
+        self.assertIn("pet_heart", kwargs["tags"])
+        app.root.after.assert_called_once()
+        self.assertEqual(app.root.after.call_args.args[0], 1200)
+        self.assertGreater(app._heart_until, 0.0)
+
+    def test_redraw_puppy_reuses_the_current_photo(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        canvas = MagicMock()
+        canvas.type.return_value = "image"
+        app._room_canvas = canvas
+        app._room_puppy_item = 7
+        app._room_puppy_photo = object()
+        app._room_puppy_sprite_key = ("idle_0", 320, 360)
+        app._puppy_image_for = MagicMock()
+
+        GameBeatsApp._draw_room_puppy.__get__(
+            app, GameBeatsApp
+        )(canvas, "idle_0", (960, 452, 320, 360))
+
+        app._puppy_image_for.assert_not_called()
+        canvas.create_image.assert_not_called()
+        # A rebuild may raise the puppy; the tick loop may not.
+        canvas.tag_raise.assert_called_once_with("puppy")
 
 
 if __name__ == "__main__":

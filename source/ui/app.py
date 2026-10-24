@@ -1853,6 +1853,8 @@ class GameBeatsApp:
         self._cart_items = None
         self._cart_key = None
         self._heart_until = 0.0
+        self._pet_heart_job = None
+        self._puppy_audio_smooth = 0.0
         self._footer_buttons = {}
         self._footer_tools = {}
         self._is_maximized = False
@@ -2805,12 +2807,18 @@ class GameBeatsApp:
 
     def _draw_room_puppy(self, canvas, sprite_name, geometry):
         px, py, pw, ph = geometry
-        sprite = self._puppy_image_for(sprite_name, (pw, ph))
-        if sprite is None:
-            return
-        try:
-            photo = ImageTk.PhotoImage(sprite)
+        key = (sprite_name, int(pw), int(ph))
+        photo = self._room_puppy_photo
+        if photo is None or self._room_puppy_sprite_key != key:
+            sprite = self._puppy_image_for(sprite_name, (pw, ph))
+            if sprite is None:
+                return
+            try:
+                photo = ImageTk.PhotoImage(sprite)
+            except Exception:
+                return
             self._room_puppy_photo = photo
+        try:
             if self._room_puppy_item is None or not canvas.type(self._room_puppy_item):
                 self._room_puppy_item = canvas.create_image(
                     px, py, anchor="nw", image=photo, tags=("puppy",)
@@ -2818,7 +2826,10 @@ class GameBeatsApp:
             else:
                 canvas.itemconfigure(self._room_puppy_item, image=photo)
                 canvas.coords(self._room_puppy_item, px, py)
-            self._room_puppy_sprite_key = (sprite_name, int(pw), int(ph))
+            self._room_puppy_sprite_key = key
+            # This method only runs during a full room rebuild, before the UI
+            # overlays are recreated, so raising the puppy here is safe.  The
+            # animation tick must never do it (see _animate_room_puppy).
             canvas.tag_raise("puppy")
         except Exception:
             pass
@@ -2830,11 +2841,25 @@ class GameBeatsApp:
             return False
 
     def _puppy_audio_level(self):
+        """Smoothed, clamped Spotify level for the mouth animation.
+
+        The meter only produces a sample twice per second and individual
+        samples dip between beats.  A little attack/release smoothing keeps
+        those gaps from snapping the mouth shut; the animator's hysteresis and
+        minimum hold then prevent threshold chatter.
+        """
         try:
             peak = float(getattr(self, "_last_spotify_peak", 0.0) or 0.0)
         except Exception:
             peak = 0.0
-        return max(0.0, min(1.0, peak / 0.18))
+        target = max(0.0, min(1.0, peak / 0.18))
+        previous = float(getattr(self, "_puppy_audio_smooth", 0.0) or 0.0)
+        rate = 0.45 if target > previous else 0.22
+        level = previous + (target - previous) * rate
+        if level < 0.005:
+            level = 0.0
+        self._puppy_audio_smooth = level
+        return level
 
     def _puppy_animation_mode(self, now=None):
         now = time.time() if now is None else now
@@ -2900,7 +2925,11 @@ class GameBeatsApp:
                     self._room_puppy_sprite_key = key
             # Feet are locked: coordinates and bbox never change after layout.
             self._puppy_bbox = (px, py, px + pw, py + ph)
-            canvas.tag_raise("puppy")
+            # Do NOT raise the puppy here.  The tick loop runs 30 times a
+            # second, and raising on every tick pulled the mascot above the
+            # room labels, status caption, and hover outlines.  The stable
+            # order is established once in _redraw_room (puppy above ambient,
+            # UI overlays above puppy) and then left alone.
         except Exception:
             pass
 
@@ -3522,15 +3551,11 @@ class GameBeatsApp:
                               lambda: self._nav("playlists"))
 
         # Pet heart (tap feedback only; the mascot itself never floats).
-        try:
-            if time.time() < getattr(self, "_heart_until", 0.0):
-                canvas.create_text(
-                    px + pw // 2, py - 26, text="\u2665",
-                    anchor="s", font=(F_RETRO, -max(20, int(w * 0.015))),
-                    fill=ORANGE, tags=("overlay",),
-                )
-        except Exception:
-            pass
+        # A redraw only recreates the heart while its short timer is active;
+        # petting itself uses the lightweight methods below instead of
+        # rebuilding the whole room twice.
+        if time.time() < getattr(self, "_heart_until", 0.0):
+            self._show_pet_heart()
 
         # Game status caption (real detector state)
         try:
@@ -3631,9 +3656,46 @@ class GameBeatsApp:
         self._puppy_mood_until = now + 1.2
         if hasattr(self, "status_log_lbl"):
             self.status_log_lbl.configure(text="Puppy says hi.", text_color=GOLD)
-        self._redraw_room()
+        self._show_pet_heart()
+        # The heart is its own small canvas item.  Petting used to trigger two
+        # full room redraws (and another one 1.25s later), which flashed the
+        # ambient layer and labels around the mascot.
+        job = getattr(self, "_pet_heart_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
         try:
-            self.root.after(1250, self._redraw_room)
+            self._pet_heart_job = self.root.after(1200, self._hide_pet_heart)
+        except Exception:
+            self._pet_heart_job = None
+
+    def _show_pet_heart(self):
+        canvas = getattr(self, "_room_canvas", None)
+        if canvas is None:
+            return
+        try:
+            x0, y0, x1, _y1 = getattr(self, "_puppy_bbox", (0, 0, 0, 0))
+            if x1 <= x0:
+                return
+            width = max(1, canvas.winfo_width())
+            canvas.delete("pet_heart")
+            canvas.create_text(
+                (x0 + x1) // 2, y0 - 26, text="\u2665",
+                anchor="s", font=(F_RETRO, -max(20, int(width * 0.015))),
+                fill=ORANGE, tags=("overlay", "pet_heart"),
+            )
+        except Exception:
+            pass
+
+    def _hide_pet_heart(self):
+        self._pet_heart_job = None
+        canvas = getattr(self, "_room_canvas", None)
+        if canvas is None:
+            return
+        try:
+            canvas.delete("pet_heart")
         except Exception:
             pass
 
@@ -5347,10 +5409,10 @@ class GameBeatsApp:
             intentionally_stopped = self._intentional_pause_active()
             notifier_up = getattr(self, "_mascot_notifier", None) is not None
             active = bool(visible) and not intentionally_stopped and not notifier_up
-            changed = bool(getattr(self, "_puppy_audio_active", False)) != active
             self._puppy_audio_active = active
-            if changed:
-                self._schedule_room_redraw(0)
+            # No room repaint here.  The in-room mascot reads the play state on
+            # the master clock, so rebuilding the whole den for every meter
+            # dip made the canvas flicker around the puppy.
 
             if overlay is None:
                 return

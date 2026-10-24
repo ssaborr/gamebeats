@@ -7,6 +7,12 @@
   "baseline_y": 70,
   "fps": 30,
   "on_twos": 2,
+  "audio": {
+    "open_level": 0.30,
+    "close_level": 0.14,
+    "min_hold": 15,
+    "min_frame_hold": 6
+  },
   "states": {
     "idle": {
       "frames": [
@@ -25,9 +31,9 @@
         14,
         2,
         14,
-        4,
+        8,
         12,
-        8
+        16
       ],
       "static": "idle_0"
     },
@@ -37,8 +43,8 @@
         "sing_2"
       ],
       "hold": [
-        2,
-        2
+        12,
+        12
       ],
       "static": "sing_0"
     },
@@ -47,7 +53,7 @@
         "sing_1"
       ],
       "hold": [
-        4
+        8
       ],
       "static": "sing_1"
     },
@@ -56,7 +62,7 @@
         "sing_3"
       ],
       "hold": [
-        6
+        12
       ],
       "static": "sing_3"
     },
@@ -77,21 +83,19 @@
         "alert_1"
       ],
       "hold": [
-        4,
-        4
+        16,
+        16
       ],
       "static": "alert_0"
     },
     "reaction": {
       "frames": [
-        "alert_1",
-        "alert_0"
+        "alert_1"
       ],
       "hold": [
-        2,
-        2
+        30
       ],
-      "static": "alert_0"
+      "static": "alert_1"
     },
     "happy": {
       "frames": [

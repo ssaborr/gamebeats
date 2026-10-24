@@ -1011,6 +1011,12 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         self.assertLessEqual(PUPPY_OVERLAY_ALPHA, 0.85)
         self.assertGreater(PUPPY_OVERLAY_ALPHA, 0.5)
 
+    def test_desktop_puppy_cadence_is_not_a_twitch(self):
+        from ui.mascot_notifier import PUPPY_ANIMATION_INTERVAL
+
+        self.assertGreaterEqual(PUPPY_ANIMATION_INTERVAL, 100)
+        self.assertLessEqual(PUPPY_ANIMATION_INTERVAL, 220)
+
     def test_singing_puppy_shows_without_a_detected_game(self):
         app = self._make_app()
         app.current_game = None
@@ -1019,7 +1025,9 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
 
         app._puppy_singing_overlay.show.assert_called_once()
         self.assertTrue(app._puppy_audio_active)
-        app._schedule_room_redraw.assert_called_once_with(0)
+        # The in-room mascot is driven by the master clock, so a meter tick
+        # must not trigger a full room rebuild.
+        app._schedule_room_redraw.assert_not_called()
 
     def test_singing_puppy_hides_on_intentional_pause(self):
         app = self._make_app()

@@ -53,7 +53,10 @@ PUPPY_SINGING_FRAMES = (
     "sing_2", "sing_1", "sing_0", "sing_1",
 )
 PUPPY_IDLE_FRAME = "idle_0"
-PUPPY_ANIMATION_INTERVAL = 66   # one frame on twos at 30 Hz
+# The desktop singer used to step every 66ms (15 changes per second), which
+# read as a twitch because each authored frame also shifts the mic and head.
+# 140ms keeps the same 12-beat phrase but at a calm, readable cadence.
+PUPPY_ANIMATION_INTERVAL = 140
 PUPPY_OVERLAY_ALPHA = 0.80
 
 
