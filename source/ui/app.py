@@ -313,6 +313,7 @@ class RoundedButton(ctk.CTkButton):
                          border_color=border_color, border_width=1 if border_color else 0,
                          hover_color=T.ACCENT_HOV if bg in (ACCENT, GOLD) else SURFACE4,
                          **kwargs)
+        add_focus_ring(self, base_border=border_color or None, width=2)
 
     def update_text(self, text):
         self.configure(text=text)
@@ -336,6 +337,7 @@ class CircleBtn(ctk.CTkButton):
         )
         self.size = size
         self.accent = accent
+        add_focus_ring(self, base_border=None, width=2)
 
     def update_text(self, t):
         self.configure(text=t)
@@ -348,6 +350,423 @@ class CircleBtn(ctk.CTkButton):
             bg_n = SURFACE3
             fg_n = TEXT
         self.configure(fg_color=bg_n, text_color=fg_n)
+
+
+def add_focus_ring(widget, base_border=None, focus=GOLD, width=2):
+    """Give a widget a crisp, pixel-thin focus ring without moving it."""
+    try:
+        widget.configure(takefocus=1)
+    except Exception:
+        pass
+
+    def _focus_in(_event=None):
+        try:
+            widget.configure(border_width=width, border_color=focus)
+        except Exception:
+            pass
+
+    def _focus_out(_event=None):
+        try:
+            widget.configure(
+                border_width=width if base_border else 0,
+                border_color=base_border or focus,
+            )
+        except Exception:
+            pass
+
+    try:
+        widget.bind("<FocusIn>", _focus_in, add="+")
+        widget.bind("<FocusOut>", _focus_out, add="+")
+    except Exception:
+        pass
+    return widget
+
+
+def compute_initial_window_size(screen_w, screen_h, ui_scale=1.0,
+                                design_w=WIN_W, design_h=WIN_H):
+    """Fit the design window inside the *logical* screen area.
+
+    Tk screen dimensions are physical pixels while geometry strings are
+    logical. Dividing the screen by the UI scale prevents a 1260x800 window
+    from becoming 2205x1400 on a 150-175% display and hanging off the taskbar.
+    """
+    try:
+        scale = max(1.0, float(ui_scale or 1.0))
+    except Exception:
+        scale = 1.0
+    try:
+        screen_w = max(1.0, float(screen_w))
+        screen_h = max(1.0, float(screen_h))
+    except Exception:
+        screen_w, screen_h = float(design_w), float(design_h)
+
+    # Leave room for the taskbar and the custom window controls. The hard
+    # minimum stays at the design minimum so the deck never collapses.
+    avail_w = max(960.0, screen_w / scale - 60.0)
+    avail_h = max(700.0, screen_h / scale - 40.0)
+    w = min(int(design_w), max(960, int(avail_w)))
+    h = min(int(design_h), max(700, int(avail_h)))
+    return w, h
+
+
+def format_clock(seconds):
+    """Format seconds as m:ss for the deck's segmented progress rail."""
+    try:
+        value = max(0, int(float(seconds)))
+    except Exception:
+        return "--:--"
+    return f"{value // 60}:{value % 60:02d}"
+
+
+class PixelProgress(tk.Canvas):
+    """A pooled, segmented progress rail that only recolours its items."""
+
+    def __init__(self, parent, segments=32, height=12, bg=NIGHT,
+                 gap=2, **kwargs):
+        super().__init__(
+            parent, height=height, bg=bg, highlightthickness=0, bd=0,
+            takefocus=0, **kwargs,
+        )
+        self.segments = max(4, int(segments))
+        self.gap = max(1, int(gap))
+        self._fraction = 0.0
+        self._status_text = ""
+        self._status_active = False
+        self._items = []
+        self._border = None
+        self._label = None
+        self.bind("<Configure>", lambda _e: self._build(), add="+")
+
+    def _build(self):
+        self.delete("progress_seg")
+        try:
+            w = max(1, self.winfo_width())
+            h = max(1, self.winfo_height())
+        except Exception:
+            return
+        usable = max(self.segments, w - self.gap * (self.segments - 1))
+        seg_w = max(1, usable // self.segments)
+        self._items = []
+        x = 0
+        for _ in range(self.segments):
+            item = self.create_rectangle(
+                x, 0, x + seg_w, h, fill=SURFACE4, outline="",
+                tags=("progress_seg",),
+            )
+            self._items.append((item, x, seg_w))
+            x += seg_w + self.gap
+        self._border = self.create_rectangle(
+            0, 0, w - 1, h - 1, outline=WOOD, width=1,
+            tags=("progress_seg",),
+        )
+        self._label = self.create_text(
+            w // 2, h // 2, text="", fill=GOLD,
+            font=T.pixel_font(8, "bold"), tags=("progress_seg",),
+        )
+        self._paint()
+
+    def set_progress(self, fraction):
+        try:
+            value = max(0.0, min(1.0, float(fraction)))
+        except Exception:
+            value = 0.0
+        changed_status = bool(self._status_text)
+        self._status_text = ""
+        self._status_active = False
+        if abs(value - self._fraction) < 0.0015 and not changed_status:
+            return
+        self._fraction = value
+        self._paint()
+
+    def set_status(self, text, active=False):
+        """Show a live/standby label when the source exposes no seek data."""
+        status = str(text or "").upper()
+        active = bool(active)
+        if (
+            status == self._status_text
+            and active == self._status_active
+            and self._fraction == 0.0
+        ):
+            return
+        self._status_text = status
+        self._status_active = active
+        self._fraction = 0.0
+        try:
+            if self._label is not None:
+                self.itemconfigure(
+                    self._label,
+                    text=self._status_text,
+                    fill=GOLD if active else TEXT_MUTED,
+                )
+        except Exception:
+            pass
+        self._paint()
+
+    def _paint(self):
+        if not self._items:
+            return
+        count = self.segments
+        played = int(self._fraction * count)
+        head = played if self._fraction > 0.0 and played < count else -1
+        for index, (item, _x, _w) in enumerate(self._items):
+            if index < played:
+                color = GOLD
+            elif index == head:
+                color = CREAM
+            else:
+                color = SURFACE4
+            try:
+                self.itemconfigure(item, fill=color)
+            except Exception:
+                pass
+        try:
+            if self._label is not None:
+                self.itemconfigure(
+                    self._label,
+                    state="normal" if self._status_text else "hidden",
+                    text=self._status_text,
+                )
+        except Exception:
+            pass
+
+
+class PixelToggle(tk.Canvas):
+    """A square-edged two-state switch with a visible focus ring."""
+
+    def __init__(self, parent, variable, command=None, width=44, height=20,
+                 bg=DECK, **kwargs):
+        super().__init__(
+            parent, width=width, height=height, bg=bg, highlightthickness=0,
+            bd=0, takefocus=1, cursor="hand2", **kwargs,
+        )
+        self.variable = variable
+        self.command = command
+        # Never use self._w / self._h here: Tkinter reserves `_w` for the
+        # widget's Tcl command path, and overwriting it breaks every canvas
+        # operation with "invalid command name".
+        self._cw, self._ch = int(width), int(height)
+        self._track = self.create_rectangle(
+            1, 1, self._cw - 2, self._ch - 2,
+            fill=SURFACE4, outline=BORDER2,
+        )
+        self._knob = self.create_rectangle(
+            3, 3, 15, self._ch - 3, fill=TEXT_MUTED, outline="",
+        )
+        self._led = self.create_rectangle(
+            self._cw - 10, self._ch // 2 - 2,
+            self._cw - 6, self._ch // 2 + 2,
+            fill=NIGHT, outline="",
+        )
+        self._ring = self.create_rectangle(
+            0, 0, self._cw - 1, self._ch - 1,
+            outline=GOLD, width=1, state="hidden",
+        )
+        self.bind("<Button-1>", self._toggle, add="+")
+        self.bind("<space>", self._toggle, add="+")
+        self.bind("<Return>", self._toggle, add="+")
+        self.bind("<FocusIn>", lambda _e: self._set_focus(True), add="+")
+        self.bind("<FocusOut>", lambda _e: self._set_focus(False), add="+")
+        try:
+            self.variable.trace_add("write", lambda *_a: self._paint())
+        except Exception:
+            pass
+        self._paint()
+
+    def _toggle(self, _event=None):
+        try:
+            self.variable.set(not bool(self.variable.get()))
+        except Exception:
+            return "break"
+        if self.command is not None:
+            try:
+                self.command()
+            except Exception:
+                pass
+        try:
+            self.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _set_focus(self, focused):
+        try:
+            self.itemconfigure(self._ring, state="normal" if focused else "hidden")
+        except Exception:
+            pass
+
+    def _paint(self):
+        try:
+            on = bool(self.variable.get())
+        except Exception:
+            on = False
+        track = ACCENT_BG if on else SURFACE4
+        outline = MINT if on else BORDER2
+        knob_left = self._cw - 17 if on else 3
+        try:
+            self.itemconfigure(self._track, fill=track, outline=outline)
+            self.coords(
+                self._knob, knob_left, 3, knob_left + 12, self._ch - 3,
+            )
+            self.itemconfigure(
+                self._knob, fill=CREAM if on else TEXT_MUTED,
+            )
+            self.itemconfigure(self._led, fill=MINT if on else NIGHT)
+            self.tag_raise(self._ring)
+        except Exception:
+            pass
+
+
+class PixelToast(tk.Frame):
+    """Small in-room notification that is reused, never re-created per tick."""
+
+    def __init__(self, parent):
+        super().__init__(
+            parent, bg=NIGHT, bd=0,
+            highlightbackground=GOLD, highlightthickness=2,
+        )
+        self._eyebrow = tk.Label(
+            self, text="", bg=NIGHT, fg=GOLD, anchor="w",
+            font=T.pixel_font(9, "bold"),
+        )
+        self._eyebrow.pack(anchor="w", padx=12, pady=(7, 0))
+        self._body = tk.Label(
+            self, text="", bg=NIGHT, fg=CREAM, anchor="w", justify=tk.LEFT,
+            font=T.retro_font(15),
+        )
+        self._body.pack(anchor="w", padx=12, pady=(1, 8))
+        self._job = None
+        self._parent = parent
+        self._visible = False
+
+    def show(self, eyebrow, body, ms=2800):
+        try:
+            self._eyebrow.configure(text=str(eyebrow).upper())
+            self._body.configure(text=str(body))
+            try:
+                width = max(320, int(self._parent.winfo_width() * 0.52))
+            except Exception:
+                width = 420
+            self._body.configure(wraplength=width)
+            self.place(relx=0.5, y=12, anchor="n")
+            self.lift()
+        except Exception:
+            return
+        self._visible = True
+        if self._job is not None:
+            try:
+                self.after_cancel(self._job)
+            except Exception:
+                pass
+        try:
+            self._job = self.after(max(400, int(ms)), self.hide)
+        except Exception:
+            self._job = None
+
+    def hide(self):
+        self._job = None
+        self._visible = False
+        try:
+            self.place_forget()
+        except Exception:
+            pass
+
+
+class PixelTooltip:
+    """One reusable dark tooltip with a one-pixel gold border."""
+
+    def __init__(self, root):
+        self.root = root
+        self.win = None
+        self.label = None
+        self.job = None
+        self.widget = None
+
+    def attach(self, widget, text):
+        try:
+            widget.bind(
+                "<Enter>", lambda _e, w=widget, t=text: self._schedule(w, t),
+                add="+",
+            )
+            widget.bind("<Leave>", lambda _e: self._hide(), add="+")
+            widget.bind("<ButtonPress>", lambda _e: self._hide(), add="+")
+        except Exception:
+            pass
+        return widget
+
+    def _schedule(self, widget, text):
+        self._cancel()
+        try:
+            self.job = self.root.after(
+                420, lambda: self._show(widget, text)
+            )
+        except Exception:
+            self.job = None
+
+    def _cancel(self):
+        if self.job is not None:
+            try:
+                self.root.after_cancel(self.job)
+            except Exception:
+                pass
+            self.job = None
+
+    def _show(self, widget, text):
+        self.job = None
+        self.widget = widget
+        try:
+            if not widget.winfo_exists():
+                return
+            state = ""
+            try:
+                state = str(widget.cget("state"))
+            except Exception:
+                state = ""
+            if state.lower() == "disabled":
+                return
+        except Exception:
+            return
+        try:
+            if self.win is None or not self.win.winfo_exists():
+                self.win = tk.Toplevel(self.root)
+                self.win.withdraw()
+                self.win.overrideredirect(True)
+                try:
+                    self.win.attributes("-topmost", True)
+                except Exception:
+                    pass
+                self.label = tk.Label(
+                    self.win, text="", bg=NIGHT, fg=CREAM,
+                    font=T.pixel_font(9), padx=7, pady=4,
+                    highlightbackground=GOLD, highlightthickness=1,
+                )
+                self.label.pack()
+            self.label.configure(text=str(text))
+            self.win.update_idletasks()
+            ww = max(1, self.win.winfo_reqwidth())
+            wh = max(1, self.win.winfo_reqheight())
+            x = widget.winfo_rootx() + widget.winfo_width() // 2 - ww // 2
+            y = widget.winfo_rooty() - wh - 8
+            if y < 0:
+                y = widget.winfo_rooty() + widget.winfo_height() + 8
+            x = max(4, x)
+            try:
+                sw = self.win.winfo_screenwidth()
+                x = min(x, max(4, sw - ww - 4))
+            except Exception:
+                pass
+            self.win.geometry(f"+{int(x)}+{int(y)}")
+            self.win.deiconify()
+            self.win.lift()
+        except Exception:
+            self._hide()
+
+    def _hide(self):
+        self._cancel()
+        try:
+            if self.win is not None and self.win.winfo_exists():
+                self.win.withdraw()
+        except Exception:
+            pass
 
 
 # ── Splash screen ────────────────────────────────────────────────────────────
@@ -506,16 +925,17 @@ class GameBeatsApp:
         self.root.title("GameBeats")
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
-        init_w = min(WIN_W, max(960, int(sw * 0.75)))
-        init_h = min(WIN_H, max(700, int(sh * 0.80)))
 
-        # Tk scales geometry sizes by the display DPI but screen dimensions are
-        # physical pixels, so centering with the raw numbers pushes the window
-        # off-screen on 150%+ displays. Center using the physical window size.
+        # Tk geometry uses logical pixels while winfo_screen* is physical. Fit
+        # the design window to the logical screen first, then center using the
+        # physical size. This keeps a 176% display from making the window taller
+        # than the monitor.
         try:
             ui_scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
         except Exception:
             ui_scale = 1.0
+        self._ui_scale = ui_scale
+        init_w, init_h = compute_initial_window_size(sw, sh, ui_scale)
         px = max(0, (sw - int(init_w * ui_scale)) // 2)
         py = max(0, (sh - int(init_h * ui_scale)) // 2)
         self.root.geometry(f"{init_w}x{init_h}+{px}+{py}")
@@ -553,10 +973,20 @@ class GameBeatsApp:
         self._autoplay_pending = False
         self._game_audio = None
         self.auto_mode   = tk.BooleanVar(value=True)
+        # Plain-Python mirrors for background threads. Tk variables must only
+        # be read on the Tk thread; the audio monitor used to crash at startup
+        # with "main thread is not in main loop" when it read auto_mode.
+        self._auto_mode_value = True
         self.seamless_music_var = tk.BooleanVar(
             value=bool(self.configure.get("seamless_music", False))
         )
+        self._seamless_music_value = bool(
+            self.configure.get("seamless_music", False)
+        )
         self.startup_var = tk.BooleanVar(value=False)
+        self.reduce_motion_var = tk.BooleanVar(
+            value=bool(self.configure.get("reduce_motion", False))
+        )
         self.desktop_mode_var = tk.BooleanVar(
             value=self.configure.get("playback_mode", "desktop") == "desktop")
         self.cid_var = tk.StringVar(value=self.configure.get("client_id", ""))
@@ -652,8 +1082,193 @@ class GameBeatsApp:
             self.root, corner="bottom-left"
         )
         self._build_ui()
+        self._install_shortcuts()
         # Make layout responsive to window resizes
         self.root.bind("<Configure>", lambda e: self._on_root_resize())
+
+    def _install_shortcuts(self):
+        """Global media/navigation keys, suppressed inside text fields."""
+        bindings = (
+            ("<space>", self._shortcut_space),
+            ("<Left>", self._shortcut_prev),
+            ("<Right>", self._shortcut_next),
+            ("<KeyPress-1>", lambda e: self._shortcut_nav(e, "main")),
+            ("<KeyPress-2>", lambda e: self._shortcut_nav(e, "games")),
+            ("<KeyPress-3>", lambda e: self._shortcut_nav(e, "playlists")),
+            ("<KeyPress-4>", lambda e: self._shortcut_nav(e, "settings")),
+            ("<Escape>", self._shortcut_escape),
+            ("<F1>", self._shortcut_help),
+        )
+        for sequence, callback in bindings:
+            try:
+                self.root.bind_all(sequence, callback, add="+")
+            except Exception:
+                pass
+
+    def _shortcut_typing(self):
+        try:
+            widget = self.root.focus_get()
+        except Exception:
+            return False
+        if widget is None:
+            return False
+        try:
+            cls = str(widget.winfo_class()).lower()
+        except Exception:
+            cls = ""
+        if cls in (
+            "entry", "text", "tentry", "spinbox", "tscale", "scale",
+            "combobox", "tcombobox",
+        ):
+            return True
+        try:
+            if isinstance(widget, (tk.Entry, tk.Text, tk.Spinbox, tk.Scale)):
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _shortcut_modified(self, event):
+        try:
+            return bool(int(event.state) & (0x4 | 0x8 | 0x20000))
+        except Exception:
+            return False
+
+    def _shortcut_space(self, event=None):
+        if event is not None and self._shortcut_modified(event):
+            return None
+        if self._shortcut_typing():
+            return None
+        try:
+            focused = self.root.focus_get()
+            if isinstance(focused, (ctk.CTkButton, tk.Button, PixelToggle)):
+                return None
+        except Exception:
+            pass
+        try:
+            self._play_pause_toggle()
+        except Exception:
+            pass
+        return "break"
+
+    def _shortcut_prev(self, event=None):
+        if event is not None and self._shortcut_modified(event):
+            return None
+        if self._shortcut_typing():
+            return None
+        try:
+            self._prev()
+        except Exception:
+            pass
+        return "break"
+
+    def _shortcut_next(self, event=None):
+        if event is not None and self._shortcut_modified(event):
+            return None
+        if self._shortcut_typing():
+            return None
+        try:
+            self._next()
+        except Exception:
+            pass
+        return "break"
+
+    def _shortcut_nav(self, event, page):
+        if event is not None and self._shortcut_modified(event):
+            return None
+        if self._shortcut_typing():
+            return None
+        try:
+            self._nav(page)
+        except Exception:
+            pass
+        return "break"
+
+    def _shortcut_escape(self, event=None):
+        if getattr(self, "_help_win", None) is not None:
+            self._close_shortcuts()
+            return "break"
+        try:
+            if getattr(self, "_toast", None) is not None:
+                self._toast.hide()
+        except Exception:
+            pass
+        if getattr(self, "_current_page", "main") != "main":
+            try:
+                self._nav("main")
+            except Exception:
+                pass
+            return "break"
+        return None
+
+    def _shortcut_help(self, event=None):
+        try:
+            if getattr(self, "_help_win", None) is not None:
+                self._help_win.lift()
+                return "break"
+        except Exception:
+            pass
+        try:
+            win = tk.Toplevel(self.root)
+            self._help_win = win
+            win.overrideredirect(True)
+            try:
+                win.attributes("-topmost", True)
+            except Exception:
+                pass
+            win.configure(bg=GOLD)
+            frame = tk.Frame(win, bg=NIGHT, padx=18, pady=14)
+            frame.pack(padx=2, pady=2)
+            tk.Label(
+                frame, text="KEYBOARD SHORTCUTS", bg=NIGHT, fg=GOLD,
+                font=T.pixel_font(11, "bold"), anchor="w",
+            ).pack(fill=tk.X, pady=(0, 8))
+            rows = (
+                ("SPACE", "Play / pause"),
+                ("\u2190 / \u2192", "Previous / next track"),
+                ("1 / 2 / 3 / 4", "Den / Games / Playlists / Settings"),
+                ("ESC", "Back / dismiss"),
+                ("F1", "This card"),
+            )
+            for key, label in rows:
+                row = tk.Frame(frame, bg=NIGHT)
+                row.pack(fill=tk.X, pady=1)
+                tk.Label(
+                    row, text=key, bg=NIGHT, fg=CREAM,
+                    font=T.pixel_font(9, "bold"), width=14, anchor="w",
+                ).pack(side=tk.LEFT)
+                tk.Label(
+                    row, text=label, bg=NIGHT, fg=TEXT_MUTED,
+                    font=T.retro_font(15), anchor="w",
+                ).pack(side=tk.LEFT)
+            tk.Label(
+                frame, text="Click anywhere to close", bg=NIGHT,
+                fg=TEXT_MUTED, font=T.retro_font(12),
+            ).pack(fill=tk.X, pady=(10, 0))
+            win.update_idletasks()
+            ww, wh = win.winfo_reqwidth(), win.winfo_reqheight()
+            rx = self.root.winfo_rootx() + (self.root.winfo_width() - ww) // 2
+            ry = self.root.winfo_rooty() + (self.root.winfo_height() - wh) // 2
+            sw = win.winfo_screenwidth()
+            sh = win.winfo_screenheight()
+            rx = max(4, min(rx, sw - ww - 4))
+            ry = max(4, min(ry, sh - wh - 4))
+            win.geometry(f"+{int(rx)}+{int(ry)}")
+            win.bind("<Button-1>", lambda _e: self._close_shortcuts())
+            win.bind("<Escape>", lambda _e: self._close_shortcuts())
+            win.focus_set()
+        except Exception:
+            self._help_win = None
+        return "break"
+
+    def _close_shortcuts(self):
+        win = getattr(self, "_help_win", None)
+        self._help_win = None
+        try:
+            if win is not None and win.winfo_exists():
+                win.destroy()
+        except Exception:
+            pass
 
     def _post_splash(self):
         if HAS_WINREG:
@@ -1136,13 +1751,28 @@ class GameBeatsApp:
     # ── UI Build ──────────────────────────────────────────────────────────────
 
     def _seamless_music_enabled(self) -> bool:
+        # Called from the audio-monitor thread, so never touch a Tk variable.
+        if hasattr(self, "_seamless_music_value"):
+            return bool(self._seamless_music_value)
         try:
-            return bool(self.seamless_music_var.get())
-        except Exception:
             return bool(self.configure.get("seamless_music", False))
+        except Exception:
+            return False
+
+    def _on_auto_toggle(self):
+        try:
+            enabled = bool(self.auto_mode.get())
+        except Exception:
+            enabled = not bool(getattr(self, "_auto_mode_value", True))
+        self._auto_mode_value = enabled
+        self._log("Auto-play " + ("on" if enabled else "off"))
 
     def _save_player_settings(self, *_):
-        enabled = self._seamless_music_enabled()
+        try:
+            enabled = bool(self.seamless_music_var.get())
+        except Exception:
+            enabled = bool(self.configure.get("seamless_music", False))
+        self._seamless_music_value = enabled
         self.configure["seamless_music"] = enabled
         self._save_config()
         if enabled and getattr(self, "_paused_by_game_flag", False):
@@ -1150,6 +1780,22 @@ class GameBeatsApp:
                 target=self._resume_spotify_after_game_quiet,
                 daemon=True,
             ).start()
+
+    def _save_motion_setting(self, *_):
+        try:
+            enabled = bool(self.reduce_motion_var.get())
+        except Exception:
+            enabled = False
+        self.configure["reduce_motion"] = enabled
+        self._save_config()
+        self._log("Reduce motion " + ("on" if enabled else "off"))
+        # Rebuild the pooled ambient layer so the room immediately respects
+        # the setting instead of waiting for the next resize.
+        try:
+            if getattr(self, "_current_page", "") == "main":
+                self._schedule_room_redraw(0)
+        except Exception:
+            pass
 
     def _build_ui(self):
         # ── Room assets ───────────────────────────────────────────────────────
@@ -1212,6 +1858,8 @@ class GameBeatsApp:
         self._is_maximized = False
         self._restore_geometry = ""
         self._brand_widgets = []
+        self._tooltips = PixelTooltip(self.root)
+        self._track_progress_base = None
 
         self._room_dim_photo = None
         if self._room_dim_pil is not None:
@@ -1302,6 +1950,14 @@ class GameBeatsApp:
             font=T.retro_font(17), command=self._minimize_window,
         )
         min_btn.pack(side=tk.RIGHT, padx=1)
+
+        for button, hint in (
+            (close_btn, "Close GameBeats"),
+            (max_btn, "Maximize / restore"),
+            (min_btn, "Minimize"),
+        ):
+            add_focus_ring(button, base_border=None, width=1)
+            self._tooltips.attach(button, hint)
 
         ctk.CTkFrame(header, fg_color=BORDER, width=1, height=18).pack(
             side=tk.RIGHT, padx=(0, 14), pady=15,
@@ -1442,6 +2098,25 @@ class GameBeatsApp:
         )
         blocked_btn.pack(side=tk.RIGHT, padx=2, pady=14)
         self._footer_tools["blocked"] = blocked_btn
+
+        nav_hints = {
+            "main": "The Den  [1]",
+            "games": "Game Shelf  [2]",
+            "playlists": "Record Crate  [3]",
+            "settings": "Control Panel  [4]",
+        }
+        for page, button in self._footer_buttons.items():
+            add_focus_ring(button, base_border=None, width=1)
+            self._tooltips.attach(button, nav_hints.get(page, page.title()))
+        for key, hint in (
+            ("overlay", "Open the desktop puppy controller"),
+            ("faq", "Field notes and help"),
+            ("blocked", "Manage blocked playlists"),
+        ):
+            button = self._footer_tools.get(key)
+            if button is not None:
+                add_focus_ring(button, base_border=None, width=1)
+                self._tooltips.attach(button, hint)
 
         # ── Build pages + wiring ─────────────────────────────────────────────
         self._current_page = "main"
@@ -1756,6 +2431,9 @@ class GameBeatsApp:
         mp.grid_rowconfigure(0, weight=1)
         mp.grid_columnconfigure(0, weight=1)
         self._room_canvas.grid(row=0, column=0, sticky="nsew")
+        # Reused in-room notification for track changes, playlist switches,
+        # shortcuts, and recoverable errors. It lives above the room canvas.
+        self._toast = PixelToast(mp)
         self._room_canvas.bind("<Configure>", self._on_room_canvas_configure)
         self._room_canvas.bind("<Button-1>", self._on_room_canvas_click)
         self._room_canvas.bind("<Motion>", self._on_room_canvas_motion)
@@ -1785,6 +2463,8 @@ class GameBeatsApp:
             border_width=3, border_color=NIGHT,
         )
         self._deck.pack(fill=tk.BOTH, expand=True)
+        self._deck.grid_columnconfigure(0, weight=1)
+        self._deck.grid_rowconfigure(1, weight=1)
         # Crisp 3D bevel: lit top edge, deep bottom edge.
         try:
             tk.Frame(self._deck, bg="#8E5560", height=2).place(
@@ -1797,8 +2477,8 @@ class GameBeatsApp:
             pass
 
         top = ctk.CTkFrame(self._deck, fg_color=DECK_TOP, height=25, corner_radius=0)
-        top.pack(fill=tk.X)
-        top.pack_propagate(False)
+        top.grid(row=0, column=0, sticky="ew")
+        top.grid_propagate(False)
         ctk.CTkLabel(
             top, text="GB\u201401 / AUTO-SOUND SYSTEM", fg_color="transparent",
             text_color=GOLD, font=T.pixel_font(9, "bold"),
@@ -1812,7 +2492,7 @@ class GameBeatsApp:
         self.deck_led.bind("<Button-1>", lambda e: self._nav("settings"))
 
         body = ctk.CTkFrame(self._deck, fg_color=DECK, corner_radius=0)
-        body.pack(fill=tk.BOTH, expand=True, padx=9, pady=(7, 4))
+        body.grid(row=1, column=0, sticky="nsew", padx=9, pady=(7, 4))
         body.grid_columnconfigure(0, weight=0, minsize=230)
         body.grid_columnconfigure(1, weight=1)
         body.grid_rowconfigure(0, weight=1)
@@ -1891,6 +2571,14 @@ class GameBeatsApp:
             border_width=2, border_color=WOOD,
         )
         disp.grid(row=0, column=1, sticky="nsew")
+        # Inset display bevel: a lit upper lip and a dark lower lip.
+        try:
+            tk.Frame(disp, bg="#7A4350", height=1).place(x=2, y=2, relwidth=0.99)
+            tk.Frame(disp, bg=SURFACE, height=1).place(
+                x=2, rely=1.0, y=-3, relwidth=0.99,
+            )
+        except Exception:
+            pass
 
         inner = ctk.CTkFrame(disp, fg_color=NIGHT, corner_radius=0)
         inner.pack(fill=tk.BOTH, expand=True, padx=10, pady=7)
@@ -1922,6 +2610,25 @@ class GameBeatsApp:
             anchor="w", justify=tk.LEFT,
         )
         self.deck_artist_lbl.pack(fill=tk.X, pady=(0, 1))
+
+        # Segmented tape-counter progress rail. The items are pooled; only
+        # their fills change as the master clock advances.
+        progress_row = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        progress_row.pack(fill=tk.X, pady=(3, 1))
+        self.elapsed_lbl = ctk.CTkLabel(
+            progress_row, text="0:00", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(8), width=32,
+        )
+        self.elapsed_lbl.pack(side=tk.LEFT)
+        self.progress_bar = PixelProgress(
+            progress_row, segments=36, height=12, bg=NIGHT,
+        )
+        self.progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=6)
+        self.duration_lbl = ctk.CTkLabel(
+            progress_row, text="0:00", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(8), width=32,
+        )
+        self.duration_lbl.pack(side=tk.LEFT)
 
         # Hidden compatibility labels used by _update_np / _load_art.
         self.artist_lbl = ctk.CTkLabel(inner, text="", fg_color="transparent")
@@ -1969,8 +2676,9 @@ class GameBeatsApp:
 
         # ── Deck bottom ─────────────────────────────────────────────────────
         bottom = ctk.CTkFrame(self._deck, fg_color=DECK, height=34, corner_radius=0)
-        bottom.pack(fill=tk.X, side=tk.BOTTOM, padx=9, pady=(0, 7))
-        bottom.pack_propagate(False)
+        bottom.grid(row=2, column=0, sticky="ew", padx=9, pady=(0, 7))
+        bottom.grid_propagate(False)
+        self._deck_bottom = bottom
 
         auto = ctk.CTkFrame(bottom, fg_color="transparent", corner_radius=0)
         auto.pack(side=tk.LEFT)
@@ -1978,15 +2686,11 @@ class GameBeatsApp:
             auto, text="AUTO", fg_color="transparent",
             text_color=TEXT_MUTED, font=T.pixel_font(8),
         ).pack(side=tk.LEFT, padx=(0, 4))
-        ctk.CTkSwitch(
-            auto, variable=self.auto_mode, text="", width=34, height=17,
-            fg_color=SURFACE4, progress_color=MINT,
-            button_color=CREAM, button_hover_color=GOLD,
-            border_width=0, corner_radius=9,
-            command=lambda: self._log(
-                "Auto-play " + ("on" if self.auto_mode.get() else "off")
-            ),
-        ).pack(side=tk.LEFT)
+        self._auto_toggle = PixelToggle(
+            auto, variable=self.auto_mode, bg=DECK, width=44, height=20,
+            command=self._on_auto_toggle,
+        )
+        self._auto_toggle.pack(side=tk.LEFT)
 
         seamless = ctk.CTkFrame(bottom, fg_color="transparent", corner_radius=0)
         seamless.pack(side=tk.LEFT, padx=(14, 0))
@@ -1994,28 +2698,39 @@ class GameBeatsApp:
             seamless, text="KEEP MUSIC", fg_color="transparent",
             text_color=TEXT_MUTED, font=T.pixel_font(8),
         ).pack(side=tk.LEFT, padx=(0, 4))
-        ctk.CTkSwitch(
+        self._keep_music_toggle = PixelToggle(
             seamless, variable=self.seamless_music_var,
-            command=self._save_player_settings, text="", width=34, height=17,
-            fg_color=SURFACE4, progress_color=MINT,
-            button_color=CREAM, button_hover_color=GOLD,
-            border_width=0, corner_radius=9,
-        ).pack(side=tk.LEFT)
+            command=self._save_player_settings, bg=DECK, width=44, height=20,
+        )
+        self._keep_music_toggle.pack(side=tk.LEFT)
 
         self.block_pl_btn = T.pixel_button(
             bottom, text="\u2298  BLOCK", command=self._block_current_playlist,
             width=82, height=27,
         )
         self.block_pl_btn.pack(side=tk.RIGHT, padx=(5, 0))
+        add_focus_ring(self.block_pl_btn, base_border=None, width=2)
 
-        T.pixel_button(
+        self.try_another_btn = T.pixel_button(
             bottom, text="\u21ba  TRY ANOTHER", command=self._try_another_playlist,
             width=128, height=27,
-        ).pack(side=tk.RIGHT)
+        )
+        self.try_another_btn.pack(side=tk.RIGHT)
+        add_focus_ring(self.try_another_btn, base_border=None, width=2)
 
-        # Keep the bottom rail reserved before the flexible body claims space.
-        body.pack_forget()
-        body.pack(fill=tk.BOTH, expand=True, padx=9, pady=(7, 4))
+        # Pixel tooltips: one reusable window, attached to the controls that
+        # benefit from a keyboard hint.
+        for widget, text in (
+            (self.prev_btn, "Previous track  [\u2190]"),
+            (self.play_btn, "Play / pause  [Space]"),
+            (self.next_btn, "Next track  [\u2192]"),
+            (self.progress_bar, "Track progress"),
+            (self.deck_led, "Spotify output \u00b7 open Control Panel"),
+            (self.deck_status_lbl, "Playback state"),
+            (self.block_pl_btn, "Block this playlist"),
+            (self.try_another_btn, "Pick another playlist"),
+        ):
+            self._tooltips.attach(widget, text)
 
         self.root.after(80, self._redraw_room)
         # The room canvas fills the page. Force the player deck above it and
@@ -2078,6 +2793,15 @@ class GameBeatsApp:
             return scaled
         except Exception:
             return None
+
+    @staticmethod
+    def _puppy_scale_for_width(width):
+        """Integer sprite scale, kept close to the old 15% canvas width."""
+        try:
+            scale = int(round(float(width) * 0.15 / 64.0))
+        except Exception:
+            scale = 3
+        return max(3, scale)
 
     def _draw_room_puppy(self, canvas, sprite_name, geometry):
         px, py, pw, ph = geometry
@@ -2557,6 +3281,83 @@ class GameBeatsApp:
             )
         return str(game or "GAME")
 
+    def _retry_room_art(self, _event=None):
+        self._room_pil = _load_design_room("den_room.png")
+        self._room_dim_pil = _load_design_room("den_room_dim.png")
+        self._room_base_cache = None
+        self._room_base_key = None
+        if self._room_pil is None:
+            try:
+                self._toast.show(
+                    "ROOM ART",
+                    "Still missing. Check assets/room/den_room.png.",
+                    4200,
+                )
+            except Exception:
+                pass
+        self._schedule_room_redraw(0)
+
+    def _draw_room_error(self, canvas, w, h):
+        """Explicit, recoverable empty state instead of a blank room."""
+        try:
+            canvas.delete("all")
+            canvas.configure(bg=BG)
+            panel_w = min(max(340, int(w * 0.46)), 620)
+            panel_h = 188
+            x0 = (w - panel_w) // 2
+            y0 = max(20, (h - panel_h) // 2)
+            x1, y1 = x0 + panel_w, y0 + panel_h
+            canvas.create_rectangle(
+                x0, y0, x1, y1, fill=NIGHT, outline=WOOD, width=2,
+                tags=("room_error",),
+            )
+            canvas.create_rectangle(
+                x0 + 8, y0 + 8, x1 - 8, y0 + 10, fill="#7A4350",
+                outline="", tags=("room_error",),
+            )
+            canvas.create_text(
+                w // 2, y0 + 46, text="ROOM SIGNAL LOST",
+                font=T.pixel_font(15, "bold"), fill=GOLD,
+                tags=("room_error",),
+            )
+            canvas.create_text(
+                w // 2, y0 + 82,
+                text="The den artwork could not be loaded.",
+                font=T.retro_font(16), fill=TEXT,
+                tags=("room_error",),
+            )
+            canvas.create_text(
+                w // 2, y0 + 106,
+                text="The player deck still works. Retry the room plate?",
+                font=T.retro_font(14), fill=TEXT_MUTED,
+                tags=("room_error",),
+            )
+            rx0, ry0 = w // 2 - 62, y0 + 132
+            rx1, ry1 = w // 2 + 62, y0 + 164
+            canvas.create_rectangle(
+                rx0, ry0, rx1, ry1, fill=ACCENT, outline=GOLD, width=1,
+                tags=("room_retry",),
+            )
+            canvas.create_text(
+                w // 2, (ry0 + ry1) // 2, text="RETRY",
+                font=T.pixel_font(10, "bold"), fill=BG,
+                tags=("room_retry",),
+            )
+            canvas.tag_bind(
+                "room_retry", "<Button-1>",
+                lambda _e: self._retry_room_art(),
+            )
+            canvas.tag_bind(
+                "room_retry", "<Enter>",
+                lambda _e: canvas.configure(cursor="hand2"),
+            )
+            canvas.tag_bind(
+                "room_retry", "<Leave>",
+                lambda _e: canvas.configure(cursor=""),
+            )
+        except Exception:
+            pass
+
     def _redraw_room(self):
         canvas = getattr(self, "_room_canvas", None)
         self._raise_deck()
@@ -2575,15 +3376,7 @@ class GameBeatsApp:
             return
 
         if self._room_pil is None or not HAS_PIL:
-            try:
-                canvas.delete("all")
-                canvas.configure(bg=BG)
-                canvas.create_text(
-                    w // 2, h // 2, text="GAMEBEATS / THE DEN",
-                    font=(F_PIXEL, -18, "bold"), fill=CREAM,
-                )
-            except Exception:
-                pass
+            self._draw_room_error(canvas, w, h)
             return
 
         try:
@@ -2597,18 +3390,20 @@ class GameBeatsApp:
                 self._room_base_key = key
             base = self._room_base_cache.copy()
         except Exception:
+            self._draw_room_error(canvas, w, h)
             return
 
         now = time.time()
         sprite_name = self._puppy_frame_name(now)
 
         # The mascot is the big in-room puppy, centred over the player deck.
-        # 64x72 authored pixels at 3x keeps the character on the same pixel
-        # grid as the 400x250 room plate. The feet baseline is fixed.
-        pw = max(96, int(round(w * 0.15)))
-        ph = int(round(pw * 72 / 64))
+        # Snap the 64x72 authored sprite to an integer multiple so every
+        # authored pixel becomes a clean NxN square. The feet baseline is fixed.
+        puppy_scale = self._puppy_scale_for_width(w)
+        pw = 64 * puppy_scale
+        ph = 72 * puppy_scale
         px = (w - pw) // 2
-        paw_margin = int(round(ph * 2.0 / 72.0))
+        paw_margin = 2 * puppy_scale
         perch_y = h - ph + paw_margin - 1
         py = max(0, perch_y)
         px = max(0, min(px, w - pw - 4))
@@ -2953,6 +3748,11 @@ class GameBeatsApp:
 
         try:
             self._update_cart_cassette(now)
+        except Exception:
+            pass
+
+        try:
+            self._update_deck_progress(now)
         except Exception:
             pass
 
@@ -3350,15 +4150,34 @@ class GameBeatsApp:
                 startup_row, text="Start GameBeats with Windows", fg_color="transparent",
                 text_color=TEXT, font=T.retro_font(17),
             ).pack(side=tk.LEFT)
-            ctk.CTkSwitch(
-                startup_row, variable=self.startup_var, text="",
-                command=self._toggle_startup, width=38, height=19,
-                fg_color=SURFACE4, progress_color=MINT,
-                button_color=CREAM, button_hover_color=GOLD,
-                border_width=0, corner_radius=10,
+            PixelToggle(
+                startup_row, variable=self.startup_var, bg=SURFACE,
+                command=self._toggle_startup, width=44, height=20,
             ).pack(side=tk.RIGHT, padx=2)
 
         # ── Puppy Overlay ─────────────────────────────────────────────────────
+        T.rule(ap, color=BORDER, pady=(10, 8))
+        motion_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
+        motion_row.pack(fill=tk.X)
+        motion_copy = ctk.CTkFrame(motion_row, fg_color="transparent", corner_radius=0)
+        motion_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ctk.CTkLabel(
+            motion_copy, text="Reduce motion", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(17), anchor="w",
+        ).pack(fill=tk.X)
+        ctk.CTkLabel(
+            motion_copy,
+            text="Freeze dust, rain, glow pulses, and the room's idle movement. "
+                 "The player and progress rail keep working.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(15), anchor="w", justify=tk.LEFT, wraplength=620,
+        ).pack(fill=tk.X, pady=(2, 0))
+        self._motion_toggle = PixelToggle(
+            motion_row, variable=self.reduce_motion_var, bg=SURFACE,
+            command=self._save_motion_setting, width=44, height=20,
+        )
+        self._motion_toggle.pack(side=tk.RIGHT, padx=(14, 2))
+
         T.section_header(content, "02 / PUPPY OVERLAY", pady=(14, 6))
         ov = self._card(content)
 
@@ -3416,12 +4235,10 @@ class GameBeatsApp:
             font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=600,
         ).pack(fill=tk.X, pady=(3, 0))
 
-        ctk.CTkSwitch(
+        PixelToggle(
             km_row, variable=self.seamless_music_var,
-            command=self._save_player_settings, text="",
-            fg_color=SURFACE4, progress_color=MINT,
-            button_color=CREAM, button_hover_color=GOLD,
-            width=38, height=19, border_width=0, corner_radius=10,
+            command=self._save_player_settings, bg=SURFACE,
+            width=44, height=20,
         ).pack(side=tk.RIGHT, padx=(14, 2))
 
         T.info_banner(
@@ -4220,7 +5037,7 @@ class GameBeatsApp:
         )
         return bool(
             self.spotify
-            and self.auto_mode.get()
+            and getattr(self, "_auto_mode_value", True)
             and not self._seamless_music_enabled()
             and music_active
             and not getattr(self, "_manual_paused", False)
@@ -5761,13 +6578,17 @@ class GameBeatsApp:
     def _update_np(self, t):
         self._last_track_info = t
         self._last_track_info_ts = time.time()
+        track_changed = False
         try:
             key = (
                 str(t.get("uri") or ""),
                 str(t.get("name") or "").strip(),
                 str(t.get("artist") or "").strip(),
             )
-            if self._last_np_key is not None and key != self._last_np_key:
+            track_changed = (
+                self._last_np_key is not None and key != self._last_np_key
+            )
+            if track_changed:
                 # In-place track-change reaction: head turn + ear perk.
                 self._puppy_reaction_until = time.time() + 1.15
             self._last_np_key = key
@@ -5775,12 +6596,14 @@ class GameBeatsApp:
             pass
         if not hasattr(self, "track_lbl"):
             return
+        playlist_changed = False
         playlist_uri = t.get("playlist_uri") or t.get("context_uri")
         if (
             playlist_uri
             and str(playlist_uri).startswith("spotify:playlist:")
             and playlist_uri != self._current_playlist_uri
         ):
+            playlist_changed = True
             self._current_playlist_uri = playlist_uri
             # New playlist detected from the player itself: wait for it to
             # produce audio before allowing an end-of-playlist prompt.
@@ -5861,6 +6684,103 @@ class GameBeatsApp:
         if HAS_PIL and t.get("album_art"):
             threading.Thread(target=self._load_art, args=(t["album_art"],), daemon=True).start()
 
+        # The poller is the source of truth for the progress rail; the master
+        # clock extrapolates between polls so the tape keeps moving smoothly.
+        try:
+            progress_ms = float(t.get("progress_ms") or 0.0)
+            duration_ms = float(t.get("duration_ms") or 0.0)
+        except (TypeError, ValueError):
+            progress_ms, duration_ms = 0.0, 0.0
+        if duration_ms > 0:
+            self._track_progress_base = (
+                progress_ms / 1000.0,
+                duration_ms / 1000.0,
+                time.time(),
+                bool(effective_is_playing),
+            )
+        else:
+            self._track_progress_base = None
+        self._update_deck_progress(time.time())
+
+        if (
+            getattr(self, "_current_page", "") == "main"
+            and getattr(self, "_toast", None) is not None
+        ):
+            raw_title = str(t.get("name") or "").strip()
+            silent = (
+                not raw_title
+                or str(t.get("uri") or "") == getattr(self, "SILENT_TRACK_URI", "")
+                or raw_title.lower() in ("spotify", "gdi+ window", "spotify.exe")
+            )
+            if playlist_changed and playlist_title:
+                self._toast.show("PLAYLIST", playlist_title, 2800)
+            elif track_changed and not silent:
+                self._toast.show(
+                    "NOW PLAYING", f"{raw_title} \u2014 {artist}", 2800,
+                )
+
+    def _update_deck_progress(self, now=None):
+        """Advance the segmented rail from the last poll snapshot."""
+        bar = getattr(self, "progress_bar", None)
+        if bar is None:
+            return
+        now = time.time() if now is None else now
+        base = getattr(self, "_track_progress_base", None)
+        if not base:
+            has_track = False
+            try:
+                label_text = str(self.track_lbl.cget("text") or "").strip().lower()
+                has_track = label_text not in (
+                    "", "nothing playing", "spotify", "gdi+ window", "spotify.exe",
+                )
+            except Exception:
+                has_track = False
+            playing = bool(
+                has_track
+                and (
+                    getattr(self, "_is_playing", False)
+                    or getattr(self, "_spotify_audio_active", False)
+                )
+            )
+            try:
+                bar.set_status("LIVE" if playing else "STANDBY", active=playing)
+            except Exception:
+                bar.set_progress(0.0)
+            key = ("status", playing)
+            if key != getattr(self, "_progress_label_key", None):
+                for label in (
+                    getattr(self, "elapsed_lbl", None),
+                    getattr(self, "duration_lbl", None),
+                ):
+                    if label is not None:
+                        try:
+                            label.configure(text="")
+                        except Exception:
+                            pass
+                self._progress_label_key = key
+            return
+        try:
+            position, duration, base_ts, playing = base
+            position = float(position)
+            duration = float(duration)
+            if duration <= 0:
+                raise ValueError
+            if playing:
+                position += max(0.0, now - float(base_ts))
+            position = max(0.0, min(duration, position))
+        except Exception:
+            bar.set_progress(0.0)
+            return
+        bar.set_progress(position / duration)
+        key = (int(position), int(duration))
+        if key != getattr(self, "_progress_label_key", None):
+            try:
+                self.elapsed_lbl.configure(text=format_clock(position))
+                self.duration_lbl.configure(text=format_clock(duration))
+            except Exception:
+                pass
+            self._progress_label_key = key
+
     def _should_handle_auto_stop(self):
         return (
             self._spotify_started_by_us
@@ -5937,6 +6857,8 @@ class GameBeatsApp:
                 self._set_play_btn_icon(True)
             return
         self._is_playing = False
+        self._track_progress_base = None
+        self._update_deck_progress()
         if not getattr(self, "_audio_monitor_running", False):
             self._set_play_btn_icon(False)
 

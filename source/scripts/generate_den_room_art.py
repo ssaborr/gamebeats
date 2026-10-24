@@ -307,12 +307,12 @@ def _build_room() -> Canvas:
     c.speckle(0, 186, 400, 250, ("#1B0D1F", "#4A2840", "#32182F"), 150, 7)
 
     # ── Three light sources: window, CRT, lamp ────────────────────────────────
-    c.light_pool(200, 96, 98, 70, GOLD_DARK, 0.28, 0)
-    c.light_pool(204, 120, 84, 48, ORANGE_DARK, 0.16, 2)
-    c.light_pool(68, 118, 52, 50, MINT_MID, 0.37, 1)
-    c.light_pool(276, 124, 38, 88, GOLD_MID, 0.44, 2)
-    c.light_pool(276, 190, 34, 20, GOLD_LIGHT, 0.28, 3)
-    c.light_pool(276, 72, 24, 22, GOLD_LIGHT, 0.20, 1)
+    c.light_pool(200, 96, 98, 70, ORANGE_DARK, 0.22, 0)
+    c.light_pool(204, 120, 84, 48, GOLD_DARK, 0.10, 2)
+    c.light_pool(68, 118, 52, 50, MINT_MID, 0.32, 1)
+    c.light_pool(276, 124, 38, 88, GOLD_MID, 0.34, 2)
+    c.light_pool(276, 190, 34, 20, GOLD_MID, 0.22, 3)
+    c.light_pool(276, 72, 24, 22, GOLD_MID, 0.16, 1)
 
     # ── City window ──────────────────────────────────────────────────────────
     c.contact_shadow(122, 130, 277, 136, "half")
@@ -793,9 +793,9 @@ def _build_room() -> Canvas:
     for lx, ly in ((130, 60), (134, 58), (138, 62), (257, 60), (261, 63)):
         _leaf(c, lx, ly, 1 if lx < 200 else -1)
     # Warm window spill on the wall and the top of the nest.
-    c.bayer_rect((125, 128, 278, 186), GOLD_DARK, 0.055, 2)
-    c.bayer_rect((132, 128, 272, 160), ORANGE_DARK, 0.04, 1)
-    c.bayer_rect((306, 162, 384, 188), GOLD_DARK, 0.035, 2)
+    c.bayer_rect((125, 128, 278, 186), GOLD_DARK, 0.035, 2)
+    c.bayer_rect((132, 128, 272, 160), ORANGE_DARK, 0.03, 1)
+    c.bayer_rect((306, 162, 384, 188), GOLD_DARK, 0.03, 2)
     # A low LED strip under the shelf and a warm top rim on the panel.
     for x in range(292, 376, 8):
         c.px(x, 94, GOLD_LIGHT)
