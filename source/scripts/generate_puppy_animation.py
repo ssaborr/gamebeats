@@ -267,6 +267,40 @@ def _downsample(master: Image.Image) -> Image.Image:
     return rgb
 
 
+def _add_headphones(img: Image.Image) -> Image.Image:
+    """Add the room mascot's signature hard-edged headphones.
+
+    The overlay is applied after downsampling so the cups stay aligned to the
+    final 64x72 grid. It uses only the existing 19-colour puppy ramp.
+    """
+    d = ImageDraw.Draw(img)
+    # A low band that leaves the top tuft visible.
+    band = (
+        (16, 14), (17, 12), (18, 11), (19, 10), (21, 9), (23, 8), (25, 8),
+        (39, 8), (41, 8), (43, 9), (45, 10), (46, 11), (47, 12), (48, 14),
+    )
+    for x, y in band:
+        d.rectangle((x, y, x + 1, y + 1), fill=MIC_DARK)
+    for x, y in band:
+        d.point((x, y), fill=MIC_MID)
+    # Side arms connecting the band to the cups.
+    d.rectangle((13, 14, 15, 23), fill=MIC_DARK)
+    d.rectangle((14, 15, 14, 22), fill=MIC_MID)
+    d.rectangle((49, 14, 51, 23), fill=MIC_DARK)
+    d.rectangle((50, 15, 50, 22), fill=MIC_MID)
+    d.point((13, 15), fill=GOLD)
+    d.point((50, 15), fill=GOLD)
+    # Over-ear cups with a metal ring and a gold hinge.
+    for x0 in (8, 48):
+        d.rectangle((x0, 22, x0 + 8, 34), fill=MIC_DARK)
+        d.rectangle((x0 + 1, 23, x0 + 7, 33), fill=MIC_MID)
+        d.rectangle((x0 + 2, 24, x0 + 6, 32), fill=MIC_LIGHT)
+        d.rectangle((x0 + 3, 26, x0 + 5, 30), fill=MIC_MID)
+        d.point((x0 + 4, 27), fill=GOLD)
+        d.point((x0 + 4, 28), fill=GOLD)
+    return img
+
+
 def build_frames() -> dict[str, Image.Image]:
     idle = _load_base("idle")
     sing = _load_base("sing")
@@ -422,7 +456,10 @@ def build_contact_sheet(frames: dict[str, Image.Image]) -> None:
 
 def main() -> None:
     master_frames = build_frames()
-    frames = {name: _downsample(img) for name, img in master_frames.items()}
+    frames = {
+        name: _add_headphones(_downsample(img))
+        for name, img in master_frames.items()
+    }
     OUT.mkdir(parents=True, exist_ok=True)
     bottoms = {}
     for name, img in frames.items():

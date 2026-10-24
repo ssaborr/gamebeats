@@ -2252,14 +2252,14 @@ class GameBeatsApp:
             })
 
         rain = []
-        for i in range(10):
+        for i in range(9):
             pane = ROOM_WINDOW_PANES[i % len(ROOM_WINDOW_PANES)]
             pane_w = max(1, pane[2] - pane[0] - 1)
             pane_h = max(1, pane[3] - pane[1] - 3)
             bx = pane[0] + (i * 7) % pane_w
             by = pane[1] + (i * 11) % pane_h
             item = canvas.create_rectangle(
-                0, 0, 1, 1, fill=(ROSE, CREAM, MINT)[i % 3],
+                0, 0, 1, 1, fill=(GOLD, ROSE, CREAM)[i % 3],
                 outline="", tags=("ambient", "ambient_motion", "rain"),
             )
             rain.append({

@@ -222,6 +222,30 @@ class Canvas:
             self.bayer_rect((x0, y0, x1, y1), INK, 0.28)
 
 
+def _leaf(c: Canvas, x: int, y: int, flip: int = 1) -> None:
+    """A tiny hard-edged leaf, never anti-aliased or semi-transparent."""
+    x0 = min(x, x + 3 * flip)
+    x1 = max(x, x + 3 * flip)
+    c.rect((x0, y, x1, y + 1), MINT_MID)
+    c.px(x0 + (1 if flip > 0 else 2), y, MINT_LIGHT)
+    c.px(x1 - (1 if flip > 0 else 0), y + 1, MINT_DARK)
+
+
+def _vine(c: Canvas, x: int, y: int, length: int, drift: int, seed: int) -> None:
+    """A stepped ivy strand with sparse leaves; stays on the pixel grid."""
+    for i in range(max(1, length)):
+        xx = int(round(x + math.sin(i * 0.30 + seed) * drift))
+        yy = y + i
+        c.px(xx, yy, MINT_DARK)
+        if i % 3 == 0:
+            c.px(xx + 1, yy, MINT_MID)
+        if i % 6 == 2:
+            side = 1 if (i // 6) % 2 == 0 else -1
+            _leaf(c, xx + (3 if side > 0 else -4), yy, side)
+        if i % 11 == 5:
+            c.px(xx + 2, yy + 1, MINT_LIGHT)
+
+
 def _build_room() -> Canvas:
     c = Canvas()
     d = c.d
@@ -283,10 +307,12 @@ def _build_room() -> Canvas:
     c.speckle(0, 186, 400, 250, ("#1B0D1F", "#4A2840", "#32182F"), 150, 7)
 
     # ── Three light sources: window, CRT, lamp ────────────────────────────────
-    c.light_pool(196, 92, 92, 64, BLUE_MID, 0.62, 0)
+    c.light_pool(200, 96, 98, 70, GOLD_DARK, 0.28, 0)
+    c.light_pool(204, 120, 84, 48, ORANGE_DARK, 0.16, 2)
     c.light_pool(68, 118, 52, 50, MINT_MID, 0.37, 1)
-    c.light_pool(276, 124, 34, 82, GOLD_DARK, 0.42, 2)
-    c.light_pool(276, 190, 32, 18, GOLD_DARK, 0.35, 3)
+    c.light_pool(276, 124, 38, 88, GOLD_MID, 0.44, 2)
+    c.light_pool(276, 190, 34, 20, GOLD_LIGHT, 0.28, 3)
+    c.light_pool(276, 72, 24, 22, GOLD_LIGHT, 0.20, 1)
 
     # ── City window ──────────────────────────────────────────────────────────
     c.contact_shadow(122, 130, 277, 136, "half")
@@ -300,56 +326,70 @@ def _build_room() -> Canvas:
             c.px(fx + 1, 40, FAB_LIGHT)
         c.rect((x0 - 1, 91, x0 + 10, 95), GOLD_MID)
         c.line([(x0 - 1, 91), (x0 + 10, 91)], GOLD_LIGHT)
-    # sky
-    c.rect((132, 39, 265, 126), BLUE_DARK)
-    for y in range(40, 127, 8):
-        c.rect((132, y, 265, y + 7), BLUE_MID if y > 70 else BLUE_DARK)
-    c.bayer_rect((132, 88, 265, 126), BLUE_LIGHT, 0.22)
-    # moon + stars: a stepped crescent with a sparse dithered halo
-    moon = ((252, 47), (254, 46), (256, 47), (258, 49), (259, 51),
-            (259, 54), (258, 57), (256, 59), (253, 60), (250, 59),
-            (248, 57), (247, 54), (247, 51))
-    for mx, my in moon:
-        c.px(mx, my, CREAM_LIGHT)
-    c.rect((253, 48, 257, 51), CREAM_LIGHT)
-    c.rect((255, 52, 258, 55), CREAM_LIGHT)
-    c.rect((254, 56, 256, 58), CREAM_MID)
-    c.rect((251, 52, 254, 57), BLUE_DARK)
-    c.rect((250, 54, 253, 57), BLUE_MID)
-    c.px(249, 53, CREAM_LIGHT)
-    c.checker((242, 42, 266, 66), CREAM_LIGHT, 0.055)
-    c.px(243, 61, CREAM_MID)
-    c.px(262, 63, MINT_LIGHT)
-    c.px(238, 49, CREAM_MID)
-    stars = ((141, 50), (154, 60), (167, 46), (185, 55), (198, 45),
-             (212, 59), (226, 48), (238, 70), (174, 69), (149, 80),
-             (195, 79), (218, 84), (257, 82))
-    for sx, sy in stars:
-        col = MINT_LIGHT if (sx + sy) % 3 == 0 else CREAM_MID
-        c.px(sx, sy, col)
-        if (sx + sy) % 4 == 0:
-            c.px(sx - 1, sy, col)
-            c.px(sx + 1, sy, col)
-            c.px(sx, sy - 1, col)
-            c.px(sx, sy + 1, col)
+    # Sunset sky: hard bands plus Bayer transitions, a low sun, and warm
+    # cloud ribbons. This is the room's main light source.
+    c.rect((132, 39, 265, 126), PURPLE_DARK)
+    bands = (
+        (39, 54, PURPLE_DARK, PURPLE_MID, 0.16),
+        (54, 68, PURPLE_MID, MAGENTA, 0.22),
+        (68, 80, MAGENTA, ORANGE_MID, 0.24),
+        (80, 92, ORANGE_MID, ORANGE_LIGHT, 0.30),
+        (92, 104, ORANGE_LIGHT, GOLD_LIGHT, 0.32),
+        (104, 116, GOLD_MID, ORANGE_MID, 0.26),
+        (116, 126, ORANGE_DARK, PURPLE_DARK, 0.20),
+    )
+    for y0, y1, base, warm, density in bands:
+        c.rect((132, y0, 265, y1 - 1), base)
+        c.bayer_rect((132, y0, 265, y1), warm, density, y0)
+    # A low sun just above the skyline, with a stepped halo.
+    sun_cx, sun_cy, sun_r = 200, 92, 8
+    for y in range(sun_cy - sun_r - 5, sun_cy + sun_r + 6):
+        for x in range(sun_cx - sun_r - 7, sun_cx + sun_r + 8):
+            dx = (x - sun_cx) / float(sun_r)
+            dy = (y - sun_cy) / float(sun_r)
+            dist = dx * dx + dy * dy
+            if dist <= 1.0:
+                c.px(x, y, CREAM_LIGHT if dist < 0.55 else GOLD_GLOW)
+            elif dist <= 2.4 and BAYER[(y + 1) % 4][(x + 2) % 4] / 15.0 < 0.38:
+                c.px(x, y, GOLD_LIGHT if dist < 1.8 else ORANGE_LIGHT)
+    # Cloud ribbons, broken so the sun reads through them.
+    for cy, col, hi in ((66, MAGENTA, ROSE_MID), (71, FAB_MID, ORANGE_MID),
+                        (77, MAGENTA, ORANGE_LIGHT), (101, ORANGE_MID, GOLD_LIGHT)):
+        start = 134 + ((cy * 7) % 12)
+        for x in range(start, 264, 3):
+            line_len = 2 + (x % 5)
+            if (x + cy) % 11 < 7:
+                c.line([(x, cy), (x + line_len, cy)], col)
+                if (x + cy) % 5 == 0:
+                    c.px(x + line_len, cy - 1, hi)
+    # A few birds or heat sparks, kept sparse.
+    for bx, by in ((158, 67), (166, 65), (236, 70)):
+        c.px(bx, by, INK)
+        c.px(bx + 1, by - 1, INK)
+        c.px(bx + 2, by, INK)
+    c.px(141, 48, CREAM_MID)
+    c.px(198, 51, GOLD_LIGHT)
     # layered skyline
-    far = ((134, 94, 146, 126), (148, 88, 158, 126), (160, 98, 174, 126),
-           (176, 84, 188, 126), (190, 92, 200, 126), (202, 100, 216, 126),
-           (218, 86, 232, 126), (234, 94, 248, 126), (250, 90, 264, 126))
-    mid = ((134, 107, 149, 126), (152, 101, 166, 126), (170, 112, 184, 126),
-           (188, 104, 202, 126), (206, 110, 222, 126), (226, 101, 242, 126),
-           (246, 107, 264, 126))
-    near = ((132, 116, 150, 126), (154, 112, 174, 126), (178, 118, 196, 126),
-            (200, 111, 220, 126), (224, 117, 242, 126), (246, 113, 264, 126))
+    far = ((134, 102, 146, 126), (148, 96, 158, 126), (160, 106, 174, 126),
+           (176, 92, 188, 126), (190, 100, 200, 126), (202, 108, 216, 126),
+           (218, 94, 232, 126), (234, 102, 248, 126), (250, 98, 264, 126))
+    mid = ((134, 111, 149, 126), (152, 105, 166, 126), (170, 116, 184, 126),
+           (188, 108, 202, 126), (206, 114, 222, 126), (226, 105, 242, 126),
+           (246, 111, 264, 126))
+    near = ((132, 118, 150, 126), (154, 114, 174, 126), (178, 120, 196, 126),
+            (200, 113, 220, 126), (224, 119, 242, 126), (246, 115, 264, 126))
     for x0, y0, x1, y1 in far:
-        c.rect((x0, y0, x1, y1), BLUE_MID)
-        c.line([(x0, y0), (x1, y0)], BLUE_LIGHT)
-    for x0, y0, x1, y1 in mid:
         c.rect((x0, y0, x1, y1), PURPLE_MID)
-        c.line([(x0, y0), (x1, y0)], PURPLE_LIGHT)
+        c.line([(x0, y0), (x1, y0)], MAGENTA)
+        c.px(x0, y0 + 2, ROSE_MID)
+    for x0, y0, x1, y1 in mid:
+        c.rect((x0, y0, x1, y1), FAB_DARK)
+        c.line([(x0, y0), (x1, y0)], ORANGE_MID)
+        c.px(x0, y0 + 2, MAGENTA)
     for x0, y0, x1, y1 in near:
-        c.rect((x0, y0, x1, y1), PURPLE_DARK)
-        c.line([(x0, y0), (x1, y0)], PURPLE_MID)
+        c.rect((x0, y0, x1, y1), INK)
+        c.line([(x0, y0), (x1, y0)], PURPLE_DARK)
+        c.px(x0, y0 + 2, PURPLE_MID)
     rng = random.Random(915)
     for x0, y0, x1, y1 in far + mid + near:
         for yy in range(y0 + 3, min(y1, 124), 7):
@@ -357,17 +397,18 @@ def _build_room() -> Canvas:
                 if rng.random() < 0.32:
                     c.px(xx, yy, GOLD_LIGHT if rng.random() < 0.6 else MINT_LIGHT)
     # antenna / water tower
-    c.line([(186, 84), (186, 76)], INK)
-    c.line([(183, 76), (189, 76)], INK)
-    c.rect((158, 78, 164, 88), PURPLE_MID)
-    c.rect((156, 75, 166, 79), PURPLE_LIGHT)
+    c.line([(186, 92), (186, 84)], INK)
+    c.line([(183, 84), (189, 84)], INK)
+    c.rect((158, 86, 164, 96), PURPLE_MID)
+    c.rect((156, 83, 166, 87), PURPLE_LIGHT)
     # rain streaks
     rain = random.Random(77)
-    for _ in range(44):
+    for _ in range(34):
         x = rain.randrange(135, 264)
         y = rain.randrange(42, 123)
         length = rain.choice((2, 3, 4))
-        col = BLUE_LIGHT if rain.random() < 0.55 else MINT_MID
+        roll = rain.random()
+        col = GOLD_LIGHT if roll < 0.45 else (ROSE_LIGHT if roll < 0.82 else MINT_MID)
         for i in range(length):
             c.px(x - i // 2, y + i, col)
     # window mullions
@@ -375,12 +416,12 @@ def _build_room() -> Canvas:
         c.rect((x, 38, x + 2, 130), WOOD_MID)
         c.line([(x, 38), (x, 130)], WOOD_LIGHT)
         c.line([(x + 2, 38), (x + 2, 130)], WOOD_DEEP)
-    c.rect((132, 83, 265, 85), WOOD_MID)
-    c.line([(132, 83), (265, 83)], WOOD_LIGHT)
+    c.rect((132, 80, 265, 82), WOOD_MID)
+    c.line([(132, 80), (265, 80)], WOOD_LIGHT)
     # glass glints
-    c.line([(137, 76), (147, 66)], MINT_GLOW)
-    c.line([(142, 76), (149, 69)], BLUE_LIGHT)
-    c.line([(246, 118), (258, 106)], BLUE_LIGHT)
+    c.line([(137, 76), (147, 66)], GOLD_GLOW)
+    c.line([(142, 76), (149, 69)], CREAM_MID)
+    c.line([(246, 118), (258, 106)], ROSE_LIGHT)
     # sill
     c.bevel((119, 127, 280, 137), WOOD_MID, WOOD_LIGHT, WOOD_DEEP, INK, 1, 1)
     c.line([(124, 131), (275, 131)], GOLD_DARK)
@@ -652,6 +693,41 @@ def _build_room() -> Canvas:
         c.px(155 + i * 4, 181, CREAM_MID)
 
     # ── Lived-in props (small, strong silhouettes, contact shadows) ──────────
+    # Front rug edge. The live room crop ends near y=188, so this band is the
+    # part of the nest that actually sits under the mascot on screen.
+    c.bevel((154, 176, 256, 188), FAB_DARK, RAMPS["fabric_hi"][2], PURPLE_DARK, INK, 1, 1)
+    c.rect((158, 179, 252, 186), FAB_MID)
+    for x in range(162, 252, 10):
+        c.rect((x, 181, x + 4, 182), GOLD_DARK)
+        c.rect((x + 3, 184, x + 7, 185), MINT_DARK)
+    for x in range(154, 257, 3):
+        c.px(x, 187, ROSE_DARK)
+    # A throw over the right arm of the nest catches the lamp light.
+    c.rect((230, 168, 243, 186), ROSE_DARK)
+    c.line([(231, 171), (242, 171)], GOLD_MID)
+    c.line([(232, 178), (241, 178)], ROSE_LIGHT)
+    c.line([(233, 184), (242, 184)], GOLD_DARK)
+    c.px(238, 174, GOLD_LIGHT)
+    # A little controller just right of the mascot's paws.
+    c.rect((228, 179, 242, 185), METAL_DARK)
+    c.rect((229, 180, 241, 184), METAL_MID)
+    c.rect((231, 181, 234, 182), ROSE_MID)
+    c.rect((236, 181, 239, 182), MINT_MID)
+    c.px(235, 182, INK)
+    c.px(240, 180, GOLD_LIGHT)
+    # Floor mic stand, angled toward the mascot. Kept clear of the sprite box.
+    c.contact_shadow(243, 185, 259, 189, "half")
+    c.rect((244, 185, 256, 188), METAL_DARK)
+    c.rect((246, 186, 254, 188), METAL_MID)
+    c.line([(249, 185), (249, 153)], METAL_LIGHT)
+    c.line([(250, 185), (250, 153)], METAL_DARK)
+    c.line([(249, 153), (245, 147)], METAL_LIGHT)
+    c.rect((241, 144, 249, 152), METAL_DARK)
+    c.rect((242, 145, 248, 151), METAL_MID)
+    c.rect((243, 146, 247, 150), MINT_DARK)
+    c.px(245, 147, MINT_LIGHT)
+    c.px(246, 149, CREAM_MID)
+
     # mug on the floor by the CRT
     c.contact_shadow(112, 183, 122, 186, "half")
     c.rect((112, 176, 120, 183), CREAM_MID)
@@ -710,6 +786,25 @@ def _build_room() -> Canvas:
         c.line([(254, 202 + i * 3), (264, 202 + i * 3)], CREAM_MID)
 
     # ── Final material / light polish ────────────────────────────────────────
+    # Ivy softens the hard furniture edges and ties the window to the nest.
+    _vine(c, 116, 58, 50, 3, 4)
+    _vine(c, 384, 58, 48, 2, 13)
+    _vine(c, 374, 66, 20, 2, 15)
+    for lx, ly in ((130, 60), (134, 58), (138, 62), (257, 60), (261, 63)):
+        _leaf(c, lx, ly, 1 if lx < 200 else -1)
+    # Warm window spill on the wall and the top of the nest.
+    c.bayer_rect((125, 128, 278, 186), GOLD_DARK, 0.055, 2)
+    c.bayer_rect((132, 128, 272, 160), ORANGE_DARK, 0.04, 1)
+    c.bayer_rect((306, 162, 384, 188), GOLD_DARK, 0.035, 2)
+    # A low LED strip under the shelf and a warm top rim on the panel.
+    for x in range(292, 376, 8):
+        c.px(x, 94, GOLD_LIGHT)
+        c.px(x + 2, 95, MINT_LIGHT)
+        c.px(x + 1, 96, GOLD_DARK)
+    c.line([(294, 110), (372, 110)], GOLD_DARK)
+    c.line([(294, 111), (304, 111)], GOLD_LIGHT)
+    c.line([(348, 111), (372, 111)], GOLD_LIGHT)
+
     # wood grain runs
     c.wood_grain(25, 145, 121, 152, WOOD_DEEP, WOOD_LIGHT, 3)
     c.wood_grain(286, 39, 379, 102, WOOD_DEEP, WOOD_LIGHT, 4)
