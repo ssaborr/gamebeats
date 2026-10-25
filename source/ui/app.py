@@ -5949,50 +5949,171 @@ class GameBeatsApp:
     def _add_playlist_link(self):
         if not self._is_desktop_mode():
             return
-        dlg = tk.Toplevel(self.root)
-        dlg.title("Add playlist")
-        dlg.configure(bg=BG)
+        # CTkToplevel gives us the dark immersive title bar automatically;
+        # a plain tk.Toplevel keeps the bright native chrome and clashes with
+        # the rest of the den.
+        dlg = ctk.CTkToplevel(self.root, fg_color=BG)
+        dlg.title("Add playlist link")
         dlg.resizable(False, False)
+        dlg.transient(self.root)
         dlg.grab_set()
-        w, h = 420, 220
-        dlg.geometry(f"{w}x{h}+{(self.root.winfo_x() + 20)}+{(self.root.winfo_y() + 120)}")
-        # Top accent bar
-        tk.Frame(dlg, bg=ACCENT, height=2).pack(fill=tk.X)
-        tk.Label(dlg, text="Add playlist link",
-                 bg=BG, fg=TEXT, font=("Segoe UI", 12, "bold")).pack(pady=(18, 10))
+
+        # CTkToplevel scales width/height by the display DPI but leaves the
+        # +x+y offset alone. Convert our logical size before centering so the
+        # dialog stays centred over the den on high-DPI screens.
+        w, h = 500, 432
+        try:
+            scale = max(1.0, float(self.root.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            scale = 1.0
+        dw, dh = int(w * scale), int(h * scale)
+        rx = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - dw) // 2)
+        ry = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - dh) // 2)
+        dlg.geometry(f"{w}x{h}+{rx}+{ry}")
+
+        _icon = _load_puppy_window_icon((48, 48))
+        if _icon:
+            dlg._icon_ref = _icon
+            dlg.after(50, lambda: dlg.iconphoto(False, _icon))
+            dlg.after(200, lambda: dlg.iconphoto(False, _icon))
+
+        ctk.CTkFrame(dlg, fg_color=ACCENT, height=3, corner_radius=0).pack(fill=tk.X)
+
+        body = ctk.CTkFrame(dlg, fg_color="transparent", corner_radius=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=24, pady=(16, 18))
+
+        head = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
+        head.pack(fill=tk.X)
+
+        logo_path = _puppy_logo_path()
+        if logo_path and HAS_PIL:
+            try:
+                resampling = getattr(Image, "Resampling", Image)
+                pup = Image.open(logo_path).convert("RGBA").resize(
+                    (44, 50), resampling.NEAREST,
+                )
+                dlg._dialog_puppy = ctk.CTkImage(
+                    light_image=pup, dark_image=pup, size=(44, 50),
+                )
+                ctk.CTkLabel(head, image=dlg._dialog_puppy, text="").pack(
+                    side=tk.LEFT, padx=(0, 14),
+                )
+            except Exception:
+                pass
+
+        col = ctk.CTkFrame(head, fg_color="transparent", corner_radius=0)
+        col.pack(side=tk.LEFT, anchor="w")
+
+        ctk.CTkLabel(
+            col, text="RECORD CRATE / NEW SLEEVE", fg_color="transparent",
+            text_color=GOLD, font=T.pixel_font(10, "bold"), anchor="w",
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            col, text="Add playlist link", fg_color="transparent",
+            text_color=TEXT, font=T.serif_font(27, "bold"), anchor="w",
+        ).pack(anchor="w", pady=(2, 0))
+        ctk.CTkLabel(
+            col, text="File a Spotify mix in the crate.", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.retro_font(15), anchor="w",
+        ).pack(anchor="w", pady=(1, 0))
+
+        panel = ctk.CTkFrame(
+            body, fg_color=SURFACE, border_width=2, border_color=WOOD,
+            corner_radius=0,
+        )
+        panel.pack(fill=tk.BOTH, expand=True, pady=(14, 0))
+
+        pad = ctk.CTkFrame(panel, fg_color="transparent", corner_radius=0)
+        pad.pack(fill=tk.BOTH, expand=True, padx=16, pady=(12, 10))
+
         name_var = tk.StringVar(value="My playlist")
         link_var = tk.StringVar()
-        for lbl, var, show in [("Name", name_var, ""), ("Link", link_var, "")]:
-            row_f = tk.Frame(dlg, bg=BG)
-            row_f.pack(fill=tk.X, padx=22, pady=(0, 4))
-            tk.Label(row_f, text=lbl, bg=BG, fg=TEXT_MUTED,
-                     font=("Segoe UI", 8, "bold")).pack(anchor=tk.W)
-            tk.Entry(row_f, textvariable=var, bg=SURFACE2, fg=TEXT,
-                     insertbackground=ACCENT, relief=tk.FLAT,
-                     font=("Segoe UI", 10)).pack(fill=tk.X, pady=(3, 0), ipady=6)
-        tk.Label(dlg, text="Right-click playlist in Spotify \u2192 Share \u2192 Copy link",
-                 bg=BG, fg=TEXT_MUTED, font=("Segoe UI", 8)).pack(padx=22, anchor=tk.W)
-        err_lbl = tk.Label(dlg, text="", bg=BG, fg=AMBER, font=("Segoe UI", 9))
-        err_lbl.pack(pady=(4, 0))
 
-        def save():
-            ok, err = self.spotify.add_playlist_link(
-                name_var.get(), link_var.get())
+        ctk.CTkLabel(
+            pad, text="NAME", fg_color="transparent", text_color=GOLD,
+            font=T.pixel_font(10, "bold"), anchor="w",
+        ).pack(fill=tk.X)
+        name_entry = ctk.CTkEntry(
+            pad, textvariable=name_var, fg_color=SURFACE2, border_color=WOOD,
+            border_width=1, text_color=TEXT, corner_radius=0,
+            font=T.retro_font(17), height=42,
+        )
+        name_entry.pack(fill=tk.X, pady=(3, 10))
+
+        ctk.CTkLabel(
+            pad, text="SPOTIFY LINK", fg_color="transparent", text_color=GOLD,
+            font=T.pixel_font(10, "bold"), anchor="w",
+        ).pack(fill=tk.X)
+        link_entry = ctk.CTkEntry(
+            pad, textvariable=link_var, fg_color=SURFACE2, border_color=WOOD,
+            border_width=1, text_color=TEXT, corner_radius=0,
+            placeholder_text="https://open.spotify.com/playlist/...",
+            placeholder_text_color=TEXT_MUTED,
+            font=T.retro_font(17), height=42,
+        )
+        link_entry.pack(fill=tk.X, pady=(3, 5))
+
+        ctk.CTkLabel(
+            pad, text="Right-click the playlist in Spotify \u2192 Share \u2192 Copy link.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(14), anchor="w", justify=tk.LEFT,
+            wraplength=420,
+        ).pack(fill=tk.X)
+
+        err_lbl = ctk.CTkLabel(
+            pad, text=" ", fg_color="transparent", text_color=AMBER,
+            font=T.retro_font(14), anchor="w", justify=tk.LEFT,
+            wraplength=420,
+        )
+        err_lbl.pack(fill=tk.X, pady=(5, 0))
+
+        def save(_event=None):
+            name = name_var.get().strip() or "My playlist"
+            link = link_var.get().strip()
+            if not link:
+                err_lbl.configure(
+                    text="Paste a Spotify playlist link first.", text_color=AMBER)
+                link_entry.focus_set()
+                return
+            if not self.spotify:
+                err_lbl.configure(
+                    text="Spotify is not connected yet.", text_color=ORANGE)
+                return
+            try:
+                ok, err = self.spotify.add_playlist_link(name, link)
+            except Exception as exc:
+                ok, err = False, str(exc)
             if ok:
+                dlg.grab_release()
                 dlg.destroy()
                 self._load_playlists()
-                self._log(f"Playlist added: {name_var.get()}")
+                self._log(f"Playlist added: {name}")
             else:
-                err_lbl.configure(text=err)
+                err_lbl.configure(
+                    text=err or "Could not add that link.", text_color=ORANGE)
+                link_entry.focus_set()
 
-        brow = tk.Frame(dlg, bg=BG)
-        brow.pack(pady=12)
-        RoundedButton(brow, text="Cancel", command=dlg.destroy,
-                       width=80, height=30, bg=SURFACE2, fg=TEXT_SEC,
-                       font_size=10, canvas_bg=BG).pack(side=tk.LEFT, padx=4)
-        RoundedButton(brow, text="Add", command=save,
-                       width=80, height=30, bg=ACCENT, fg="#000",
-                       font_size=10, canvas_bg=BG).pack(side=tk.LEFT, padx=4)
+        brow = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
+        brow.pack(fill=tk.X, pady=(14, 0))
+
+        ctk.CTkLabel(
+            brow, text="ESC TO CLOSE", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(8), anchor="w",
+        ).pack(side=tk.LEFT)
+        add_btn = T.pixel_button(
+            brow, text="+ ADD LINK", command=save, width=132, height=38,
+            accent=True,
+        )
+        add_btn.pack(side=tk.RIGHT)
+        T.pixel_button(
+            brow, text="CANCEL", command=dlg.destroy, width=104, height=38,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        name_entry.bind("<Return>", lambda _e: link_entry.focus_set())
+        link_entry.bind("<Return>", save)
+        dlg.after(100, link_entry.focus_set)
+        dlg.after(120, dlg.lift)
 
     def _load_playlists(self):
         if not self.spotify:
