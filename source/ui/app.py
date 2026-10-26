@@ -2090,11 +2090,16 @@ class GameBeatsApp:
         for page, icon, label in nav_items:
             btn = ctk.CTkButton(
                 nav, text=f"{icon}  {label}", command=lambda p=page: self._nav(p),
-                fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+                # Paint the full 148x34 hit area. A transparent CTkButton
+                # canvas looks identical on the footer but can make the blank
+                # part of the button feel dead to the mouse; a solid NIGHT
+                # fill keeps the whole rectangle clickable.
+                fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
                 width=148, height=34, corner_radius=0,
                 font=T.pixel_font(9), anchor="w",
             )
             btn.pack(side=tk.LEFT, padx=(0, 4), pady=14)
+            self._make_footer_button_clickable(btn)
             self._footer_buttons[page] = btn
 
         tools = ctk.CTkFrame(footer, fg_color="transparent", corner_radius=0)
@@ -2108,26 +2113,29 @@ class GameBeatsApp:
 
         overlay_btn = ctk.CTkButton(
             tools, text="\u2723  OVERLAY", command=self._show_control_overlay,
-            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
             width=94, height=34, corner_radius=0, font=T.pixel_font(9),
         )
         overlay_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._make_footer_button_clickable(overlay_btn)
         self._footer_tools["overlay"] = overlay_btn
 
         faq_btn = ctk.CTkButton(
             tools, text="\u2726  FAQ", command=lambda: self._nav("faq"),
-            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
             width=74, height=34, corner_radius=0, font=T.pixel_font(9),
         )
         faq_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._make_footer_button_clickable(faq_btn)
         self._footer_tools["faq"] = faq_btn
 
         blocked_btn = ctk.CTkButton(
             tools, text="\u2298  BLOCKED", command=lambda: self._nav("blocked"),
-            fg_color="transparent", text_color=TEXT_MUTED, hover_color=SURFACE2,
+            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
             width=102, height=34, corner_radius=0, font=T.pixel_font(9),
         )
         blocked_btn.pack(side=tk.RIGHT, padx=2, pady=14)
+        self._make_footer_button_clickable(blocked_btn)
         self._footer_tools["blocked"] = blocked_btn
 
         nav_hints = {
@@ -2358,13 +2366,34 @@ class GameBeatsApp:
         if page == "blocked":
             self._refresh_blocked_page()
 
+    def _make_footer_button_clickable(self, button):
+        """Give every part of a footer button the hand cursor.
+
+        The button is created with a solid NIGHT fill, so its internal canvas
+        is a real hit target across the whole padded rectangle.  This helper
+        extends the hand cursor to that canvas and the internal text label so
+        the full-sized target feels clickable, not just the glyphs.
+        """
+        for widget in (
+            button,
+            getattr(button, "_canvas", None),
+            getattr(button, "_text_label", None),
+            getattr(button, "_image_label", None),
+        ):
+            if widget is None:
+                continue
+            try:
+                widget.configure(cursor="hand2")
+            except Exception:
+                pass
+
     def _paint_footer(self, page):
         for key, btn in getattr(self, "_footer_buttons", {}).items():
             try:
                 if key == page:
                     btn.configure(fg_color=SURFACE2, text_color=ACCENT)
                 else:
-                    btn.configure(fg_color="transparent", text_color=TEXT_MUTED)
+                    btn.configure(fg_color=NIGHT, text_color=TEXT_MUTED)
             except Exception:
                 pass
         for key, btn in getattr(self, "_footer_tools", {}).items():
@@ -2372,7 +2401,7 @@ class GameBeatsApp:
                 if key == page:
                     btn.configure(fg_color=SURFACE2, text_color=ACCENT)
                 else:
-                    btn.configure(fg_color="transparent", text_color=TEXT_MUTED)
+                    btn.configure(fg_color=NIGHT, text_color=TEXT_MUTED)
             except Exception:
                 pass
 
@@ -2550,8 +2579,8 @@ class GameBeatsApp:
         head.pack(fill=tk.X, padx=7, pady=(7, 2))
 
         self._game_icon_holder = ctk.CTkFrame(
-            head, fg_color=SURFACE3, width=40, height=40, corner_radius=0,
-            border_width=1, border_color=WOOD,
+            head, fg_color="transparent", width=40, height=40, corner_radius=0,
+            border_width=0,
         )
         self._game_icon_holder.pack(side=tk.LEFT, padx=(0, 7))
         self._game_icon_holder.pack_propagate(False)
@@ -5017,9 +5046,52 @@ class GameBeatsApp:
             self._redraw_room(),
         ))
 
-    def _play_query_for_game(self, info, force_new=False, exclude_uris=None, reason="Playing", one_shot: bool = False):
+    def _begin_playlist_switch_pause(self, reason=""):
+        """Freeze playback/UI immediately when the user asks for another mix.
+
+        Searching Spotify for the next playlist can take several seconds. The
+        old mix must not keep playing during that search. This runs on the Tk
+        thread so the play button, room puppy, and pause flags update at once.
+        """
+        self._is_playing = False
+        try:
+            self._apply_user_pause_state(True)
+        except Exception:
+            pass
+        try:
+            self._set_play_btn_icon(False, force_btn=True)
+            self._update_deck_status()
+        except Exception:
+            pass
+        try:
+            label = str(reason or "Playlist switch").strip()
+            self._log(f"{label}: pausing current playlist while the next one loads…")
+        except Exception:
+            pass
+
+    def _pause_spotify_for_playlist_switch(self):
+        """Send the actual Spotify pause on the worker thread, before searching."""
+        if not self.spotify:
+            return
+        try:
+            ok = self._send_spotify_pause_command()
+        except Exception:
+            ok = False
+        try:
+            msg = (
+                "Current playlist paused; finding the next one…"
+                if ok
+                else "Could not confirm the pause; continuing to the next playlist."
+            )
+            self.root.after(0, lambda m=msg: self._log(m))
+        except Exception:
+            pass
+
+    def _play_query_for_game(self, info, force_new=False, exclude_uris=None, reason="Playing", one_shot: bool = False, pause_first: bool = False):
         if self._play_in_progress:
             return
+        if pause_first:
+            self._begin_playlist_switch_pause(reason)
 
         requested_excludes = set(exclude_uris or [])
         skip_uris = self._skip_playlist_uris(requested_excludes)
@@ -5050,6 +5122,9 @@ class GameBeatsApp:
             self.root.after(0, lambda r=clean_reason: self._log(f"{r}"))
 
         def _run():
+            if pause_first:
+                # Silence the old mix before the search/playlist navigation.
+                self._pause_spotify_for_playlist_switch()
             try:
                 if self._is_web_mode():
                     self.root.after(0, lambda q=search_q: self._log(
@@ -5899,6 +5974,11 @@ class GameBeatsApp:
         uri   = self._current_playlist_uri
         name  = self._current_playlist_name or "Current playlist"
         query = self._current_playlist_query
+        game_snapshot = self.current_game
+        try:
+            auto_mode = bool(self.auto_mode.get())
+        except Exception:
+            auto_mode = True
 
         if not uri:
             self._log("No current playlist to block yet.")
@@ -5953,15 +6033,23 @@ class GameBeatsApp:
                 self._tried_playlist_uris.append(uri)
 
 
-            if self.current_game and self.auto_mode.get():
-                # _play_query_for_game with force_new=True handles the Spotify restart internally
-                # Reuse existing connection when possible; do not force a restart.
-                self._play_query_for_game(
-                    self.current_game,
-                    force_new=False,
-                    exclude_uris=set(self._tried_playlist_uris),
-                    reason="Blocked \u2014 picking another",
-                )
+            if game_snapshot and auto_mode:
+                # _play_query_for_game starts its own worker thread. Route back
+                # through the Tk thread so pause state and the play icon update
+                # safely before the (possibly slow) next-playlist search.
+                def _start_next():
+                    if self.current_game is not game_snapshot:
+                        self._playlist_end_pending = False
+                        return
+                    self._play_query_for_game(
+                        game_snapshot,
+                        force_new=False,
+                        exclude_uris=set(self._tried_playlist_uris),
+                        reason="Blocked \u2014 picking another",
+                        pause_first=True,
+                    )
+
+                self.root.after(0, _start_next)
             elif self.spotify:
                 # No game running — just stop
                 threading.Thread(target=self.spotify.media_stop, daemon=True).start()
@@ -5985,19 +6073,18 @@ class GameBeatsApp:
             reason="Try another — extending notifier cooldown",
         )
 
-        def _pick():
-            try:
-                # Prefer reusing the established Spotify connection/device.
-                self._play_query_for_game(
-                    self.current_game,
-                    force_new=False,
-                    exclude_uris=set(self._tried_playlist_uris),  # Exclude all tried playlists
-                    reason="Picking another playlist",
-                )
-            except Exception as ex:
-                self._log(f"Try-another failed: {ex}")
-
-        threading.Thread(target=_pick, daemon=True).start()
+        try:
+            # Prefer reusing the established Spotify connection/device.
+            # pause_first silences the current mix before the search starts.
+            self._play_query_for_game(
+                self.current_game,
+                force_new=False,
+                exclude_uris=set(self._tried_playlist_uris),  # Exclude all tried playlists
+                reason="Picking another playlist",
+                pause_first=True,
+            )
+        except Exception as ex:
+            self._log(f"Try-another failed: {ex}")
 
     def _unblock_playlist(self, uri):
         try:
@@ -7326,6 +7413,7 @@ class GameBeatsApp:
                         exclude_uris=exclude_new,
                         reason=reason,
                         one_shot=True,
+                        pause_first=True,
                     ))
                 except Exception as ex:
                     self.root.after(0, lambda: self._log(f"Mascot play-next failed: {ex}"))
@@ -7367,6 +7455,7 @@ class GameBeatsApp:
                     exclude_uris=set(self._tried_playlist_uris),
                     reason="User requested another playlist",
                     one_shot=True,
+                    pause_first=True,
                 ))
 
             threading.Thread(target=_do_another, daemon=True).start()

@@ -865,6 +865,85 @@ class TestAudioMonitorRouting(unittest.TestCase):
 
 
 class TestAppNewRegressions(unittest.TestCase):
+    def test_begin_playlist_switch_pause_updates_state_immediately(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._apply_user_pause_state = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+        app._update_deck_status = MagicMock()
+        app._log = MagicMock()
+        app._is_playing = True
+
+        GameBeatsApp._begin_playlist_switch_pause(app, "Blocked")
+
+        app._apply_user_pause_state.assert_called_once_with(True)
+        app._set_play_btn_icon.assert_called_once_with(False, force_btn=True)
+        app._update_deck_status.assert_called_once()
+        self.assertFalse(app._is_playing)
+
+    def test_pause_spotify_for_playlist_switch_sends_command(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.spotify = MagicMock()
+        app._send_spotify_pause_command = MagicMock(return_value=True)
+        app.root = MagicMock()
+        app._log = MagicMock()
+
+        GameBeatsApp._pause_spotify_for_playlist_switch(app)
+
+        app._send_spotify_pause_command.assert_called_once()
+        app.root.after.assert_called_once()
+
+    def test_play_query_pauses_before_starting_next_playlist(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        order = []
+        app._play_in_progress = False
+        app._begin_playlist_switch_pause = MagicMock(
+            side_effect=lambda reason: order.append("mark")
+        )
+        app._pause_spotify_for_playlist_switch = MagicMock(
+            side_effect=lambda: order.append("pause")
+        )
+        app._skip_playlist_uris = MagicMock(return_value=set())
+        app._current_playlist_uri = "spotify:playlist:old"
+        app._blocked_playlist_uris = MagicMock(return_value=set())
+        app._is_desktop_mode = MagicMock(return_value=False)
+        app._is_web_mode = MagicMock(return_value=False)
+        app._playlist_pick_count = MagicMock(return_value=5)
+        app._end_behavior_key = MagicMock(return_value="next_pool")
+        app._on_play_result = MagicMock()
+        app.root = MagicMock()
+        app._log = MagicMock()
+        app.spotify = MagicMock()
+        app.spotify.search_and_play = MagicMock(
+            side_effect=lambda *a, **k: order.append("search") or {
+                "uri": "spotify:playlist:new"
+            }
+        )
+
+        class ImmediateThread:
+            def __init__(self, target=None, daemon=None, **kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch("ui.app.threading.Thread", ImmediateThread):
+            GameBeatsApp._play_query_for_game(
+                app,
+                {"name": "Game", "mood": "chill", "tags": []},
+                reason="Try another",
+                pause_first=True,
+            )
+
+        self.assertEqual(order[:3], ["mark", "pause", "search"])
+        app._begin_playlist_switch_pause.assert_called_once_with("Try another")
+        app._pause_spotify_for_playlist_switch.assert_called_once()
+
     def test_on_play_result_failure_does_not_autostart(self):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)

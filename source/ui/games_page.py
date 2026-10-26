@@ -925,9 +925,12 @@ class GamesPage(ctk.CTkFrame):
         body = ctk.CTkFrame(label, fg_color="transparent", corner_radius=0)
         body.pack(fill=tk.X, padx=8, pady=(4, 0))
 
+        # The extracted executable icon already carries its own alpha mask.
+        # Keep this holder transparent so the icon floats on the coloured
+        # label instead of sitting on a black square tile.
         icon_holder = ctk.CTkFrame(
-            body, fg_color=NIGHT, corner_radius=2,
-            width=46, height=46, border_width=1, border_color=WOOD,
+            body, fg_color="transparent", corner_radius=0,
+            width=46, height=46, border_width=0,
         )
         icon_holder.pack(side=tk.LEFT, padx=(0, 7))
         icon_holder.pack_propagate(False)
@@ -1044,6 +1047,35 @@ class GamesPage(ctk.CTkFrame):
             for widget in (cart, label, body, info_col, icon_holder):
                 widget.bind("<Enter>", lambda e: _hover(True), add="+")
                 widget.bind("<Leave>", lambda e: _hover(False), add="+")
+
+            # The header says "pick a cart to edit its label", so the whole
+            # physical cart should behave like the EDIT LABEL text button, not
+            # just the little button below it.
+            def _open_editor(_event=None):
+                self._edit_game(proc_name, info)
+                return "break"
+
+            def _bind_cart_click(widget):
+                try:
+                    widget.configure(cursor="hand2")
+                except Exception:
+                    pass
+                try:
+                    existing = widget.bind("<Button-1>") or ""
+                except Exception:
+                    existing = ""
+                # CTkLabel/CTkFrame wrap an internal tk widget and their bind()
+                # delegates to it.  The recursive walk reaches that child too,
+                # so skip if the handler is already present.
+                if "_open_editor" not in existing:
+                    try:
+                        widget.bind("<Button-1>", _open_editor, add="+")
+                    except Exception:
+                        pass
+                for child in widget.winfo_children():
+                    _bind_cart_click(child)
+
+            _bind_cart_click(cart)
         except Exception:
             pass
 
