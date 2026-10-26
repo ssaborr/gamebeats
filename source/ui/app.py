@@ -2925,13 +2925,30 @@ class GameBeatsApp:
             pass
         return "idle"
 
+    def _puppy_should_animate(self) -> bool:
+        """True only while GameBeats itself is actively playing, not paused."""
+        if self._reduce_motion_enabled():
+            return False
+        try:
+            # _spotify_started_by_us separates GameBeats playback from audio
+            # that happens to be coming from Spotify in another window.
+            if not getattr(self, "_spotify_started_by_us", False):
+                return False
+            if not getattr(self, "_is_playing", False):
+                return False
+            if self._intentional_pause_active():
+                return False
+        except Exception:
+            return False
+        return True
+
     def _puppy_frame_name(self, now=None):
         now = time.time() if now is None else now
         gif_frames = getattr(self, "_puppy_gif_frames", ())
         if gif_frames:
-            # The bobbing-head mascot stays alive in every room state; only
-            # reduce-motion freezes it on the first pose.
-            if self._reduce_motion_enabled():
+            # Hold the first pose whenever playback is stopped or paused; the
+            # bobbing loop only runs while GameBeats is actually playing music.
+            if not self._puppy_should_animate():
                 return "gif:0"
             durations = getattr(self, "_puppy_gif_durations", ())
             return f"gif:{_gif_frame_index_at(now * 1000.0, durations)}"

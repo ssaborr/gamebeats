@@ -267,19 +267,37 @@ class TestRoomGifAsset(unittest.TestCase):
         self.assertEqual(PUPPY_ROOM_GIF, PUPPY_BOB_GIF)
         self.assertEqual(PUPPY_OVERLAY_GIF, PUPPY_BOB_GIF)
 
-    def test_room_bobs_in_every_state_and_freezes_for_reduce_motion(self):
+    def test_room_bobs_only_while_gamebeats_is_playing(self):
         from ui.app import GameBeatsApp
 
         app = GameBeatsApp.__new__(GameBeatsApp)
         app._puppy_gif_frames = (object(), object())
         app._puppy_gif_durations = (120, 120)
         app._reduce_motion_enabled = MagicMock(return_value=False)
+        app._spotify_started_by_us = True
+        app._is_playing = True
+        app._spotify_audio_active = False
+        app._intentional_pause_active = MagicMock(return_value=False)
 
         self.assertEqual(app._puppy_frame_name(now=0.0), "gif:0")
         self.assertEqual(app._puppy_frame_name(now=0.13), "gif:1")
         # 240 ms wraps back to the first bob.
         self.assertEqual(app._puppy_frame_name(now=0.24), "gif:0")
 
+        # External Spotify audio is not GameBeats playback: hold the first pose.
+        app._spotify_started_by_us = False
+        app._spotify_audio_active = True
+        self.assertEqual(app._puppy_frame_name(now=0.13), "gif:0")
+
+        # GameBeats started the track, but playback is stopped or paused.
+        app._spotify_started_by_us = True
+        app._is_playing = False
+        self.assertEqual(app._puppy_frame_name(now=0.13), "gif:0")
+        app._is_playing = True
+        app._intentional_pause_active.return_value = True
+        self.assertEqual(app._puppy_frame_name(now=0.13), "gif:0")
+
+        app._intentional_pause_active.return_value = False
         app._reduce_motion_enabled.return_value = True
         self.assertEqual(app._puppy_frame_name(now=0.13), "gif:0")
 
