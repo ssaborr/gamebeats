@@ -193,9 +193,12 @@ class RuntimeOverlay(ctk.CTkToplevel):
         # ── Hint ──────────────────────────────────────────────────────────────
         ctk.CTkLabel(
             container,
-            text="SPACE = PLAY / PAUSE   \u00b7   \u2190 \u2192 = PREV / NEXT",
+            text=(
+                "SPACE = PLAY / PAUSE   \u00b7   \u2190 \u2192 = PREV / NEXT\n"
+                "DRAG THIS HEADER TO MOVE THE PANEL"
+            ),
             fg_color="transparent", text_color=TEXT_MUT,
-            font=T.pixel_font(7), wraplength=330,
+            font=T.retro_font(14), wraplength=360, justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 0))
 
     def _start_drag(self, event):

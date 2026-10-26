@@ -48,8 +48,11 @@ from ui.mascot_notifier import MascotNotifier, PuppySingingOverlay
 from ui.puppy_anim import PuppyAnimator
 from ui.puppy_gif import (
     PUPPY_BOB_GIF,
+    PUPPY_CHANGE_GIF,
+    PUPPY_PAUSE_GIF,
     frame_index_at as _gif_frame_index_at,
     load_gif_frames as _load_gif_frames,
+    normalize_animation_states as _normalize_animation_states,
     normalize_sprite_frames as _normalize_gif_frames,
 )
 from ui.runtime_overlay import RuntimeOverlay
@@ -158,6 +161,20 @@ def _load_design_sprite(name):
 
 
 PUPPY_ROOM_GIF = PUPPY_BOB_GIF
+PUPPY_ROOM_STATE_GIFS = (
+    ("idle", PUPPY_ROOM_GIF),
+    ("pause", PUPPY_PAUSE_GIF),
+    ("change", PUPPY_CHANGE_GIF),
+)
+PUPPY_OVERLAY_GESTURES = (
+    ("CLICK", "Pause or resume the music"),
+    ("LONG CLICK", "Try another playlist"),
+    ("CTRL + DRAG", "Move the puppy anywhere on screen"),
+)
+PUPPY_OVERLAY_HELP = (
+    "The little desktop puppy appears while music plays and stays visible "
+    "when you pause, so you can click it again to resume."
+)
 
 
 def _load_puppy_gif(name, *, sprite=False):
@@ -172,6 +189,40 @@ def _load_puppy_gif(name, *, sprite=False):
         return frames, durations
     except Exception:
         return (), ()
+
+
+def _load_puppy_animation_states():
+    """Load idle/pause/change room animations on one shared canvas."""
+    raw = {}
+    if HAS_PIL:
+        for name, filename in PUPPY_ROOM_STATE_GIFS:
+            path = _design_asset_path(filename)
+            if not path:
+                continue
+            try:
+                frames, durations = _load_gif_frames(path)
+            except Exception:
+                continue
+            if frames:
+                raw[name] = (frames, durations)
+    if "idle" in raw:
+        try:
+            normalized, canvas = _normalize_animation_states(
+                raw,
+                reference="idle",
+                target_size=(64, 72),
+                bottom_pad=2,
+                margin=1,
+            )
+            if normalized.get("idle", ((), ()))[0]:
+                return normalized, canvas
+        except Exception:
+            pass
+    # Legacy fallback: one bob state on the old 64x72 sprite canvas.
+    frames, durations = _load_puppy_gif(PUPPY_ROOM_GIF, sprite=True)
+    if frames:
+        return {"idle": (frames, durations)}, (64, 72)
+    return {}, (64, 72)
 
 
 def _load_design_json(name):
@@ -1110,7 +1161,11 @@ class GameBeatsApp:
             ),
         )
         self._puppy_singing_overlay = PuppySingingOverlay(
-            self.root, corner="bottom-left"
+            self.root,
+            corner="bottom-left",
+            on_toggle_play_pause=self._puppy_overlay_toggle,
+            on_try_another=self._puppy_overlay_try_another,
+            get_playing=self._puppy_overlay_playing,
         )
         self._build_ui()
         self._install_shortcuts()
@@ -1858,15 +1913,24 @@ class GameBeatsApp:
                 name: _load_design_sprite(name)
                 for name in ("idle", "mic", "sing", "encore")
             }
-        # The room now uses the same headset-wearing bobbing-head GIF as the
-        # desktop overlay. The old authored sprites remain the fallback if the
-        # GIF is missing or cannot be decoded.
-        self._puppy_gif_frames, self._puppy_gif_durations = _load_puppy_gif(
-            PUPPY_ROOM_GIF, sprite=True,
+        # The room uses the same hand-authored states as the desktop overlay:
+        # an idle bob, a pause/resume reaction, and a playlist-change reaction.
+        # All states share one canvas and baseline so the mascot never jumps.
+        self._puppy_gif_states, self._puppy_gif_canvas = (
+            _load_puppy_animation_states()
+        )
+        self._puppy_gif_frames, self._puppy_gif_durations = (
+            self._puppy_gif_states.get("idle", ((), ()))
         )
         self._puppy_photo_cache = {}
         self._puppy_mood_until = 0.0
         self._puppy_reaction_until = 0.0
+        self._puppy_action_state = None
+        self._puppy_action_started = 0.0
+        self._puppy_action_loops = 1
+        self._puppy_action_reverse = False
+        self._puppy_action_hold = False
+        self._puppy_change_cooldown_until = 0.0
         self._last_np_key = None
         self._room_image_item = None
         self._room_photo = None
@@ -2852,7 +2916,20 @@ class GameBeatsApp:
         if cached is not None:
             return cached
         sprite = None
-        if isinstance(name, str) and name.startswith("gif:"):
+        if isinstance(name, str) and name.startswith("action:"):
+            try:
+                _prefix, state, raw_index = name.split(":", 2)
+                index = int(raw_index)
+            except Exception:
+                return None
+            state_frames = getattr(self, "_puppy_gif_states", {}).get(state)
+            if not state_frames:
+                return None
+            frames = state_frames[0]
+            if not frames:
+                return None
+            sprite = frames[index % len(frames)]
+        elif isinstance(name, str) and name.startswith("gif:"):
             try:
                 index = int(name.split(":", 1)[1])
             except Exception:
@@ -2979,8 +3056,101 @@ class GameBeatsApp:
             return False
         return True
 
+    def _start_puppy_action(
+        self, state, *, loops=1, reverse=False, hold=False, now=None,
+    ):
+        """Play a one-shot reaction on the in-room puppy.
+
+        Action frames use the same normalized canvas as the idle bob.  A
+        pause reaction holds its final drooped pose while paused; a resume
+        reaction runs the same clip backwards and then returns to the bob.
+        """
+        if self._reduce_motion_enabled():
+            return
+        state_frames = getattr(self, "_puppy_gif_states", {}).get(state)
+        if not state_frames or not state_frames[0]:
+            return
+        self._puppy_action_state = state
+        self._puppy_action_started = time.time() if now is None else float(now)
+        self._puppy_action_loops = max(1, int(loops or 1))
+        self._puppy_action_reverse = bool(reverse)
+        self._puppy_action_hold = bool(hold)
+
+    def _puppy_action_active(self, state=None, now=None):
+        action = getattr(self, "_puppy_action_state", None)
+        if not action or (state is not None and action != state):
+            return False
+        state_frames = getattr(self, "_puppy_gif_states", {}).get(action)
+        if not state_frames or not state_frames[0]:
+            return False
+        durations = tuple(state_frames[1] or ())
+        total = sum(durations) if durations else len(state_frames[0]) * 120
+        loops = max(1, int(getattr(self, "_puppy_action_loops", 1) or 1))
+        current = time.time() if now is None else float(now)
+        started = float(getattr(self, "_puppy_action_started", current))
+        return (current - started) * 1000.0 < total * loops
+
+    def _react_to_playback_change(self, playing):
+        # Starting the next playlist pauses the old one first.  Do not let
+        # that pause reaction stomp the playlist-change animation the user
+        # just triggered.
+        if self._puppy_action_active("change"):
+            return
+        if playing:
+            # Only reverse the pause clip when the puppy was actually paused.
+            # A first track at launch should start with the normal bob.
+            if getattr(self, "_puppy_action_state", None) != "pause":
+                return
+            self._start_puppy_action("pause", loops=1, reverse=True)
+        else:
+            self._start_puppy_action("pause", loops=1, hold=True)
+
+    def _play_puppy_change_animation(self, *, force=False):
+        """Animate a song/playlist switch in the room and desktop overlay."""
+        now = time.time()
+        if not force and now < getattr(self, "_puppy_change_cooldown_until", 0.0):
+            return
+        self._puppy_change_cooldown_until = now + 2.0
+        self._start_puppy_action("change", loops=1)
+        overlay = getattr(self, "_puppy_singing_overlay", None)
+        if overlay is not None:
+            try:
+                overlay.play_change_animation()
+            except Exception:
+                pass
+
     def _puppy_frame_name(self, now=None):
         now = time.time() if now is None else now
+        action = getattr(self, "_puppy_action_state", None)
+        state_frames = (
+            getattr(self, "_puppy_gif_states", {}).get(action) if action else None
+        )
+        if state_frames and state_frames[0]:
+            frames, durations = state_frames
+            durations = tuple(durations or ())
+            if not durations:
+                durations = (120,) * len(frames)
+            total = sum(durations)
+            elapsed = max(0.0, (now - float(
+                getattr(self, "_puppy_action_started", now)
+            )) * 1000.0)
+            loops = max(1, int(getattr(self, "_puppy_action_loops", 1) or 1))
+            hold = bool(getattr(self, "_puppy_action_hold", False))
+            reverse = bool(getattr(self, "_puppy_action_reverse", False))
+            if total <= 0:
+                return f"action:{action}:0"
+            if elapsed >= total * loops:
+                if not hold:
+                    self._puppy_action_state = None
+                else:
+                    index = 0 if reverse else len(frames) - 1
+                    return f"action:{action}:{index}"
+            else:
+                offset = elapsed % total
+                index = _gif_frame_index_at(offset, durations)
+                if reverse:
+                    index = len(frames) - 1 - index
+                return f"action:{action}:{index}"
         gif_frames = getattr(self, "_puppy_gif_frames", ())
         if gif_frames:
             # Hold the first pose whenever playback is stopped or paused; the
@@ -3528,11 +3698,16 @@ class GameBeatsApp:
         sprite_name = self._puppy_frame_name(now)
 
         # The mascot is the big in-room puppy, centred over the player deck.
-        # Snap the 64x72 authored sprite to an integer multiple so every
-        # authored pixel becomes a clean NxN square. The feet baseline is fixed.
+        # One integer scale keeps every authored pixel a clean NxN square.  The
+        # shared animation canvas is wider/taller than the old 64x72 body box
+        # so reactions (headphones off, pause droop) fit without shrinking the
+        # puppy; the feet baseline remains fixed.
         puppy_scale = self._puppy_scale_for_width(w)
-        pw = 64 * puppy_scale
-        ph = 72 * puppy_scale
+        body_w, body_h = getattr(self, "_puppy_gif_canvas", (64, 72))
+        body_w = max(1, int(body_w))
+        body_h = max(1, int(body_h))
+        pw = body_w * puppy_scale
+        ph = body_h * puppy_scale
         px = (w - pw) // 2
         paw_margin = 2 * puppy_scale
         perch_y = h - ph + paw_margin - 1
@@ -3540,6 +3715,22 @@ class GameBeatsApp:
         px = max(0, min(px, w - pw - 4))
         self._puppy_bbox = (px, py, px + pw, py + ph)
         self._room_puppy_base = (px, py, pw, ph)
+        # The shared reaction canvas has transparent headroom.  Remember where
+        # the puppy's actual pixels begin so the pet heart sits above the head
+        # rather than floating in the empty padding.
+        self._puppy_visual_top = py
+        try:
+            idle_frames = getattr(self, "_puppy_gif_frames", ())
+            if idle_frames:
+                idle_frame = idle_frames[0]
+                alpha_box = idle_frame.getchannel("A").getbbox()
+                if alpha_box:
+                    source_h = max(1, idle_frame.size[1])
+                    self._puppy_visual_top = py + int(
+                        alpha_box[1] * (ph / source_h)
+                    )
+        except Exception:
+            pass
 
         try:
             photo = ImageTk.PhotoImage(base.convert("RGB"))
@@ -3569,7 +3760,9 @@ class GameBeatsApp:
         # read as an orange circle behind the mascot, so the glow is gone.
         try:
             sy = min(h - 1, py + ph - paw_margin)
-            shadow_w = int(pw * 0.62)
+            # Shadow follows the puppy body, not the transparent reaction
+            # canvas (which may include headphones held off to the side).
+            shadow_w = int(64 * puppy_scale * 0.62)
             sx = px + (pw - shadow_w) // 2
             layers = (
                 (0.00, 1.00, 5, 4),
@@ -3781,10 +3974,11 @@ class GameBeatsApp:
             x0, y0, x1, _y1 = getattr(self, "_puppy_bbox", (0, 0, 0, 0))
             if x1 <= x0:
                 return
+            visual_top = getattr(self, "_puppy_visual_top", y0)
             width = max(1, canvas.winfo_width())
             canvas.delete("pet_heart")
             canvas.create_text(
-                (x0 + x1) // 2, y0 - 26, text="\u2665",
+                (x0 + x1) // 2, visual_top - 26, text="\u2665",
                 anchor="s", font=(F_RETRO, -max(20, int(width * 0.015))),
                 fill=ORANGE, tags=("overlay", "pet_heart"),
             )
@@ -4342,7 +4536,9 @@ class GameBeatsApp:
         )
         self._motion_toggle.pack(side=tk.RIGHT, padx=(14, 2))
 
-        T.section_header(content, "02 / PUPPY OVERLAY", pady=(14, 6))
+        T.section_header(
+            content, "02 / DESKTOP PUPPY + CONTROL PANEL", pady=(14, 6)
+        )
         ov = self._card(content)
 
         ov_row = ctk.CTkFrame(ov, fg_color="transparent", corner_radius=0)
@@ -4364,19 +4560,48 @@ class GameBeatsApp:
 
         ctk.CTkLabel(
             ov_copy, text="Your player two, always on your side.", fg_color="transparent",
-            text_color=TEXT, font=T.retro_font(19), anchor="w",
+            text_color=TEXT, font=T.retro_font(20), anchor="w",
         ).pack(fill=tk.X)
         ctk.CTkLabel(
             ov_copy,
-            text="A small controller appears during games for manual pause, resume, skip, and playlist rescue. Drag it anywhere.",
-            fg_color="transparent", text_color=TEXT_MUTED,
-            font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=600,
-        ).pack(fill=tk.X, pady=(3, 8))
+            text=PUPPY_OVERLAY_HELP,
+            fg_color="transparent", text_color=TEXT_SEC,
+            font=T.retro_font(17), anchor="w", justify=tk.LEFT, wraplength=680,
+        ).pack(fill=tk.X, pady=(4, 10))
 
         T.primary_button(
-            ov_copy, "\u25a3  OPEN OVERLAY", command=self._show_control_overlay,
-            width=160, height=32,
+            ov_copy, "\u25a3  OPEN CONTROL PANEL", command=self._show_control_overlay,
+            width=204, height=34,
         ).pack(anchor="w")
+
+        gestures = ctk.CTkFrame(
+            ov, fg_color=NIGHT, corner_radius=0,
+            border_width=2, border_color=WOOD,
+        )
+        gestures.pack(fill=tk.X, pady=(14, 0))
+        ctk.CTkLabel(
+            gestures, text="PUPPY CONTROLS", fg_color="transparent",
+            text_color=GOLD, font=T.pixel_font(11, "bold"), anchor="w",
+        ).pack(fill=tk.X, padx=12, pady=(10, 5))
+        for key, description in PUPPY_OVERLAY_GESTURES:
+            row = ctk.CTkFrame(gestures, fg_color="transparent", corner_radius=0)
+            row.pack(fill=tk.X, padx=12, pady=3)
+            ctk.CTkLabel(
+                row, text=key, fg_color=GOLD, text_color=NIGHT,
+                corner_radius=0, width=112, height=26,
+                font=T.pixel_font(10, "bold"),
+            ).pack(side=tk.LEFT, padx=(0, 12))
+            ctk.CTkLabel(
+                row, text=description, fg_color="transparent",
+                text_color=TEXT, font=T.retro_font(17), anchor="w",
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ctk.CTkLabel(
+            gestures,
+            text="Need manual skip, block, and playlist controls? The larger "
+                 "control panel opens with the button above.",
+            fg_color="transparent", text_color=TEXT_SEC,
+            font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=720,
+        ).pack(fill=tk.X, padx=12, pady=(6, 10))
 
         # ── Keep Music Playing ────────────────────────────────────────────────
         T.section_header(content, "03 / KEEP MUSIC PLAYING", pady=(14, 6))
@@ -5063,6 +5288,10 @@ class GameBeatsApp:
         """
         self._is_playing = False
         try:
+            self._react_to_playback_change(False)
+        except Exception:
+            pass
+        try:
             self._apply_user_pause_state(True)
         except Exception:
             pass
@@ -5201,6 +5430,7 @@ class GameBeatsApp:
                     # in gif:0 until the next audio-meter tick.
                     self._remember_current_playlist(picked_uri, picked_name, picked_query, reset_pause_flags=True)
                     self._set_play_btn_icon(True, force_btn=True)
+                    self._play_puppy_change_animation(force=True)
                     # The web player often exposes the new song a beat or two
                     # after starting.  Poll quickly for the first several
                     # seconds instead of waiting for the 4s steady-state tick.
@@ -5421,8 +5651,19 @@ class GameBeatsApp:
                             or getattr(self, "_paused_by_game_flag", False)
                         )
                         if not intentional_pause:
+                            resumed_now = not bool(
+                                getattr(self, "_is_playing", False)
+                            )
                             self._is_playing = True
-                            self.root.after(0, lambda: self._set_play_btn_icon(True))
+                            if resumed_now:
+                                self.root.after(0, lambda: (
+                                    self._react_to_playback_change(True),
+                                    self._set_play_btn_icon(True),
+                                ))
+                            else:
+                                self.root.after(
+                                    0, lambda: self._set_play_btn_icon(True)
+                                )
                             self._remove_pause_reason("user")
                             self._remove_pause_reason("auto")
                     else:
@@ -5568,6 +5809,11 @@ class GameBeatsApp:
         try:
             intentionally_stopped = self._intentional_pause_active()
             notifier_up = getattr(self, "_mascot_notifier", None) is not None
+            user_paused = bool(
+                getattr(self, "_manual_paused", False)
+                or getattr(self, "_user_paused_flag", False)
+            )
+            game_paused = bool(getattr(self, "_paused_by_game_flag", False))
             active = bool(visible) and not intentionally_stopped and not notifier_up
             self._puppy_audio_active = active
             # No room repaint here.  The in-room mascot reads the play state on
@@ -5586,10 +5832,37 @@ class GameBeatsApp:
                     except Exception:
                         pass
                     self._puppy_hide_job = None
+                try:
+                    overlay.set_playback_state(True, animate=True)
+                except Exception:
+                    pass
                 overlay.show()
                 return
 
-            if intentionally_stopped or notifier_up:
+            if intentionally_stopped:
+                if hide_job is not None:
+                    try:
+                        self.root.after_cancel(hide_job)
+                    except Exception:
+                        pass
+                    self._puppy_hide_job = None
+                # A manual pause keeps the desktop puppy on screen (frozen in
+                # its drooped pose) so another click can resume playback.
+                if user_paused and not game_paused:
+                    try:
+                        if overlay.is_visible():
+                            overlay.set_playback_state(False, animate=True)
+                            return
+                    except Exception:
+                        pass
+                try:
+                    overlay.set_playback_state(False, animate=False)
+                except Exception:
+                    pass
+                overlay.hide(immediate=True)
+                return
+
+            if notifier_up:
                 if hide_job is not None:
                     try:
                         self.root.after_cancel(hide_job)
@@ -5621,10 +5894,25 @@ class GameBeatsApp:
         try:
             if time.time() - float(getattr(self, "_puppy_last_loud_ts", 0.0) or 0.0) < 1.0:
                 return
+            user_paused = bool(
+                getattr(self, "_manual_paused", False)
+                or getattr(self, "_user_paused_flag", False)
+            )
+            game_paused = bool(getattr(self, "_paused_by_game_flag", False))
             if (
                 self._intentional_pause_active()
                 or getattr(self, "_mascot_notifier", None) is not None
             ):
+                if (
+                    user_paused
+                    and not game_paused
+                    and getattr(self, "_mascot_notifier", None) is None
+                ):
+                    try:
+                        if overlay.is_visible():
+                            return
+                    except Exception:
+                        pass
                 overlay.hide(immediate=True)
             else:
                 overlay.hide()
@@ -5714,11 +6002,13 @@ class GameBeatsApp:
             if already_paused_by_game:
                 self.root.after(0, lambda: (
                     self._set_play_btn_icon(False, force_btn=True),
+                    self._react_to_playback_change(False),
                     self._set_puppy_singing_visible(False),
                 ))
             else:
                 self.root.after(0, lambda p=peak: (
                     self._set_play_btn_icon(False, force_btn=True),
+                    self._react_to_playback_change(False),
                     self._set_puppy_singing_visible(False),
                     self._log(f"Other audio detected - paused Spotify (peak={p:.4f})"),
                 ))
@@ -5748,7 +6038,10 @@ class GameBeatsApp:
                 self._is_playing = True
                 self._music_missing_since = 0.0
                 self._last_spotify_loud_ts = time.time()
-                self.root.after(0, lambda: self._set_play_btn_icon(True, force_btn=True))
+                self.root.after(0, lambda: (
+                    self._react_to_playback_change(True),
+                    self._set_play_btn_icon(True, force_btn=True),
+                ))
                 return
         except Exception:
             pass
@@ -5771,6 +6064,7 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             self._last_spotify_loud_ts = time.time()
             self.root.after(0, lambda: (
+                self._react_to_playback_change(True),
                 self._set_play_btn_icon(True, force_btn=True),
                 self._log("Other audio quiet - resumed Spotify"),
             ))
@@ -6004,6 +6298,7 @@ class GameBeatsApp:
         if not uri:
             self._log("No current playlist to block yet.")
             return
+        self._play_puppy_change_animation(force=True)
 
         # Defer notifier IMMEDIATELY (before background thread) so the monitor
         # loop cannot show the notifier during disk I/O.
@@ -6081,6 +6376,7 @@ class GameBeatsApp:
         if not self.current_game:
             self._log("Start a saved game first, then GameBeats can pick another playlist.")
             return
+        self._play_puppy_change_animation(force=True)
         
         # Track tried playlist
         if self._current_playlist_uri:
@@ -6544,8 +6840,14 @@ class GameBeatsApp:
         """
         playing = bool(playing)
         previous = bool(getattr(self, "_is_playing", False))
-        changed = (playing != previous) or bool(force_btn)
+        actual_changed = playing != previous
+        changed = actual_changed or bool(force_btn)
         self._is_playing = playing
+        if actual_changed:
+            try:
+                self._react_to_playback_change(playing)
+            except Exception:
+                pass
         if playing:
             self._start_play_btn_pulse()
         else:
@@ -6827,9 +7129,13 @@ class GameBeatsApp:
         return True
 
     def _play_pause_toggle(self):
-        """Single-button toggle: pause if playing, play if paused."""
+        """Single-button toggle: pause if playing, play if paused.
+
+        Returns False only when the request was refused because another
+        play/pause action is already in flight.
+        """
         if not self.spotify or not self._begin_play_pause():
-            return
+            return False
         self._user_toggle_ts = time.time()
 
         was_playing = self._spotify_is_playing_for_toggle()
@@ -6866,7 +7172,7 @@ class GameBeatsApp:
         except Exception as ex:
             self._finish_play_pause()
             self._log(f"Could not start play/pause command: {ex}")
-        return
+        return True
 
     def _play_pause(self):
         """Legacy alias — routes to the toggle."""
@@ -6874,6 +7180,7 @@ class GameBeatsApp:
 
     def _next(self):
         if self.spotify:
+            self._play_puppy_change_animation(force=True)
             threading.Thread(target=self._media_next, daemon=True).start()
 
     def _media_next(self):
@@ -6986,6 +7293,7 @@ class GameBeatsApp:
             if track_changed:
                 # In-place track-change reaction: head turn + ear perk.
                 self._puppy_reaction_until = time.time() + 1.15
+                self._play_puppy_change_animation()
             self._last_np_key = key
         except Exception:
             pass
@@ -7477,6 +7785,7 @@ class GameBeatsApp:
                 # Game switched while notifier was up — don't auto-play
                 self._playlist_end_pending = False
                 return
+            self._play_puppy_change_animation(force=True)
 
             # Explicitly track currently finished playlist so it isn't picked again
             if self._current_playlist_uri and self._current_playlist_uri not in self._tried_playlist_uris:
@@ -7542,6 +7851,7 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             if not (game_snapshot and game_snapshot == self.current_game):
                 return
+            self._play_puppy_change_animation(force=True)
             
             # Track currently finished playlist so it isn't picked again
             if self._current_playlist_uri and self._current_playlist_uri not in self._tried_playlist_uris:
@@ -7711,6 +8021,23 @@ class GameBeatsApp:
             self._log("Link copied to clipboard (browser not opened).")
         except Exception as ex:
             self._log(f"Could not copy link: {ex}")
+
+    # ── DESKTOP PUPPY CALLBACKS ───────────────────────────────────────────────
+
+    def _puppy_overlay_playing(self):
+        try:
+            return bool(self._spotify_is_playing_for_toggle())
+        except Exception:
+            try:
+                return not self._intentional_pause_active()
+            except Exception:
+                return False
+
+    def _puppy_overlay_toggle(self):
+        return self._play_pause_toggle()
+
+    def _puppy_overlay_try_another(self):
+        self._try_another_playlist()
 
     # ── OVERLAY CONTROL CALLBACKS ─────────────────────────────────────────────
 

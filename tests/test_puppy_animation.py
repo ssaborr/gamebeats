@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import time
 import unittest
 from unittest.mock import MagicMock
 
@@ -416,6 +417,353 @@ class TestPuppyCanvasNeverMoves(unittest.TestCase):
         canvas.create_image.assert_not_called()
         # A rebuild may raise the puppy; the tick loop may not.
         canvas.tag_raise.assert_called_once_with("puppy")
+
+
+class TestMultiStateAnimationAssets(unittest.TestCase):
+    """Idle, pause, and change must share one canvas and one paw baseline."""
+
+    def _normalized(self, target_size, bottom_pad, margin):
+        from ui.puppy_gif import (
+            PUPPY_BOB_GIF,
+            PUPPY_CHANGE_GIF,
+            PUPPY_PAUSE_GIF,
+            load_gif_frames,
+            normalize_animation_states,
+        )
+
+        raw = {}
+        for name, filename in (
+            ("idle", PUPPY_BOB_GIF),
+            ("pause", PUPPY_PAUSE_GIF),
+            ("change", PUPPY_CHANGE_GIF),
+        ):
+            path = os.path.join(BASE_DIR, "assets", filename)
+            self.assertTrue(os.path.exists(path), path)
+            raw[name] = load_gif_frames(path)
+        return normalize_animation_states(
+            raw,
+            reference="idle",
+            target_size=target_size,
+            bottom_pad=bottom_pad,
+            margin=margin,
+        )
+
+    def test_all_states_share_canvas_and_feet_baseline(self):
+        states, canvas = self._normalized((64, 72), 2, 1)
+        self.assertEqual(set(states), {"idle", "pause", "change"})
+        self.assertGreater(canvas[0], 64, "reaction headset/droop needs width")
+        self.assertGreater(canvas[1], 72, "reaction headset/droop needs height")
+        for name, (frames, durations) in states.items():
+            self.assertTrue(frames, name)
+            self.assertEqual(len(frames), len(durations), name)
+            bottoms = set()
+            for frame in frames:
+                self.assertEqual(frame.size, canvas, name)
+                bbox = frame.getchannel("A").getbbox()
+                self.assertIsNotNone(bbox, name)
+                bottoms.add(bbox[3])
+            self.assertEqual(
+                bottoms, {canvas[1] - 2},
+                f"{name} feet drifted off the shared baseline",
+            )
+
+    def test_overlay_states_use_the_same_large_canvas(self):
+        states, canvas = self._normalized((170, 170), 0, 2)
+        self.assertEqual(canvas, (263, 205))
+        for name, (frames, _durations) in states.items():
+            for frame in frames:
+                self.assertEqual(frame.size, canvas, name)
+                self.assertEqual(
+                    frame.getchannel("A").getbbox()[3], canvas[1], name
+                )
+
+    def test_room_body_scale_stays_64_wide(self):
+        states, _canvas = self._normalized((64, 72), 2, 1)
+        widths = []
+        for frame in states["idle"][0]:
+            bbox = frame.getchannel("A").getbbox()
+            widths.append(bbox[2] - bbox[0])
+        # The old mascot body was 64 source pixels wide.  The larger reaction
+        # canvas must not shrink it to make room for headphones.
+        self.assertGreaterEqual(max(widths), 62)
+        self.assertLessEqual(max(widths), 64)
+
+
+class TestRoomPuppyActions(unittest.TestCase):
+    def _make_app(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_gif_states = {
+            "idle": (("i0", "i1"), (120, 120)),
+            "pause": (("p0", "p1"), (120, 120)),
+            "change": (("c0", "c1"), (120, 120)),
+        }
+        app._puppy_gif_frames = ("i0", "i1")
+        app._puppy_gif_durations = (120, 120)
+        app._puppy_action_state = None
+        app._puppy_action_started = 0.0
+        app._puppy_action_loops = 1
+        app._puppy_action_reverse = False
+        app._puppy_action_hold = False
+        app._reduce_motion_enabled = MagicMock(return_value=False)
+        app._spotify_started_by_us = True
+        app._is_playing = True
+        app._spotify_audio_active = False
+        app._intentional_pause_active = MagicMock(return_value=False)
+        return app
+
+    def test_change_action_advances_then_returns_to_the_bob(self):
+        app = self._make_app()
+        app._start_puppy_action("change", now=100.0)
+        self.assertEqual(app._puppy_action_state, "change")
+        self.assertEqual(app._puppy_frame_name(now=100.0), "action:change:0")
+        self.assertEqual(app._puppy_frame_name(now=100.12), "action:change:1")
+        self.assertTrue(
+            app._puppy_frame_name(now=101.0).startswith("gif:")
+        )
+        self.assertIsNone(app._puppy_action_state)
+
+    def test_pause_action_holds_its_last_pose(self):
+        app = self._make_app()
+        app._start_puppy_action("pause", hold=True, now=200.0)
+        self.assertEqual(app._puppy_frame_name(now=201.0), "action:pause:1")
+        self.assertEqual(app._puppy_frame_name(now=220.0), "action:pause:1")
+        self.assertEqual(app._puppy_action_state, "pause")
+
+    def test_resume_action_plays_the_pause_clip_backwards(self):
+        app = self._make_app()
+        app._start_puppy_action("pause", reverse=True, now=300.0)
+        self.assertEqual(app._puppy_frame_name(now=300.0), "action:pause:1")
+        self.assertEqual(app._puppy_frame_name(now=300.12), "action:pause:0")
+        self.assertTrue(app._puppy_frame_name(now=301.0).startswith("gif:"))
+        self.assertIsNone(app._puppy_action_state)
+
+    def test_reduced_motion_skips_actions(self):
+        app = self._make_app()
+        app._reduce_motion_enabled.return_value = True
+        app._start_puppy_action("change", now=400.0)
+        self.assertIsNone(app._puppy_action_state)
+
+    def test_pause_first_does_not_stomp_the_change_animation(self):
+        app = self._make_app()
+        now = time.time()
+        app._start_puppy_action("change", now=now)
+        app._puppy_action_started = now
+        app._react_to_playback_change(False)
+        self.assertEqual(app._puppy_action_state, "change")
+        self.assertFalse(app._puppy_action_hold)
+
+    def test_first_track_start_does_not_play_a_resume_animation(self):
+        app = self._make_app()
+        app._react_to_playback_change(True)
+        self.assertIsNone(app._puppy_action_state)
+
+    def test_resume_reverses_an_existing_pause_action(self):
+        app = self._make_app()
+        app._start_puppy_action("pause", hold=True, now=500.0)
+        app._puppy_action_started = 500.0
+        app._react_to_playback_change(True)
+        self.assertEqual(app._puppy_action_state, "pause")
+        self.assertTrue(app._puppy_action_reverse)
+        self.assertFalse(app._puppy_action_hold)
+
+    def test_action_frame_name_selects_the_requested_gif_state(self):
+        app = self._make_app()
+        first = MagicMock()
+        second = MagicMock()
+        app._puppy_gif_states["change"] = ((first, second), (120, 120))
+        app._puppy_photo_cache = {}
+
+        result = app._puppy_image_for("action:change:1", (8, 8))
+
+        self.assertIs(result, second.resize.return_value)
+        second.resize.assert_called_once()
+        first.resize.assert_not_called()
+
+    def test_change_animation_uses_a_short_cooldown_for_polling(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_change_cooldown_until = 0.0
+
+        app._play_puppy_change_animation(force=True)
+        self.assertEqual(app._puppy_action_state, "change")
+        self.assertEqual(
+            app._puppy_singing_overlay.play_change_animation.call_count, 1
+        )
+
+        app._puppy_action_state = None
+        app._play_puppy_change_animation()
+        self.assertIsNone(
+            app._puppy_action_state,
+            "polling should not restart a just-triggered change clip",
+        )
+        self.assertEqual(
+            app._puppy_singing_overlay.play_change_animation.call_count, 1
+        )
+
+
+class TestDesktopPuppyControls(unittest.TestCase):
+    def _make_overlay(self, playing=True):
+        from ui.mascot_notifier import PuppySingingOverlay
+
+        root = MagicMock()
+        overlay = PuppySingingOverlay(root, corner="bottom-left")
+        overlay._win = MagicMock()
+        overlay._win.winfo_x.return_value = 10
+        overlay._win.winfo_y.return_value = 20
+        overlay._win.after.return_value = "job"
+        overlay._label = MagicMock()
+        overlay._visible = True
+        overlay._photos = ["i0", "i1"]
+        overlay._durations = (120, 120)
+        overlay._photos_by_state = {
+            "idle": ["i0", "i1"],
+            "pause": ["p0", "p1"],
+            "change": ["c0", "c1"],
+        }
+        overlay._durations_by_state = {
+            "idle": (120, 120),
+            "pause": (120, 120),
+            "change": (120, 120),
+        }
+        overlay._state = "idle"
+        overlay._base_paused = not playing
+        overlay._on_toggle_play_pause = MagicMock()
+        overlay._on_try_another = MagicMock()
+        overlay._get_playing = MagicMock(return_value=playing)
+        overlay._save_pos = MagicMock()
+        return overlay
+
+    @staticmethod
+    def _event(x=100, y=100, state=0):
+        event = MagicMock()
+        event.x = 5
+        event.y = 5
+        event.x_root = x
+        event.y_root = y
+        event.state = state
+        return event
+
+    def test_short_click_pauses_and_holds_the_drooped_pose(self):
+        overlay = self._make_overlay(playing=True)
+        event = self._event()
+
+        overlay._on_press(event)
+        overlay._on_release(event)
+
+        overlay._on_toggle_play_pause.assert_called_once_with()
+        self.assertTrue(overlay._base_paused)
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay._active_reverse)
+        self.assertEqual(overlay._idx, 0)
+
+    def test_refused_toggle_leaves_the_pose_alone(self):
+        overlay = self._make_overlay(playing=True)
+        overlay._on_toggle_play_pause.return_value = False
+
+        overlay._on_press(self._event())
+        overlay._on_release(self._event())
+
+        overlay._on_toggle_play_pause.assert_called_once_with()
+        self.assertEqual(overlay._state, "idle")
+        self.assertFalse(overlay._base_paused)
+
+    def test_second_click_plays_the_pause_clip_in_reverse(self):
+        overlay = self._make_overlay(playing=False)
+
+        overlay._on_press(self._event())
+        overlay._on_release(self._event())
+
+        overlay._on_toggle_play_pause.assert_called_once_with()
+        self.assertFalse(overlay._base_paused)
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_reverse)
+        self.assertFalse(overlay._active_hold)
+        self.assertEqual(overlay._idx, 1)
+
+    def test_long_click_tries_another_without_toggling(self):
+        from ui.mascot_notifier import PUPPY_LONG_CLICK_MS
+
+        self.assertEqual(PUPPY_LONG_CLICK_MS, 650)
+        overlay = self._make_overlay(playing=True)
+        event = self._event()
+
+        overlay._on_press(event)
+        self.assertEqual(overlay._long_job, "job")
+        overlay._fire_long_click()
+        overlay._on_release(event)
+
+        overlay._on_try_another.assert_called_once_with()
+        overlay._on_toggle_play_pause.assert_not_called()
+        self.assertEqual(overlay._state, "change")
+        self.assertTrue(overlay._long_fired is False)
+
+    def test_ctrl_drag_moves_and_saves_without_toggling(self):
+        overlay = self._make_overlay(playing=True)
+        press = self._event(state=0x0004)
+        move = self._event(x=150, y=140, state=0x0004)
+
+        overlay._on_press(press)
+        overlay._on_motion(move)
+        overlay._on_release(move)
+
+        overlay._win.geometry.assert_called_once_with("+60+60")
+        overlay._save_pos.assert_called_once_with(60, 60)
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_try_another.assert_not_called()
+
+    def test_ctrl_pressed_mid_drag_still_moves_and_saves(self):
+        overlay = self._make_overlay(playing=True)
+        press = self._event(state=0)
+        move = self._event(x=140, y=130, state=0x0004)
+
+        overlay._on_press(press)
+        overlay._on_motion(move)
+        overlay._on_release(move)
+
+        overlay._win.geometry.assert_called_once_with("+50+50")
+        overlay._save_pos.assert_called_once_with(50, 50)
+        overlay._on_try_another.assert_not_called()
+        overlay._on_toggle_play_pause.assert_not_called()
+
+    def test_plain_drag_does_not_move_or_toggle(self):
+        overlay = self._make_overlay(playing=True)
+        press = self._event()
+        move = self._event(x=130, y=100)
+
+        overlay._on_press(press)
+        overlay._on_motion(move)
+        overlay._on_release(move)
+
+        overlay._win.geometry.assert_not_called()
+        overlay._on_toggle_play_pause.assert_not_called()
+        self.assertIsNone(overlay._long_job)
+
+    def test_change_animation_is_not_cut_off_by_new_track_state(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.play_change_animation()
+        self.assertEqual(overlay._state, "change")
+
+        overlay.set_playback_state(True)
+
+        self.assertEqual(overlay._state, "change")
+        self.assertFalse(overlay._base_paused)
+
+
+class TestDesktopPuppySettingsCopy(unittest.TestCase):
+    def test_gesture_help_names_all_three_actions(self):
+        from ui.app import PUPPY_OVERLAY_GESTURES, PUPPY_OVERLAY_HELP
+
+        gestures = dict(PUPPY_OVERLAY_GESTURES)
+        self.assertIn("CLICK", gestures)
+        self.assertIn("LONG CLICK", gestures)
+        self.assertIn("CTRL + DRAG", gestures)
+        self.assertIn("pause", gestures["CLICK"].lower())
+        self.assertIn("another playlist", gestures["LONG CLICK"].lower())
+        self.assertIn("move", gestures["CTRL + DRAG"].lower())
+        self.assertIn("stays visible", PUPPY_OVERLAY_HELP.lower())
 
 
 if __name__ == "__main__":
