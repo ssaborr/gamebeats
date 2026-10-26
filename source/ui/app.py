@@ -5373,7 +5373,7 @@ class GameBeatsApp:
         if not self.spotify:
             return
         try:
-            ok = self._send_spotify_pause_command()
+            ok = self._send_spotify_pause_command(was_playing=True)
         except Exception:
             ok = False
         try:
@@ -6043,7 +6043,11 @@ class GameBeatsApp:
 
         ok = False
         try:
-            if hasattr(self.spotify, "ensure_paused"):
+            if hasattr(self, "_send_spotify_pause_command"):
+                ok = bool(self._send_spotify_pause_command(
+                    paused_by_game=True, was_playing=True
+                ))
+            elif hasattr(self.spotify, "ensure_paused"):
                 try:
                     ok = bool(self.spotify.ensure_paused(paused_by_game=True))
                 except TypeError:
@@ -6054,6 +6058,7 @@ class GameBeatsApp:
             self.root.after(0, lambda e=ex: self._log(f"Other-audio pause failed: {e}"))
 
         if ok:
+            self._remember_spotify_pause_claim(True)
             self._paused_by_game_flag = True
             self._playlist_end_pending = False
             self._music_missing_since = 0.0
@@ -6110,7 +6115,9 @@ class GameBeatsApp:
 
         ok = False
         try:
-            if hasattr(self.spotify, "ensure_playing"):
+            if hasattr(self, "_send_spotify_resume_command"):
+                ok = bool(self._send_spotify_resume_command())
+            elif hasattr(self.spotify, "ensure_playing"):
                 ok = bool(self.spotify.ensure_playing())
             elif hasattr(self.spotify, "resume"):
                 ok = bool(self.spotify.resume())
@@ -6120,6 +6127,7 @@ class GameBeatsApp:
             self.root.after(0, lambda e=ex: self._log(f"Other-audio resume failed: {e}"))
 
         if ok:
+            self._remember_spotify_pause_claim(False)
             self._paused_by_game_flag = False
             self._remove_pause_reason("auto")
             self._is_playing = True
@@ -6905,6 +6913,10 @@ class GameBeatsApp:
         actual_changed = playing != previous
         changed = actual_changed or bool(force_btn)
         self._is_playing = playing
+        if not playing:
+            # Stale meter state must not make the next play request reveal the
+            # desktop puppy before the new audio is actually audible.
+            self._spotify_audio_active = False
         if actual_changed:
             try:
                 self._react_to_playback_change(playing)
@@ -6940,7 +6952,20 @@ class GameBeatsApp:
                 pass
             try:
                 if playing and not self._intentional_pause_active():
-                    self._set_puppy_singing_visible(True)
+                    # Do not reveal/bob the desktop puppy just because a play
+                    # command was accepted.  Wait until the audio meter has
+                    # actually heard music; the monitor calls this method with
+                    # the confirmed state on the first loud tick.  Otherwise
+                    # the puppy bobs during playlist loading with no sound.
+                    if getattr(self, "_audio_monitor_running", False):
+                        # With a live meter, wait for confirmed audio.  The
+                        # monitor calls this method with the real loud state.
+                        if getattr(self, "_spotify_audio_active", False):
+                            self._set_puppy_singing_visible(True)
+                    else:
+                        # No meter is available (e.g. no game session), so the
+                        # play state is the best signal we have.
+                        self._set_puppy_singing_visible(True)
                 elif not playing and self._intentional_pause_active():
                     self._set_puppy_singing_visible(False)
             except Exception:
@@ -6982,6 +7007,104 @@ class GameBeatsApp:
                 continue
         return None
 
+    def _spotify_audio_playing_now(self) -> bool:
+        """Best-effort *actual* audio check, not a cached playback flag.
+
+        UI Automation can stop finding Spotify's transport button (especially
+        in the compact mini-player).  In that state core keeps returning its
+        last known play flag, which is how GameBeats could show "playing" while
+        Spotify was visibly paused.  An audio sample is the tie-breaker.
+        """
+        try:
+            from core.audio_monitor import get_spotify_loopback_peak
+            peak, _db, status = get_spotify_loopback_peak()
+            if status == "ok" and float(peak) > SPOTIFY_UI_AUDIO_ON_THRESHOLD:
+                return True
+        except Exception:
+            pass
+        # The monitor runs every ~0.5s.  Its confirmed state is a useful
+        # second sample for browser/desktop source switching.
+        try:
+            if getattr(self, "_spotify_audio_active", False):
+                if self._spotify_sound_detected_recently(0.9):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _wait_for_spotify_playback(self, playing: bool, timeout: float = 1.6) -> bool:
+        """Wait briefly for audible playback to match the requested state."""
+        deadline = time.time() + max(0.0, float(timeout))
+        while True:
+            if self._spotify_audio_playing_now() == bool(playing):
+                return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.12)
+
+    def _spotify_desktop_is_primary_source(self) -> bool:
+        """True when resume/pause should go straight to the desktop client.
+
+        UI Automation can spend several seconds probing Spotify's compact
+        player before failing.  The audio monitor already knows which source is
+        audible, so use that to send the fast targeted command first.
+        """
+        try:
+            controller = self.spotify
+            if controller is None:
+                return False
+            # A desktop controller is unambiguous.
+            if (hasattr(controller, "_desktop_audible")
+                    and hasattr(controller, "_send_playback_command")):
+                return True
+            if getattr(controller, "_last_audio_source", "") == "desktop":
+                return True
+            checker = getattr(controller, "_uses_desktop_player", None)
+            if callable(checker):
+                return bool(checker())
+        except Exception:
+            pass
+        return False
+
+    def _send_targeted_spotify_command(self, action: str) -> bool:
+        """Send a Spotify-window play/pause command without a global media key.
+
+        Core's UI Automation path fails when Spotify is in its compact/mini
+        player because the "Player controls" group is not exposed.  WM_APPCOMMAND
+        posted directly to a Spotify window is still targeted at Spotify and is
+        the reliable fallback used by core's own playlist launch code.
+        """
+        if not self.spotify or action not in ("play", "pause"):
+            return False
+        candidates = []
+        try:
+            desktop = getattr(self.spotify, "_desktop_player", None)
+            if desktop is None and hasattr(self.spotify, "_desktop_helper"):
+                try:
+                    desktop = self.spotify._desktop_helper()
+                except Exception:
+                    desktop = None
+            if desktop is not None:
+                candidates.append(desktop)
+        except Exception:
+            pass
+        candidates.append(self.spotify)
+
+        seen = set()
+        for player in candidates:
+            if player is None or id(player) in seen:
+                continue
+            seen.add(id(player))
+            sender = getattr(player, "_send_playback_command", None)
+            if not callable(sender):
+                continue
+            try:
+                if bool(sender(action)):
+                    return True
+            except Exception:
+                continue
+        return False
+
     def _spotify_is_playing_for_toggle(self) -> bool:
         """Resolve clicks from explicit/audio state instead of stale UI state."""
         # Explicit pause state wins. Residual loopback audio for ~1s after a
@@ -7004,52 +7127,178 @@ class GameBeatsApp:
             return bool(state)
         return bool(getattr(self, "_is_playing", False))
 
-    def _send_spotify_pause_command(self) -> bool:
+    def _send_spotify_pause_command(
+        self, paused_by_game: bool = False, was_playing: bool = None
+    ) -> bool:
         if not self.spotify:
             return False
+        if was_playing is None:
+            was_playing = bool(getattr(self, "_is_playing", False))
+        monitor_live = bool(getattr(self, "_audio_monitor_running", False))
+
+        def _mark_paused():
+            self._remember_spotify_playback_state(False)
+            self._remember_spotify_pause_claim(bool(paused_by_game))
+
+        # When Spotify's desktop client is the audible source, send the fast
+        # targeted command first.  This avoids UI Automation spending seconds
+        # probing the compact player before it fails.
+        targeted_sent = False
+        if self._spotify_desktop_is_primary_source():
+            targeted_sent = self._send_targeted_spotify_command("pause")
+            if targeted_sent:
+                if not monitor_live:
+                    _mark_paused()
+                    return True
+                if self._wait_for_spotify_playback(False, timeout=0.9):
+                    _mark_paused()
+                    return True
+
         ok = False
         try:
             if hasattr(self.spotify, "ensure_paused"):
                 try:
-                    ok = bool(self.spotify.ensure_paused(paused_by_game=False))
+                    ok = bool(self.spotify.ensure_paused(
+                        paused_by_game=paused_by_game
+                    ))
                 except TypeError:
                     ok = bool(self.spotify.ensure_paused())
             elif hasattr(self.spotify, "pause"):
-                ok = bool(self.spotify.pause())
+                ok = bool(self.spotify.pause(paused_by_game=paused_by_game))
             elif hasattr(self.spotify, "media_stop"):
                 ok = bool(self.spotify.media_stop())
             elif hasattr(self.spotify, "media_play_pause"):
                 ok = bool(self.spotify.media_play_pause())
         except Exception:
             ok = False
+
+        # If ensure_paused() claimed success because the moment it sampled was
+        # quiet, or UI Automation could not find the mini-player button, send
+        # the idempotent targeted pause.  This is safe even if already paused.
+        if (not ok) or bool(was_playing):
+            if not targeted_sent:
+                targeted_sent = self._send_targeted_spotify_command("pause")
+            ok = ok or targeted_sent
+
+        # Only report success when the requested state is actually audible/
+        # silent.  This is what prevents the UI from drifting away from Spotify.
+        if monitor_live:
+            if self._wait_for_spotify_playback(False, timeout=1.2):
+                _mark_paused()
+                return True
+            # One bounded targeted retry for slow Electron windows.
+            if self._send_targeted_spotify_command("pause"):
+                if self._wait_for_spotify_playback(False, timeout=1.2):
+                    _mark_paused()
+                    return True
+            return False
+        if ok:
+            _mark_paused()
         return ok
 
     def _send_spotify_resume_command(self) -> bool:
         if not self.spotify:
             return False
+        if self._spotify_audio_playing_now():
+            self._remember_spotify_playback_state(True)
+            self._remember_spotify_pause_claim(False)
+            return True
+        monitor_live = bool(getattr(self, "_audio_monitor_running", False))
+        try:
+            _clear_spotify_mixer_mute()
+        except Exception:
+            pass
 
-        def _attempt() -> bool:
-            try:
-                if hasattr(self.spotify, "ensure_playing"):
-                    return bool(self.spotify.ensure_playing())
-                if hasattr(self.spotify, "resume"):
-                    return bool(self.spotify.resume())
-                if hasattr(self.spotify, "play"):
-                    return bool(self.spotify.play())
-                if hasattr(self.spotify, "media_play_pause"):
-                    return bool(self.spotify.media_play_pause())
-            except Exception:
-                return False
+        def _mark_playing():
+            self._remember_spotify_playback_state(True)
+            self._remember_spotify_pause_claim(False)
+
+        # Fast path for the desktop player.  The targeted WM_APPCOMMAND is
+        # delivered immediately and does not depend on the compact player's
+        # UIA tree being exposed.
+        targeted_sent = False
+        if self._spotify_desktop_is_primary_source():
+            targeted_sent = self._send_targeted_spotify_command("play")
+            if targeted_sent:
+                if not monitor_live:
+                    _mark_playing()
+                    return True
+                if self._wait_for_spotify_playback(True, timeout=0.9):
+                    _mark_playing()
+                    return True
+
+        ok = False
+        try:
+            if hasattr(self.spotify, "ensure_playing"):
+                ok = bool(self.spotify.ensure_playing())
+            elif hasattr(self.spotify, "resume"):
+                ok = bool(self.spotify.resume())
+            elif hasattr(self.spotify, "play"):
+                ok = bool(self.spotify.play())
+            elif hasattr(self.spotify, "media_play_pause"):
+                ok = bool(self.spotify.media_play_pause())
+        except Exception:
+            ok = False
+
+        # UI Automation is the common failure point in the compact player.
+        # Use Spotify-targeted WM_APPCOMMAND as a fallback; never play_playlist
+        # here (that navigates and restarts the mix).
+        if not ok and not targeted_sent:
+            targeted_sent = self._send_targeted_spotify_command("play")
+        ok = ok or targeted_sent
+
+        if monitor_live:
+            if self._wait_for_spotify_playback(True, timeout=1.6):
+                _mark_playing()
+                return True
+            # ensure_playing() can return True from a stale cached state.  Send
+            # the idempotent targeted play and verify actual audio once more.
+            if self._send_targeted_spotify_command("play"):
+                if self._wait_for_spotify_playback(True, timeout=1.4):
+                    _mark_playing()
+                    return True
             return False
-
-        ok = _attempt()
-        if not ok:
-            # One bounded retry. NEVER fall back to play_playlist() here:
-            # that navigates to the playlist and restarts it, which users
-            # experienced as "pausing/resuming starts another playlist".
-            time.sleep(0.35)
-            ok = _attempt()
+        if ok:
+            _mark_playing()
         return ok
+
+    def _remember_spotify_pause_claim(self, paused: bool):
+        """Keep core's game-pause claim in sync with a targeted command.
+
+        The fast desktop path bypasses core's ensure_* methods, so core's
+        private ``_paused_by_game`` flag would otherwise go stale.
+        """
+        try:
+            if self.spotify is not None:
+                self.spotify._paused_by_game = bool(paused)
+        except Exception:
+            pass
+        try:
+            desktop = getattr(self.spotify, "_desktop_player", None)
+            if desktop is not None:
+                desktop._paused_by_game = bool(paused)
+        except Exception:
+            pass
+
+    def _remember_spotify_playback_state(self, playing: bool):
+        """Mirror a confirmed targeted command into core's cached state."""
+        targets = [self.spotify]
+        try:
+            desktop = getattr(self.spotify, "_desktop_player", None)
+            if desktop is not None:
+                targets.append(desktop)
+        except Exception:
+            pass
+        seen = set()
+        for target in targets:
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            try:
+                target._is_playing = bool(playing)
+                target._playback_state_known = True
+            except Exception:
+                continue
 
     def _apply_user_pause_state(self, paused: bool):
         self._user_toggle_ts = time.time()
@@ -7137,10 +7386,11 @@ class GameBeatsApp:
         """Pause Spotify (called from overlay / keyboard shortcut)."""
         if not self.spotify or not self._begin_play_pause():
             return False
+        was_playing = bool(getattr(self, "_is_playing", False))
         self._apply_user_pause_state(True)
         def _do_pause():
             try:
-                ok = self._send_spotify_pause_command()
+                ok = self._send_spotify_pause_command(was_playing=was_playing)
             except Exception:
                 ok = False
             def finish():
@@ -7148,19 +7398,13 @@ class GameBeatsApp:
                 if ok:
                     self._set_play_btn_icon(False, force_btn=True)
                 else:
-                    # Read reality after clearing the optimistic flags.  Keep
-                    # the droop if the pause did land, otherwise reflect that
-                    # the player is still audibly playing.
+                    # The command was not confirmed by actual audio.  It is
+                    # safer to keep the playing pose than to show a droop for
+                    # music the user can still hear.  A later audio tick can
+                    # still reconcile the state.
                     self._apply_user_pause_state(False)
-                    actual = self._spotify_is_playing_for_toggle()
-                    if not actual:
-                        self._apply_user_pause_state(True)
-                    self._set_play_btn_icon(actual, force_btn=True)
-                    self._log(
-                        "Spotify pause did not confirm — still playing."
-                        if actual else
-                        "Spotify pause did not confirm, but playback is paused."
-                    )
+                    self._set_play_btn_icon(True, force_btn=True)
+                    self._log("Spotify pause did not confirm — still playing.")
             self.root.after(0, finish)
         try:
             threading.Thread(target=_do_pause, daemon=True).start()
@@ -7187,15 +7431,10 @@ class GameBeatsApp:
                 if ok:
                     self._set_play_btn_icon(True, force_btn=True)
                 else:
-                    # Read reality before deciding which pose to restore.  If
-                    # audio did come back despite the missing confirmation,
-                    # stay in the playing pose; otherwise keep the droop.
-                    actual = self._spotify_is_playing_for_toggle()
-                    if actual:
-                        self._apply_user_pause_state(False)
-                    else:
-                        self._apply_user_pause_state(True)
-                    self._set_play_btn_icon(actual, force_btn=True)
+                    # The targeted retry could not make Spotify audible.
+                    # Return to the paused pose instead of lying about it.
+                    self._apply_user_pause_state(True)
+                    self._set_play_btn_icon(False, force_btn=True)
                     self._log("Spotify resume did not confirm — click Play again.")
             self.root.after(0, finish)
         try:
@@ -7226,7 +7465,7 @@ class GameBeatsApp:
             ok = False
             try:
                 if was_playing:
-                    ok = self._send_spotify_pause_command()
+                    ok = self._send_spotify_pause_command(was_playing=True)
                 else:
                     ok = self._send_spotify_resume_command()
             except Exception:
@@ -7238,17 +7477,16 @@ class GameBeatsApp:
                     self._set_play_btn_icon(target_playing, force_btn=True)
                 else:
                     self._log("Spotify play/pause command did not confirm.")
-                    if not target_playing:
-                        # Pause failed: clear the optimistic pause flags first
-                        # so the read below can see the real audio state.
-                        self._apply_user_pause_state(False)
-                    actual = self._spotify_is_playing_for_toggle()
-                    if not actual:
-                        # Still paused (a failed resume, or a pause that
-                        # actually took effect): keep the drooped pose so the
-                        # next click still means Play.
+                    if target_playing:
+                        # Resume failed: remain visibly paused so the next
+                        # click still means Play.
                         self._apply_user_pause_state(True)
-                    self._set_play_btn_icon(actual, force_btn=True)
+                        self._set_play_btn_icon(False, force_btn=True)
+                    else:
+                        # Pause failed: Spotify is still audible, so restore
+                        # the playing pose and clear the optimistic droop.
+                        self._apply_user_pause_state(False)
+                        self._set_play_btn_icon(True, force_btn=True)
 
             self.root.after(0, finish)
 
@@ -8134,13 +8372,17 @@ class GameBeatsApp:
 
     def _overlay_play(self):
         """Play button from control overlay."""
-        if self._play() and self._control_overlay:
+        accepted = bool(self._play())
+        if accepted and self._control_overlay:
             self._control_overlay.update_status(playing=True)
+        return accepted
 
     def _overlay_pause(self):
         """Pause button from control overlay."""
-        if self._pause() and self._control_overlay:
+        accepted = bool(self._pause())
+        if accepted and self._control_overlay:
             self._control_overlay.update_status(playing=False)
+        return accepted
 
     def _overlay_prev(self):
         """Previous button from control overlay."""

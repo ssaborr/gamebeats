@@ -231,16 +231,24 @@ class RuntimeOverlay(ctk.CTkToplevel):
             self._play()
 
     def _play(self):
+        # Do not paint a playing state for a request the app refused (for
+        # example while another pause/resume command is still in flight).
+        accepted = self.on_play()
+        if accepted is False:
+            return False
         self._is_playing = True
         self.play_btn.configure(text="⏸")
         self.status_lbl.configure(text="\u25b6 Playing", text_color=ACCENT)
-        self.on_play()
+        return True
 
     def _pause(self):
+        accepted = self.on_pause()
+        if accepted is False:
+            return False
         self._is_playing = False
         self.play_btn.configure(text="▶")
         self.status_lbl.configure(text="⏸ Paused", text_color=AMBER)
-        self.on_pause()
+        return True
 
     def _on_prev(self):
         self.status_lbl.configure(text="⏮ Previous", text_color=TEXT_SEC)
