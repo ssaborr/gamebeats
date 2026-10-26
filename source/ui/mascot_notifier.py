@@ -489,6 +489,12 @@ class PuppySingingOverlay:
             and bool(getattr(self, "_base_paused", False)) == target_paused
         ):
             return
+        # A playlist-change reaction owns the overlay until it ends.  A
+        # pause/resume click during that clip may update the resting state,
+        # but must not cut the change animation short.
+        if getattr(self, "_state", "idle") == "change":
+            self._base_paused = target_paused
+            return
         self._play_pause_animation(not playing)
 
     def _cancel_long_job(self):

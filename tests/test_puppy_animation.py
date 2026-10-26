@@ -1,9 +1,10 @@
 import json
 import os
+import random
 import sys
 import time
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE_DIR = os.path.join(BASE_DIR, "source")
@@ -526,10 +527,21 @@ class TestRoomPuppyActions(unittest.TestCase):
 
     def test_pause_action_holds_its_last_pose(self):
         app = self._make_app()
+        app._is_playing = False
+        app._intentional_pause_active.return_value = True
         app._start_puppy_action("pause", hold=True, now=200.0)
         self.assertEqual(app._puppy_frame_name(now=201.0), "action:pause:1")
         self.assertEqual(app._puppy_frame_name(now=220.0), "action:pause:1")
         self.assertEqual(app._puppy_action_state, "pause")
+
+    def test_stale_pause_hold_is_cleared_after_resume(self):
+        app = self._make_app()
+        app._start_puppy_action("pause", hold=True, now=200.0)
+        # Playback has resumed and no pause flag remains, but a duplicate
+        # notification left the old hold behind.
+        app._is_playing = True
+        self.assertTrue(app._puppy_frame_name(now=201.0).startswith("gif:"))
+        self.assertIsNone(app._puppy_action_state)
 
     def test_resume_action_plays_the_pause_clip_backwards(self):
         app = self._make_app()
@@ -552,6 +564,43 @@ class TestRoomPuppyActions(unittest.TestCase):
         app._puppy_action_started = now
         app._react_to_playback_change(False)
         self.assertEqual(app._puppy_action_state, "change")
+        self.assertFalse(app._puppy_action_hold)
+
+    def test_change_finishing_while_paused_settles_into_pause_hold(self):
+        app = self._make_app()
+        app._is_playing = False
+        app._intentional_pause_active.return_value = True
+        app._start_puppy_action("change", now=600.0)
+
+        self.assertEqual(app._puppy_frame_name(now=601.0), "action:pause:1")
+        self.assertEqual(app._puppy_action_state, "pause")
+        self.assertTrue(app._puppy_action_hold)
+        self.assertFalse(app._puppy_action_reverse)
+        # The pose must stay put on later frames, too.
+        self.assertEqual(app._puppy_frame_name(now=700.0), "action:pause:1")
+
+    def test_duplicate_pause_does_not_restart_the_forward_droop(self):
+        app = self._make_app()
+        app._is_playing = False
+        app._intentional_pause_active.return_value = True
+        app._start_puppy_action("pause", hold=True, now=700.0)
+
+        app._react_to_playback_change(False)
+
+        self.assertEqual(app._puppy_action_state, "pause")
+        self.assertEqual(app._puppy_action_started, 700.0)
+
+    def test_duplicate_resume_does_not_restart_the_reverse_clip(self):
+        app = self._make_app()
+        app._start_puppy_action("pause", hold=True, now=time.time() - 0.1)
+        app._react_to_playback_change(True)
+        started = app._puppy_action_started
+        self.assertTrue(app._puppy_action_reverse)
+
+        app._react_to_playback_change(True)
+
+        self.assertEqual(app._puppy_action_started, started)
+        self.assertTrue(app._puppy_action_reverse)
         self.assertFalse(app._puppy_action_hold)
 
     def test_first_track_start_does_not_play_a_resume_animation(self):
@@ -750,6 +799,472 @@ class TestDesktopPuppyControls(unittest.TestCase):
 
         self.assertEqual(overlay._state, "change")
         self.assertFalse(overlay._base_paused)
+
+    def test_change_finishing_while_paused_returns_to_the_drooped_pose(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.play_change_animation()
+
+        overlay._update_reaction_frame(overlay._state_started + 10.0)
+
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay._active_reverse)
+        self.assertEqual(overlay._idx, 1)
+
+    def test_change_finishing_while_playing_returns_to_idle(self):
+        overlay = self._make_overlay(playing=True)
+        overlay.play_change_animation()
+
+        overlay._update_reaction_frame(overlay._state_started + 10.0)
+
+        self.assertEqual(overlay._state, "idle")
+        self.assertFalse(overlay._active_hold)
+        self.assertEqual(overlay._idx, 0)
+
+    def test_resume_click_during_change_updates_rest_state_only(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.play_change_animation()
+
+        overlay._handle_click()
+
+        self.assertEqual(overlay._state, "change")
+        self.assertFalse(overlay._base_paused)
+        self.assertTrue(overlay._active_loops)
+
+    def test_pause_click_during_change_keeps_the_change_clip(self):
+        overlay = self._make_overlay(playing=True)
+        overlay.play_change_animation()
+
+        overlay._handle_click()
+
+        self.assertEqual(overlay._state, "change")
+        self.assertTrue(overlay._base_paused)
+
+    def test_duplicate_resume_does_not_restart_the_reverse_clip(self):
+        overlay = self._make_overlay(playing=False)
+        overlay._on_press(self._event())
+        overlay._on_release(self._event())
+        self.assertTrue(overlay._active_reverse)
+        started = overlay._state_started
+
+        overlay.set_playback_state(True)
+
+        self.assertEqual(overlay._state_started, started)
+        self.assertTrue(overlay._active_reverse)
+
+
+class TestPuppyStateFuzz(unittest.TestCase):
+    """Deterministic fuzzing for the room/overlay animation state machines."""
+
+    STATES = {
+        "idle": (("i0", "i1", "i2", "i3"), (120, 120, 120, 120)),
+        "pause": (("p0", "p1", "p2", "p3"), (120, 120, 120, 120)),
+        "change": (("c0", "c1", "c2", "c3"), (120, 120, 120, 120)),
+    }
+
+    def _make_room_app(self, now):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_gif_states = self.STATES
+        app._puppy_gif_frames = self.STATES["idle"][0]
+        app._puppy_gif_durations = self.STATES["idle"][1]
+        app._puppy_action_state = None
+        app._puppy_action_started = 0.0
+        app._puppy_action_loops = 1
+        app._puppy_action_reverse = False
+        app._puppy_action_hold = False
+        app._puppy_change_cooldown_until = 0.0
+        app._puppy_singing_overlay = None
+        app._reduce_motion_enabled = MagicMock(return_value=False)
+        app._spotify_started_by_us = True
+        app._is_playing = True
+        app._spotify_audio_active = True
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._paused_by_game_flag = False
+        app._intentional_pause_active = lambda: bool(
+            app._manual_paused
+            or app._user_paused_flag
+            or app._paused_by_game_flag
+        )
+        return app
+
+    def _render_room(self, app, now, seed, step):
+        frame = app._puppy_frame_name(now)
+        pressed = app._intentional_pause_active()
+        if frame.startswith("action:"):
+            _, state, index = frame.split(":")
+            frames = self.STATES[state][0]
+            self.assertTrue(
+                0 <= int(index) < len(frames),
+                f"seed={seed} step={step}: bad frame {frame}",
+            )
+            if (
+                not pressed
+                and app._is_playing
+                and state == "pause"
+                and app._puppy_action_hold
+            ):
+                self.fail(
+                    f"seed={seed} step={step}: stale droop while playing "
+                    f"({frame})"
+                )
+        elif frame.startswith("gif:"):
+            # A paused puppy may only show the neutral bob while a change
+            # reaction is still playing; once that ends it must hold the pose.
+            if pressed and not app._puppy_action_active("change"):
+                self.fail(
+                    f"seed={seed} step={step}: paused puppy fell back to {frame}"
+                )
+        else:
+            self.fail(f"seed={seed} step={step}: unknown frame {frame}")
+        return frame
+
+    def test_seeded_room_pause_resume_change_transitions(self):
+        from ui import app as app_mod
+
+        for seed in range(250):
+            rng = random.Random(seed)
+            now = [1000.0]
+            app = self._make_room_app(now[0])
+
+            def set_playing(playing):
+                previous = app._is_playing
+                app._is_playing = bool(playing)
+                if previous != app._is_playing:
+                    app._react_to_playback_change(app._is_playing)
+
+            def user_paused():
+                return bool(app._manual_paused or app._user_paused_flag)
+
+            def manual_pause():
+                if user_paused():
+                    return
+                app._manual_paused = True
+                app._user_paused_flag = True
+                app._paused_by_game_flag = False
+                set_playing(False)
+
+            def manual_resume():
+                if not user_paused():
+                    return
+                app._manual_paused = False
+                app._user_paused_flag = False
+                app._paused_by_game_flag = False
+                set_playing(True)
+
+            def game_pause():
+                if user_paused() or app._paused_by_game_flag:
+                    return
+                app._paused_by_game_flag = True
+                app._is_playing = False
+                app._react_to_playback_change(False)
+
+            def game_resume():
+                if user_paused() or not app._paused_by_game_flag:
+                    return
+                app._paused_by_game_flag = False
+                app._is_playing = True
+                app._react_to_playback_change(True)
+
+            def playlist_pause():
+                app._is_playing = False
+                app._react_to_playback_change(False)
+                app._manual_paused = True
+                app._user_paused_flag = True
+                app._paused_by_game_flag = False
+
+            def new_playlist():
+                app._manual_paused = False
+                app._user_paused_flag = False
+                app._paused_by_game_flag = False
+                set_playing(True)
+
+            with patch.object(app_mod.time, "time", side_effect=lambda: now[0]):
+                for step in range(50):
+                    event = rng.randrange(14)
+                    if event == 0:
+                        manual_pause()
+                    elif event == 1:
+                        manual_resume()
+                    elif event == 2:
+                        game_pause()
+                    elif event == 3:
+                        game_resume()
+                    elif event == 4:
+                        playlist_pause()
+                    elif event == 5:
+                        new_playlist()
+                    elif event == 6:
+                        app._play_puppy_change_animation(force=True)
+                    elif event == 7:
+                        app._play_puppy_change_animation()
+                    elif event in (8, 9):
+                        now[0] += rng.choice(
+                            [0.0, 0.03, 0.06, 0.12, 0.24, 0.6, 1.5, 3.0]
+                        )
+                    elif event == 11:
+                        app._react_to_playback_change(False)
+                    elif event == 12:
+                        app._react_to_playback_change(True)
+                    elif event == 13:
+                        if app._is_playing:
+                            manual_pause()
+                        elif user_paused():
+                            manual_resume()
+                        elif app._paused_by_game_flag:
+                            game_resume()
+                        else:
+                            new_playlist()
+                    self._render_room(app, now[0], seed, step)
+
+                now[0] += 3.0
+                frame = self._render_room(app, now[0], seed, "final")
+                with self.subTest(seed=seed):
+                    if app._intentional_pause_active():
+                        self.assertEqual(
+                            frame,
+                            f"action:pause:{len(self.STATES['pause'][0]) - 1}",
+                            "paused puppy must settle on its drooped pose",
+                        )
+                        self.assertTrue(app._puppy_action_hold)
+                    else:
+                        self.assertFalse(
+                            frame.startswith("action:"),
+                            f"resumed puppy must return to the bob ({frame})",
+                        )
+
+    def test_seeded_overlay_pause_resume_try_another(self):
+        from ui import mascot_notifier as mn
+
+        def event(x=100, y=100):
+            e = MagicMock()
+            e.x = 5
+            e.y = 5
+            e.x_root = x
+            e.y_root = y
+            e.state = 0
+            return e
+
+        for seed in range(180):
+            rng = random.Random(seed)
+            now = [100.0]
+            controls = TestDesktopPuppyControls()
+            overlay = controls._make_overlay(playing=True)
+            overlay._saved_pos = (10, 20)
+            app = {
+                "playing": True,
+                "busy": False,
+                "jobs": [],
+            }
+
+            def queue(kind, success):
+                app["jobs"].append(
+                    {"kind": kind, "ticks": rng.randint(1, 4), "success": success}
+                )
+
+            def toggle():
+                if app["busy"]:
+                    return False
+                if app["playing"]:
+                    # Optimistic pause; the command may later fail.
+                    app["playing"] = False
+                    overlay.set_playback_state(False, animate=True)
+                    if rng.random() < 0.25:
+                        queue("pause", False)
+                    return True
+                app["busy"] = True
+                queue("resume", rng.random() >= 0.25)
+                return True
+
+            def try_another():
+                # The app re-triggers its change reaction, then pauses the old
+                # mix while it searches for the next playlist.
+                overlay.play_change_animation()
+                app["playing"] = False
+                overlay.set_playback_state(False, animate=True)
+                queue("switch", rng.random() >= 0.2)
+
+            def run_jobs():
+                due = []
+                for job in app["jobs"]:
+                    job["ticks"] -= 1
+                    if job["ticks"] <= 0:
+                        due.append(job)
+                app["jobs"] = [j for j in app["jobs"] if j["ticks"] > 0]
+                for job in due:
+                    app["busy"] = False
+                    if job["kind"] == "resume":
+                        app["playing"] = bool(job["success"])
+                        overlay.set_playback_state(app["playing"])
+                        if app["playing"]:
+                            overlay.show()
+                        else:
+                            overlay.set_playback_state(False, animate=True)
+                    elif job["kind"] == "pause":
+                        # A failed pause means the music is still playing.
+                        app["playing"] = bool(job["success"])
+                        overlay.set_playback_state(app["playing"])
+                    elif job["kind"] == "switch":
+                        app["playing"] = bool(job["success"])
+                        overlay.set_playback_state(app["playing"])
+                        if app["playing"]:
+                            overlay.show()
+
+            overlay._on_toggle_play_pause = toggle
+            overlay._on_try_another = try_another
+            overlay._get_playing = lambda: app["playing"]
+
+            with patch.object(mn.time, "monotonic", side_effect=lambda: now[0]):
+                with patch.object(mn, "_apply_noactivate", return_value=None):
+                    for step in range(50):
+                        ev = rng.randrange(12)
+                        state_before = overlay._state
+                        if ev == 0:
+                            if overlay._visible:
+                                overlay._handle_click()
+                        elif ev == 1:
+                            if overlay._visible:
+                                press = event()
+                                overlay._on_press(press)
+                                overlay._on_release(press)
+                        elif ev == 2:
+                            if overlay._visible:
+                                press = event()
+                                overlay._on_press(press)
+                                overlay._fire_long_click()
+                                overlay._on_release(press)
+                        elif ev == 3:
+                            overlay.play_change_animation()
+                        elif ev == 4:
+                            overlay.set_playback_state(True, animate=True)
+                        elif ev == 5:
+                            overlay.set_playback_state(False, animate=True)
+                        elif ev == 6:
+                            overlay.hide(immediate=True)
+                        elif ev == 7:
+                            overlay.show()
+                        elif ev in (8, 9):
+                            now[0] += rng.choice(
+                                [0.0, 0.03, 0.06, 0.12, 0.25, 0.6, 1.5]
+                            )
+                            if ev == 9:
+                                run_jobs()
+                            overlay._animate()
+                        elif ev == 10:
+                            overlay._animate()
+                        else:
+                            run_jobs()
+
+                        if overlay._state not in ("idle", "pause", "change"):
+                            self.fail(
+                                f"seed={seed} step={step}: bad state "
+                                f"{overlay._state}"
+                            )
+                        if (
+                            ev in (0, 1, 2)
+                            and state_before == "change"
+                            and overlay._visible
+                        ):
+                            self.assertEqual(
+                                overlay._state,
+                                "change",
+                                "a click must not cut the change clip short",
+                            )
+                        if (
+                            not overlay._base_paused
+                            and overlay._state == "pause"
+                            and overlay._active_hold
+                            and not overlay._active_reverse
+                        ):
+                            self.fail(
+                                f"seed={seed} step={step}: stale droop while "
+                                "playing"
+                            )
+
+                    now[0] += 3.0
+                    with patch.object(mn, "_apply_noactivate", return_value=None):
+                        for _ in range(20):
+                            now[0] += 0.1
+                            overlay._animate()
+                        overlay.show()
+                        for _ in range(20):
+                            now[0] += 0.1
+                            overlay._animate()
+
+            with self.subTest(seed=seed):
+                frames = overlay._state_frames(overlay._state)[0]
+                if overlay._base_paused:
+                    self.assertEqual(overlay._state, "pause")
+                    self.assertTrue(overlay._active_hold)
+                    self.assertEqual(overlay._idx, len(frames) - 1)
+                else:
+                    self.assertEqual(overlay._state, "idle")
+
+
+class TestPlayPauseFailureRecovery(unittest.TestCase):
+    def _make_app(self, playing):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        state = {"playing": bool(playing)}
+        app.root = MagicMock()
+        app.root.after.side_effect = lambda _delay, fn, *args: fn(*args)
+        app.spotify = MagicMock()
+        app._is_playing = bool(playing)
+        app._manual_paused = not playing
+        app._user_paused_flag = not playing
+        app._paused_by_game_flag = False
+        app._begin_play_pause = MagicMock(return_value=True)
+        app._finish_play_pause = MagicMock()
+        app._send_spotify_pause_command = MagicMock(return_value=False)
+        app._send_spotify_resume_command = MagicMock(return_value=False)
+        app._spotify_is_playing_for_toggle = lambda: state["playing"]
+        app._set_play_btn_icon = MagicMock()
+        app._log = MagicMock()
+        pause_calls = []
+
+        def apply_pause(paused):
+            pause_calls.append(bool(paused))
+            app._manual_paused = bool(paused)
+            app._user_paused_flag = bool(paused)
+            if paused:
+                app._paused_by_game_flag = False
+
+        app._apply_user_pause_state = apply_pause
+        return app, state, pause_calls
+
+    @staticmethod
+    def _inline_thread():
+        class InlineThread:
+            def __init__(self, target, daemon=True):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        return InlineThread
+
+    def test_failed_resume_restores_the_paused_pose_and_flags(self):
+        app, state, pause_calls = self._make_app(playing=False)
+        with patch("ui.app.threading.Thread", self._inline_thread()):
+            self.assertTrue(app._play_pause_toggle())
+
+        self.assertEqual(pause_calls, [False, True])
+        self.assertTrue(app._manual_paused)
+        self.assertTrue(app._user_paused_flag)
+        self.assertEqual(app._set_play_btn_icon.call_args.args[0], False)
+
+    def test_failed_pause_reverts_to_the_playing_pose_and_flags(self):
+        app, state, pause_calls = self._make_app(playing=True)
+        with patch("ui.app.threading.Thread", self._inline_thread()):
+            self.assertTrue(app._play_pause_toggle())
+
+        self.assertEqual(pause_calls, [True, False])
+        self.assertFalse(app._manual_paused)
+        self.assertFalse(app._user_paused_flag)
+        self.assertEqual(app._set_play_btn_icon.call_args.args[0], True)
 
 
 class TestDesktopPuppySettingsCopy(unittest.TestCase):

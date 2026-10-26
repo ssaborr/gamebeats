@@ -3096,13 +3096,32 @@ class GameBeatsApp:
         # just triggered.
         if self._puppy_action_active("change"):
             return
+        action = getattr(self, "_puppy_action_state", None)
         if playing:
             # Only reverse the pause clip when the puppy was actually paused.
             # A first track at launch should start with the normal bob.
-            if getattr(self, "_puppy_action_state", None) != "pause":
+            if action != "pause":
+                return
+            # An audio-meter tick and the resume command can both fire.  Do
+            # not restart a reverse clip that is already running.
+            if (
+                getattr(self, "_puppy_action_reverse", False)
+                and self._puppy_action_active("pause")
+            ):
                 return
             self._start_puppy_action("pause", loops=1, reverse=True)
         else:
+            # Likewise, repeated pause notifications must not restart the
+            # forward droop (or reset an already-held pause pose).
+            if (
+                action == "pause"
+                and not getattr(self, "_puppy_action_reverse", False)
+                and (
+                    getattr(self, "_puppy_action_hold", False)
+                    or self._puppy_action_active("pause")
+                )
+            ):
+                return
             self._start_puppy_action("pause", loops=1, hold=True)
 
     def _play_puppy_change_animation(self, *, force=False):
@@ -3122,6 +3141,24 @@ class GameBeatsApp:
     def _puppy_frame_name(self, now=None):
         now = time.time() if now is None else now
         action = getattr(self, "_puppy_action_state", None)
+        # Self-heal a stale drooped pose.  If playback is running and nothing
+        # is intentionally paused any more, a held pause frame must not stay
+        # on screen (it can happen when the pause flags and _is_playing are
+        # updated from different callbacks in quick succession).
+        if (
+            action == "pause"
+            and getattr(self, "_puppy_action_hold", False)
+            and not getattr(self, "_puppy_action_reverse", False)
+            and getattr(self, "_is_playing", False)
+        ):
+            try:
+                still_paused = self._intentional_pause_active()
+            except Exception:
+                still_paused = False
+            if not still_paused:
+                self._puppy_action_state = None
+                self._puppy_action_hold = False
+                action = None
         state_frames = (
             getattr(self, "_puppy_gif_states", {}).get(action) if action else None
         )
@@ -3142,6 +3179,31 @@ class GameBeatsApp:
             if elapsed >= total * loops:
                 if not hold:
                     self._puppy_action_state = None
+                    # If a change clip ends while the music is still paused,
+                    # settle into the drooped pause pose instead of snapping
+                    # back to the neutral bob frame.
+                    try:
+                        still_paused = self._intentional_pause_active()
+                    except Exception:
+                        still_paused = False
+                    pause_state = getattr(
+                        self, "_puppy_gif_states", {}
+                    ).get("pause")
+                    if still_paused and pause_state and pause_state[0]:
+                        pause_frames, pause_durations = pause_state
+                        pause_durations = tuple(pause_durations or ())
+                        pause_total = (
+                            sum(pause_durations)
+                            or len(pause_frames) * 120
+                        )
+                        self._puppy_action_state = "pause"
+                        self._puppy_action_started = (
+                            now - pause_total / 1000.0 - 0.001
+                        )
+                        self._puppy_action_loops = 1
+                        self._puppy_action_reverse = False
+                        self._puppy_action_hold = True
+                        return f"action:pause:{len(pause_frames) - 1}"
                 else:
                     index = 0 if reverse else len(frames) - 1
                     return f"action:{action}:{index}"
@@ -7086,17 +7148,26 @@ class GameBeatsApp:
                 if ok:
                     self._set_play_btn_icon(False, force_btn=True)
                 else:
-                    # The player is still audibly playing; reflect reality so
-                    # the next click is a pause rather than a stuck toggle.
+                    # Read reality after clearing the optimistic flags.  Keep
+                    # the droop if the pause did land, otherwise reflect that
+                    # the player is still audibly playing.
                     self._apply_user_pause_state(False)
-                    self._set_play_btn_icon(True, force_btn=True)
-                    self._log("Spotify pause did not confirm — still playing.")
+                    actual = self._spotify_is_playing_for_toggle()
+                    if not actual:
+                        self._apply_user_pause_state(True)
+                    self._set_play_btn_icon(actual, force_btn=True)
+                    self._log(
+                        "Spotify pause did not confirm — still playing."
+                        if actual else
+                        "Spotify pause did not confirm, but playback is paused."
+                    )
             self.root.after(0, finish)
         try:
             threading.Thread(target=_do_pause, daemon=True).start()
         except Exception as ex:
             self._finish_play_pause()
             self._apply_user_pause_state(False)
+            self._set_play_btn_icon(True, force_btn=True)
             self._log(f"Could not start pause command: {ex}")
             return False
         return True
@@ -7116,13 +7187,22 @@ class GameBeatsApp:
                 if ok:
                     self._set_play_btn_icon(True, force_btn=True)
                 else:
-                    self._set_play_btn_icon(False, force_btn=True)
+                    # Read reality before deciding which pose to restore.  If
+                    # audio did come back despite the missing confirmation,
+                    # stay in the playing pose; otherwise keep the droop.
+                    actual = self._spotify_is_playing_for_toggle()
+                    if actual:
+                        self._apply_user_pause_state(False)
+                    else:
+                        self._apply_user_pause_state(True)
+                    self._set_play_btn_icon(actual, force_btn=True)
                     self._log("Spotify resume did not confirm — click Play again.")
             self.root.after(0, finish)
         try:
             threading.Thread(target=go, daemon=True).start()
         except Exception as ex:
             self._finish_play_pause()
+            self._apply_user_pause_state(True)
             self._set_play_btn_icon(False, force_btn=True)
             self._log(f"Could not start resume command: {ex}")
             return False
@@ -7159,10 +7239,15 @@ class GameBeatsApp:
                 else:
                     self._log("Spotify play/pause command did not confirm.")
                     if not target_playing:
-                        # Pause failed: revert the optimistic manual-pause flags
-                        # so the next click still means "pause", not "play".
+                        # Pause failed: clear the optimistic pause flags first
+                        # so the read below can see the real audio state.
                         self._apply_user_pause_state(False)
                     actual = self._spotify_is_playing_for_toggle()
+                    if not actual:
+                        # Still paused (a failed resume, or a pause that
+                        # actually took effect): keep the drooped pose so the
+                        # next click still means Play.
+                        self._apply_user_pause_state(True)
                     self._set_play_btn_icon(actual, force_btn=True)
 
             self.root.after(0, finish)
@@ -7171,6 +7256,12 @@ class GameBeatsApp:
             threading.Thread(target=go, daemon=True).start()
         except Exception as ex:
             self._finish_play_pause()
+            if target_playing:
+                self._apply_user_pause_state(True)
+                self._set_play_btn_icon(False, force_btn=True)
+            else:
+                self._apply_user_pause_state(False)
+                self._set_play_btn_icon(True, force_btn=True)
             self._log(f"Could not start play/pause command: {ex}")
         return True
 
