@@ -651,6 +651,35 @@ class TestRoomPuppyActions(unittest.TestCase):
             app._puppy_singing_overlay.play_change_animation.call_count, 1
         )
 
+    def test_paused_music_blocks_room_change_animation(self):
+        app = self._make_app()
+        app._is_playing = False
+        app._intentional_pause_active.return_value = True
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_change_cooldown_until = 0.0
+
+        changed = app._play_puppy_change_animation(force=True)
+
+        self.assertFalse(changed)
+        self.assertEqual(app._puppy_action_state, "pause")
+        self.assertTrue(app._puppy_action_hold)
+        app._puppy_singing_overlay.set_animation_locked.assert_called_with(
+            True, animate=False
+        )
+        app._puppy_singing_overlay.play_change_animation.assert_not_called()
+
+    def test_playing_music_allows_change_animation_and_unlocks_overlay(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_change_cooldown_until = 0.0
+
+        changed = app._play_puppy_change_animation(force=True)
+
+        self.assertTrue(changed)
+        self.assertEqual(app._puppy_action_state, "change")
+        app._puppy_singing_overlay.set_animation_locked.assert_called_with(False)
+        app._puppy_singing_overlay.play_change_animation.assert_called_once_with()
+
 
 class TestDesktopPuppyControls(unittest.TestCase):
     def _make_overlay(self, playing=True):
@@ -678,6 +707,7 @@ class TestDesktopPuppyControls(unittest.TestCase):
         }
         overlay._state = "idle"
         overlay._base_paused = not playing
+        overlay._animation_locked = False
         overlay._on_toggle_play_pause = MagicMock()
         overlay._on_try_another = MagicMock()
         overlay._get_playing = MagicMock(return_value=playing)
@@ -839,6 +869,83 @@ class TestDesktopPuppyControls(unittest.TestCase):
 
         self.assertEqual(overlay._state, "change")
         self.assertTrue(overlay._base_paused)
+
+    def test_locked_pause_blocks_change_animation(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.set_animation_locked(True)
+
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay.play_change_animation())
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay._active_reverse)
+        self.assertEqual(overlay._idx, 1)
+
+    def test_long_click_while_paused_holds_pose_but_still_requests_another(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.set_animation_locked(True)
+
+        overlay._on_press(self._event())
+        overlay._fire_long_click()
+
+        overlay._on_try_another.assert_called_once_with()
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertNotEqual(overlay._state, "change")
+
+    def test_lock_does_not_cut_an_inflight_change_clip(self):
+        overlay = self._make_overlay(playing=True)
+        self.assertTrue(overlay.play_change_animation())
+        overlay.set_animation_locked(True)
+
+        self.assertEqual(overlay._state, "change")
+        overlay._update_reaction_frame(overlay._state_started + 10.0)
+
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+
+    def test_resume_unlocks_and_reverses_the_pause_pose(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.set_animation_locked(True)
+
+        overlay.set_playback_state(True)
+
+        self.assertFalse(overlay._animation_locked)
+        self.assertFalse(overlay._base_paused)
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_reverse)
+        self.assertFalse(overlay._active_hold)
+
+    def test_resume_click_waits_for_confirmed_audio_before_unlocking(self):
+        overlay = self._make_overlay(playing=False)
+        overlay.set_animation_locked(True)
+        overlay._on_toggle_play_pause.return_value = True
+
+        overlay._handle_click()
+
+        # The app accepted the command, but the pose stays locked until the
+        # audio/play state actually comes back.
+        self.assertTrue(overlay._animation_locked)
+        self.assertTrue(overlay._base_paused)
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay._active_reverse)
+
+        overlay.set_playback_state(True)
+        self.assertFalse(overlay._animation_locked)
+        self.assertTrue(overlay._active_reverse)
+
+    def test_locked_idle_never_bobs(self):
+        overlay = self._make_overlay(playing=True)
+        overlay.set_animation_locked(True)
+        overlay._state = "idle"
+
+        overlay._animate()
+
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        overlay._win.after.assert_not_called()
 
     def test_duplicate_resume_does_not_restart_the_reverse_clip(self):
         overlay = self._make_overlay(playing=False)

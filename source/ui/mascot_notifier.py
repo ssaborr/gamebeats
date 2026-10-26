@@ -241,6 +241,11 @@ class PuppySingingOverlay:
         self._active_hold = False
         self._active_loops = 0
         self._base_paused = False
+        # A pause locks the overlay to its drooped pose.  Unlike _base_paused,
+        # this flag is set only for a real user/game pause, not for the brief
+        # silence while a new playlist is loading.  While locked, long-press
+        # "change" clips and the idle bob are not allowed to start.
+        self._animation_locked = False
         self._last_raise = 0.0
         self._visible = False
         self._drag_x = 0
@@ -420,24 +425,67 @@ class PuppySingingOverlay:
         if start_anim and self._visible:
             self._animate()
 
+    def _hold_pause_pose(self, *, animate=False):
+        """Freeze on the final drooped frame without restarting a held pose."""
+        if (
+            getattr(self, "_state", "idle") == "pause"
+            and getattr(self, "_active_hold", False)
+            and not getattr(self, "_active_reverse", False)
+        ):
+            return
+        if animate and self._visible:
+            self._play_pause_animation(False)
+        else:
+            self._set_state(
+                "pause", hold=True, loops=1,
+                start_at_end=True, start_anim=False,
+            )
+
+    def set_animation_locked(self, locked, *, animate=False):
+        """Remember a real pause and stop idle/change animations from starting.
+
+        A change clip that is already running is still allowed to finish; when
+        it ends, the lock makes it settle into the drooped pause pose instead
+        of the idle bob.
+        """
+        locked = bool(locked)
+        self._animation_locked = locked
+        if not locked:
+            return
+        self._base_paused = True
+        if getattr(self, "_state", "idle") == "change":
+            return
+        self._hold_pause_pose(animate=animate)
+
     def _play_pause_animation(self, playing):
         """Pause droops and holds; resume plays that same motion backwards."""
         playing = bool(playing)
         self._base_paused = not playing
+        self._animation_locked = not playing
         if playing:
             self._set_state("pause", reverse=True, hold=False, loops=1)
         else:
             self._set_state("pause", reverse=False, hold=True, loops=1)
 
     def play_change_animation(self):
+        # A long-press must not start the headset-swap clip while the music is
+        # paused.  Keep the drooped lock pose instead; the caller can still
+        # perform its playlist action.
+        if getattr(self, "_animation_locked", False):
+            if getattr(self, "_state", "idle") != "change":
+                self._hold_pause_pose(animate=False)
+            return False
         if not self._visible:
-            return
+            return False
         self._set_state("change", loops=1)
+        return True
 
     def set_playback_state(self, playing, *, animate=True):
         """Keep the overlay's pose in sync with app/audio pause changes."""
         playing = bool(playing)
         if playing:
+            # Audio/play state is the source of truth for unlocking the pose.
+            self._animation_locked = False
             if self._base_paused:
                 self._base_paused = False
                 # Let a playlist-change reaction finish instead of cutting it
@@ -460,6 +508,8 @@ class PuppySingingOverlay:
                         "pause", hold=True, loops=1,
                         start_at_end=True, start_anim=False,
                     )
+            elif getattr(self, "_animation_locked", False):
+                self._hold_pause_pose(animate=False)
 
     def _query_playing(self):
         if callable(self._get_playing):
@@ -487,6 +537,15 @@ class PuppySingingOverlay:
         if (
             had_callback
             and bool(getattr(self, "_base_paused", False)) == target_paused
+        ):
+            return
+        # A real pause lock is released only by confirmed playback.  Do not
+        # start the reverse/headset-on clip just because the app accepted the
+        # resume request; a failed resume must stay frozen in the pause pose.
+        if (
+            had_callback
+            and not target_paused
+            and getattr(self, "_animation_locked", False)
         ):
             return
         # A playlist-change reaction owns the overlay until it ends.  A
@@ -612,7 +671,10 @@ class PuppySingingOverlay:
                 pass
 
     def _finish_reaction(self):
-        if getattr(self, "_base_paused", False):
+        if (
+            getattr(self, "_animation_locked", False)
+            or getattr(self, "_base_paused", False)
+        ):
             self._set_state(
                 "pause", hold=True, loops=1,
                 start_at_end=True, start_anim=False,
@@ -691,7 +753,10 @@ class PuppySingingOverlay:
             pass
         self._fade_to(PUPPY_OVERLAY_ALPHA, 180)
         self._last_raise = time.monotonic()
-        if getattr(self, "_base_paused", False):
+        if (
+            getattr(self, "_animation_locked", False)
+            or getattr(self, "_base_paused", False)
+        ):
             # Paused overlays stay visible so another click can resume them.
             self._set_state(
                 "pause", hold=True, loops=1,
@@ -828,6 +893,13 @@ class PuppySingingOverlay:
                 )
             except Exception:
                 pass
+            return
+
+        # Idle bobbing is forbidden while the pause lock is set.  A change
+        # reaction is allowed to finish above, but the idle loop must never
+        # start or continue underneath a pause.
+        if getattr(self, "_animation_locked", False):
+            self._hold_pause_pose(animate=False)
             return
 
         photos = getattr(self, "_photos", [])

@@ -3056,6 +3056,29 @@ class GameBeatsApp:
             return False
         return True
 
+    def _puppy_animation_locked(self) -> bool:
+        """A real pause locks both the room and desktop puppy animations.
+
+        This is deliberately based on intentional pause (user/game), not the
+        brief silence while a new playlist loads; the latter still needs its
+        headset-swap change clip.
+        """
+        try:
+            return bool(self._intentional_pause_active())
+        except Exception:
+            return True
+
+    def _hold_room_pause_pose(self):
+        """Freeze the room puppy on the drooped frame without restarting it."""
+        state = getattr(self, "_puppy_action_state", None)
+        if (
+            state == "pause"
+            and getattr(self, "_puppy_action_hold", False)
+            and not getattr(self, "_puppy_action_reverse", False)
+        ):
+            return
+        self._start_puppy_action("pause", loops=1, hold=True)
+
     def _start_puppy_action(
         self, state, *, loops=1, reverse=False, hold=False, now=None,
     ):
@@ -3127,16 +3150,33 @@ class GameBeatsApp:
     def _play_puppy_change_animation(self, *, force=False):
         """Animate a song/playlist switch in the room and desktop overlay."""
         now = time.time()
+        if self._reduce_motion_enabled():
+            return False
+        overlay = getattr(self, "_puppy_singing_overlay", None)
+        if self._puppy_animation_locked():
+            # Paused music owns the pose.  A long-press may still ask for
+            # another playlist, but it must not start a headset-swap clip or
+            # leave the room puppy bobbing.  An already-running change clip is
+            # allowed to finish (same rule as the desktop overlay).
+            if not self._puppy_action_active("change"):
+                self._hold_room_pause_pose()
+            if overlay is not None:
+                try:
+                    overlay.set_animation_locked(True, animate=False)
+                except Exception:
+                    pass
+            return False
         if not force and now < getattr(self, "_puppy_change_cooldown_until", 0.0):
-            return
+            return False
         self._puppy_change_cooldown_until = now + 2.0
         self._start_puppy_action("change", loops=1)
-        overlay = getattr(self, "_puppy_singing_overlay", None)
         if overlay is not None:
             try:
+                overlay.set_animation_locked(False)
                 overlay.play_change_animation()
             except Exception:
                 pass
+        return True
 
     def _puppy_frame_name(self, now=None):
         now = time.time() if now is None else now
@@ -5895,6 +5935,7 @@ class GameBeatsApp:
                         pass
                     self._puppy_hide_job = None
                 try:
+                    overlay.set_animation_locked(False)
                     overlay.set_playback_state(True, animate=True)
                 except Exception:
                     pass
@@ -5910,6 +5951,10 @@ class GameBeatsApp:
                     self._puppy_hide_job = None
                 # A manual pause keeps the desktop puppy on screen (frozen in
                 # its drooped pose) so another click can resume playback.
+                try:
+                    overlay.set_animation_locked(True, animate=bool(user_paused))
+                except Exception:
+                    pass
                 if user_paused and not game_paused:
                     try:
                         if overlay.is_visible():
@@ -7320,6 +7365,15 @@ class GameBeatsApp:
             self._playlist_end_prompt_not_before = (
                 time.time() + max(3.0, self._playlist_end_delay_seconds())
             )
+            # Lock the desktop puppy before the button update can trigger its
+            # visibility path, so a long-press cannot start a change clip
+            # during the pause.
+            try:
+                overlay = getattr(self, "_puppy_singing_overlay", None)
+                if overlay is not None:
+                    overlay.set_animation_locked(True, animate=True)
+            except Exception:
+                pass
             self._set_play_btn_icon(False, force_btn=True)
             if getattr(self, "_mascot_notifier", None) is not None:
                 try:
