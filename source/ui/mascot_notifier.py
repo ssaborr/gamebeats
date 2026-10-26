@@ -30,6 +30,7 @@ if IS_WINDOWS:
 
 
 from ui import theme as T
+from ui.puppy_gif import PUPPY_BOB_GIF, fit_frame, load_gif_frames
 
 BG = T.BG
 SURFACE = T.SURFACE
@@ -46,23 +47,14 @@ NOTIFIER_TEXT_SUB = T.GOLD
 NOTIFIER_TEXT_MUTED = T.TEXT_MUTED
 NOTIFIER_BTN_HOVER = T.SURFACE3
 
-# The desktop singer uses the same 64x72 authored frames as the room mascot.
-# Every frame in this phrase shares one held pose; only the jaw (and one blink)
-# changes, so stepping through them reads as motion instead of a pose swap.
-# 24 beats at 100 ms is a 2.4-second phrase.
-PUPPY_SINGING_FRAMES = (
-    "talk_open", "talk_mid", "talk_low", "talk_mid",
-    "talk_open", "talk_mid", "talk_low", "talk_mid",
-    "talk_open", "talk_mid", "talk_low", "talk_mid",
-    "talk_open", "talk_blink", "talk_blink", "talk_mid",
-    "talk_open", "talk_mid", "talk_low", "talk_mid",
-    "talk_open", "talk_mid", "talk_low", "talk_mid",
-)
+# The desktop singer and the in-room mascot are both driven by the same
+# hand-authored headset-wearing bobbing-head GIF. Its frames share one cropped
+# canvas, so the window and room baseline stay put while the head and ears move.
+PUPPY_OVERLAY_GIF = PUPPY_BOB_GIF
 PUPPY_IDLE_FRAME = "idle_0"
-# 10 frames per second of small, local pixel changes.  The old sequence swapped
-# between two different full-body illustrations every 140 ms, which flickered
-# even at a "safe" interval.
-PUPPY_ANIMATION_INTERVAL = 100
+# The GIF is authored at 120 ms per frame. Keep that cadence so the bob reads
+# at the same speed in the room and in the desktop overlay.
+PUPPY_ANIMATION_INTERVAL = 120
 # Re-asserting topmost restacks the layered window; doing that on every audio
 # meter tick visibly hitched the animation.  Twice per second is plenty to stay
 # above a fullscreen game, so re-assert on a much slower cadence instead.
@@ -114,53 +106,30 @@ def _load_pixel_puppy_photo(name, max_size):
         return None
 
 
-def _build_singing_photos(frame_names, max_size):
-    """Load hard-edged animation frames, scaled by a whole-number factor.
+def _build_singing_photos(max_size):
+    """Load the bobbing-head GIF as transparent, consistently-sized photos.
 
-    The old overlay blended two high-resolution poses and bobbed the result.
-    This keeps the same draggable desktop-puppy behaviour while honouring the
-    pixel rules: nearest-neighbour scaling, binary sprite alpha, no drop shadow,
-    no sway, no vertical bob, no smooth cross-fade.
+    The source GIF is cropped to one shared box before scaling, so the overlay
+    window itself never moves or resizes between beats.  Only the artwork inside
+    the frame bobs.
     """
     if not HAS_PIL:
         return []
 
-    source_dir = T.assets_dir() / "puppy_design" / "anim"
-    cache = {}
-    images = []
-    for name in frame_names:
-        if name not in cache:
-            path = source_dir / f"{name}.png"
-            if not path.exists():
-                return []
-            cache[name] = Image.open(path).convert("RGBA")
-        images.append(cache[name])
-    if not images:
+    path = T.assets_dir() / PUPPY_OVERLAY_GIF
+    try:
+        frames, _durations = load_gif_frames(path)
+    except Exception:
+        return []
+    if not frames:
         return []
 
-    width = max(img.width for img in images)
-    height = max(img.height for img in images)
-    max_w, max_h = max_size
-    scale = max(1, min(int(max_w // width), int(max_h // height)))
-    photos_by_key = {}
     photos = []
-    for img in images:
-        key = id(img)
-        photo = photos_by_key.get(key)
-        if photo is None:
-            frame = img
-            if frame.size != (width, height):
-                frame = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-                frame.alpha_composite(
-                    img, ((width - img.width) // 2, (height - img.height) // 2)
-                )
-            if scale != 1:
-                frame = frame.resize(
-                    (width * scale, height * scale), Image.Resampling.NEAREST
-                )
-            photo = ImageTk.PhotoImage(frame)
-            photos_by_key[key] = photo
-        photos.append(photo)
+    for frame in frames:
+        fitted = fit_frame(frame, max_size)
+        if fitted is None:
+            continue
+        photos.append(ImageTk.PhotoImage(fitted))
     return photos
 
 
@@ -230,7 +199,7 @@ class PuppySingingOverlay:
             pass
         win.withdraw()
 
-        self._photos = _build_singing_photos(PUPPY_SINGING_FRAMES, (170, 170))
+        self._photos = _build_singing_photos((170, 170))
         if self._photos:
             self._label = tk.Label(
                 win,

@@ -179,86 +179,109 @@ class TestPuppyAnimator(unittest.TestCase):
         self.assertIn(frame, self._frames("idle"))
 
 
-class TestDesktopOverlayFrames(unittest.TestCase):
-    """The small desktop singer must move without swapping whole poses."""
+class TestDesktopOverlayGif(unittest.TestCase):
+    """The small desktop singer now uses the hand-authored bob GIF."""
 
-    # The removed headset painted its band across this strip.  The base plates
-    # never use the hardware ramp there, so any hit means a headset came back.
-    HEADBAND = (16, 8, 50, 15)
-    HARDWARE = {
-        (42, 23, 58),
-        (58, 43, 58),
-        (107, 90, 107),
-        (199, 184, 176),
-    }
+    def test_overlay_gif_decodes_to_matching_transparent_frames(self):
+        from ui.mascot_notifier import PUPPY_OVERLAY_GIF
+        from ui.puppy_gif import load_gif_frames
 
-    def _load(self, name):
-        path = os.path.join(ANIM_DIR, f"{name}.png")
-        self.assertTrue(os.path.exists(path), name)
-        return Image.open(path).convert("RGBA")
+        path = os.path.join(BASE_DIR, "assets", PUPPY_OVERLAY_GIF)
+        self.assertTrue(os.path.exists(path), path)
+        frames, durations = load_gif_frames(path)
+        self.assertGreaterEqual(len(frames), 8)
+        self.assertEqual(len(frames), len(durations))
+        size = frames[0].size
+        for frame in frames:
+            self.assertEqual(frame.size, size)
+            # The backyard black backdrop is gone; all four corners are clear.
+            for corner in (
+                (0, 0), (size[0] - 1, 0), (0, size[1] - 1),
+                (size[0] - 1, size[1] - 1),
+            ):
+                self.assertEqual(frame.getpixel(corner)[3], 0)
+        self.assertNotEqual(_pixels(frames[0]), _pixels(frames[1]))
 
-    def test_phrase_frames_are_hard_pixel_sprites_on_the_baseline(self):
-        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
-
-        for name in set(PUPPY_SINGING_FRAMES):
-            img = self._load(name)
-            self.assertEqual(img.size, (64, 72), name)
-            alpha = img.getchannel("A")
-            self.assertTrue(set(_pixels(alpha)) <= {0, 255}, name)
-            colors = {p[:3] for p in _pixels(img) if p[3] == 255}
-            self.assertLessEqual(len(colors), 19, name)
-            rows = [
-                y for y in range(img.height)
-                if any(img.getpixel((x, y))[3] for x in range(img.width))
-            ]
-            self.assertEqual(max(rows) + 1, 70, f"{name} feet drifted")
-
-    def test_every_frame_keeps_the_same_silhouette(self):
-        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
-
-        first = self._load(PUPPY_SINGING_FRAMES[0])
-        alpha = first.getchannel("A").tobytes()
-        bbox = first.getchannel("A").getbbox()
-        for name in set(PUPPY_SINGING_FRAMES):
-            img = self._load(name)
-            # Only jaw/eye pixels may change: no bob, sway, or pose swap.
-            self.assertEqual(img.getchannel("A").tobytes(), alpha, name)
-            self.assertEqual(img.getchannel("A").getbbox(), bbox, name)
-
-    def test_consecutive_beats_are_small_local_changes(self):
-        from ui.mascot_notifier import PUPPY_SINGING_FRAMES
-
-        previous_name = None
-        previous = None
-        for name in PUPPY_SINGING_FRAMES:
-            img = self._load(name)
-            if previous is not None and name != previous_name:
-                changed = sum(
-                    1 for a, b in zip(_pixels(previous), _pixels(img)) if a != b
-                )
-                # A full pose swap changes ~1100 pixels; jaw/eye beats stay
-                # under 300, so the overlay reads as motion rather than a cut.
-                self.assertLess(changed, 300, f"{previous_name} -> {name}")
-            previous, previous_name = img, name
-
-    def test_no_frame_wears_the_removed_headset(self):
+    def test_no_legacy_frame_wears_the_removed_headset(self):
         names = [
             p[:-4] for p in os.listdir(ANIM_DIR)
             if p.endswith(".png") and p != "contact_sheet.png"
         ]
         self.assertGreaterEqual(len(names), 12)
-        x0, y0, x1, y1 = self.HEADBAND
+        x0, y0, x1, y1 = (16, 8, 50, 15)
+        hardware = {
+            (42, 23, 58),
+            (58, 43, 58),
+            (107, 90, 107),
+            (199, 184, 176),
+        }
         for name in names:
-            img = self._load(name)
+            img = Image.open(os.path.join(ANIM_DIR, f"{name}.png")).convert("RGBA")
             for y in range(y0, y1):
                 for x in range(x0, x1):
                     pixel = img.getpixel((x, y))
                     if pixel[3] == 0:
                         continue
                     self.assertNotIn(
-                        pixel[:3], self.HARDWARE,
+                        pixel[:3], hardware,
                         f"{name} still draws headset hardware at {(x, y)}",
                     )
+
+
+class TestRoomGifAsset(unittest.TestCase):
+    def test_room_gif_frames_share_the_sprite_canvas_and_baseline(self):
+        from ui.puppy_gif import PUPPY_BOB_GIF, load_gif_frames, normalize_sprite_frames
+
+        path = os.path.join(BASE_DIR, "assets", PUPPY_BOB_GIF)
+        self.assertTrue(os.path.exists(path), path)
+        frames, durations = load_gif_frames(path)
+        self.assertGreaterEqual(len(frames), 8)
+        self.assertEqual(len(frames), len(durations))
+
+        normalized = normalize_sprite_frames(frames)
+        self.assertEqual(len(normalized), len(frames))
+        size = normalized[0].size
+        self.assertAlmostEqual(size[0] / size[1], 64 / 72, places=2)
+        bottoms = set()
+        for frame in normalized:
+            self.assertEqual(frame.size, size)
+            self.assertEqual(frame.getpixel((0, 0))[3], 0)
+            bottoms.add(frame.getchannel("A").getbbox()[3])
+        self.assertEqual(len(bottoms), 1, "feet drifted between GIF frames")
+
+    def test_gif_frame_index_loops_on_the_authored_timing(self):
+        from ui.puppy_gif import frame_index_at
+
+        durations = (120, 120, 120)
+        self.assertEqual(frame_index_at(0, durations), 0)
+        self.assertEqual(frame_index_at(119, durations), 0)
+        self.assertEqual(frame_index_at(120, durations), 1)
+        self.assertEqual(frame_index_at(250, durations), 2)
+        self.assertEqual(frame_index_at(360, durations), 0)
+
+    def test_room_and_overlay_use_the_same_bobbing_mascot(self):
+        from ui.app import PUPPY_ROOM_GIF
+        from ui.mascot_notifier import PUPPY_OVERLAY_GIF
+        from ui.puppy_gif import PUPPY_BOB_GIF
+
+        self.assertEqual(PUPPY_ROOM_GIF, PUPPY_BOB_GIF)
+        self.assertEqual(PUPPY_OVERLAY_GIF, PUPPY_BOB_GIF)
+
+    def test_room_bobs_in_every_state_and_freezes_for_reduce_motion(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_gif_frames = (object(), object())
+        app._puppy_gif_durations = (120, 120)
+        app._reduce_motion_enabled = MagicMock(return_value=False)
+
+        self.assertEqual(app._puppy_frame_name(now=0.0), "gif:0")
+        self.assertEqual(app._puppy_frame_name(now=0.13), "gif:1")
+        # 240 ms wraps back to the first bob.
+        self.assertEqual(app._puppy_frame_name(now=0.24), "gif:0")
+
+        app._reduce_motion_enabled.return_value = True
+        self.assertEqual(app._puppy_frame_name(now=0.13), "gif:0")
 
 
 class TestPuppyCanvasNeverMoves(unittest.TestCase):

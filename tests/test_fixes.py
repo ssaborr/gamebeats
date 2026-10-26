@@ -1067,11 +1067,17 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         )
 
         # A tick 10 ms late advances exactly one beat and shortens the wait.
-        with patch("ui.mascot_notifier.time.monotonic", return_value=100.11):
+        with patch(
+            "ui.mascot_notifier.time.monotonic",
+            return_value=100.0 + interval + 0.01,
+        ):
             overlay._animate()
         self.assertEqual(overlay._idx, 1)
         self.assertEqual(overlay._label.configure.call_count, 1)
-        self.assertEqual(overlay._win.after.call_args.args[0], 90)
+        self.assertEqual(
+            overlay._win.after.call_args.args[0],
+            PUPPY_ANIMATION_INTERVAL - 10,
+        )
 
     def test_desktop_puppy_animation_drops_beats_after_a_long_stall(self):
         from ui.mascot_notifier import (

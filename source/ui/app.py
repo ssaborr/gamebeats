@@ -46,6 +46,12 @@ from ui.onboarding import OnboardingOverlay
 from ui.games_page import GamesPage, get_game_square_icon_image, _generate_gradient_fallback
 from ui.mascot_notifier import MascotNotifier, PuppySingingOverlay
 from ui.puppy_anim import PuppyAnimator
+from ui.puppy_gif import (
+    PUPPY_BOB_GIF,
+    frame_index_at as _gif_frame_index_at,
+    load_gif_frames as _load_gif_frames,
+    normalize_sprite_frames as _normalize_gif_frames,
+)
 from ui.runtime_overlay import RuntimeOverlay
 from ui import theme as T
 
@@ -149,6 +155,23 @@ def _load_design_sprite(name):
         return Image.open(path).convert("RGBA")
     except Exception:
         return None
+
+
+PUPPY_ROOM_GIF = PUPPY_BOB_GIF
+
+
+def _load_puppy_gif(name, *, sprite=False):
+    """Decode one of the hand-authored GIF mascots into room-ready frames."""
+    path = _design_asset_path(name)
+    if not path or not HAS_PIL:
+        return (), ()
+    try:
+        frames, durations = _load_gif_frames(path)
+        if sprite:
+            frames = _normalize_gif_frames(frames)
+        return frames, durations
+    except Exception:
+        return (), ()
 
 
 def _load_design_json(name):
@@ -1827,6 +1850,12 @@ class GameBeatsApp:
                 name: _load_design_sprite(name)
                 for name in ("idle", "mic", "sing", "encore")
             }
+        # The room now uses the same headset-wearing bobbing-head GIF as the
+        # desktop overlay. The old authored sprites remain the fallback if the
+        # GIF is missing or cannot be decoded.
+        self._puppy_gif_frames, self._puppy_gif_durations = _load_puppy_gif(
+            PUPPY_ROOM_GIF, sprite=True,
+        )
         self._puppy_photo_cache = {}
         self._puppy_mood_until = 0.0
         self._puppy_reaction_until = 0.0
@@ -2781,13 +2810,24 @@ class GameBeatsApp:
         self._schedule_room_redraw(55)
 
     def _puppy_image_for(self, name, size):
-        sprite = getattr(self, "_puppy_sprites", {}).get(name)
-        if sprite is None:
-            return None
         key = (name, int(size[0]), int(size[1]))
         cached = self._puppy_photo_cache.get(key)
         if cached is not None:
             return cached
+        sprite = None
+        if isinstance(name, str) and name.startswith("gif:"):
+            try:
+                index = int(name.split(":", 1)[1])
+            except Exception:
+                return None
+            frames = getattr(self, "_puppy_gif_frames", ())
+            if not frames:
+                return None
+            sprite = frames[index % len(frames)]
+        else:
+            sprite = getattr(self, "_puppy_sprites", {}).get(name)
+        if sprite is None:
+            return None
         try:
             resampling = getattr(Image, "Resampling", Image)
             scaled = sprite.resize((int(size[0]), int(size[1])), resampling.NEAREST)
@@ -2887,6 +2927,14 @@ class GameBeatsApp:
 
     def _puppy_frame_name(self, now=None):
         now = time.time() if now is None else now
+        gif_frames = getattr(self, "_puppy_gif_frames", ())
+        if gif_frames:
+            # The bobbing-head mascot stays alive in every room state; only
+            # reduce-motion freezes it on the first pose.
+            if self._reduce_motion_enabled():
+                return "gif:0"
+            durations = getattr(self, "_puppy_gif_durations", ())
+            return f"gif:{_gif_frame_index_at(now * 1000.0, durations)}"
         mode = self._puppy_animation_mode(now)
         animator = getattr(self, "_puppy_anim", None)
         if animator is not None:
