@@ -944,6 +944,133 @@ class TestAppNewRegressions(unittest.TestCase):
         app._begin_playlist_switch_pause.assert_called_once_with("Try another")
         app._pause_spotify_for_playlist_switch.assert_called_once()
 
+    def test_fresh_playback_grace_holds_until_audio_or_timeout(self):
+        from ui.app import FRESH_PLAYBACK_GRACE_SEC, GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._spotify_started_by_us = True
+        app._playlist_audio_armed = False
+        app._playback_started_ts = time.time()
+
+        self.assertTrue(GameBeatsApp._fresh_playback_grace(app))
+
+        app._playlist_audio_armed = True
+        self.assertFalse(GameBeatsApp._fresh_playback_grace(app))
+
+        app._playlist_audio_armed = False
+        app._playback_started_ts = time.time() - FRESH_PLAYBACK_GRACE_SEC - 1
+        self.assertFalse(GameBeatsApp._fresh_playback_grace(app))
+
+    def test_fast_track_refresh_uses_background_fetch(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._closing = False
+        app._track_refresh_jobs = []
+        app.root = MagicMock()
+
+        GameBeatsApp._schedule_fast_track_refresh(app)
+
+        self.assertEqual(app.root.after.call_count, 5)
+        self.assertEqual(
+            [call.args[0] for call in app.root.after.call_args_list],
+            [250, 800, 1600, 3000, 5500],
+        )
+        for call in app.root.after.call_args_list:
+            self.assertEqual(call.args[1], app._fetch_track_async)
+
+    def test_mark_music_missing_keeps_fresh_playback_playing(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._user_toggle_ts = 0.0
+        app._intentional_pause_active = MagicMock(return_value=False)
+        app._player_is_playing_cached = MagicMock(return_value=False)
+        app._playlist_end_prompt_allowed = MagicMock(return_value=True)
+        app._spotify_sound_detected_recently = MagicMock(return_value=False)
+        app._spotify_started_by_us = True
+        app._playlist_audio_armed = False
+        app._playback_started_ts = time.time()
+        app._is_playing = True
+        app._music_missing_since = 0.0
+        app._playlist_end_pending = False
+
+        GameBeatsApp._mark_music_missing(app)
+
+        self.assertTrue(app._is_playing)
+        self.assertEqual(app._music_missing_since, 0.0)
+        self.assertFalse(app._playlist_end_pending)
+
+    def test_on_play_result_clears_pause_before_starting_mascot(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        order = []
+
+        class ImmediateRoot:
+            def after(self, delay, func=None, *args):
+                if delay == 0 and func is not None:
+                    func(*args)
+                return "job"
+
+        app.root = ImmediateRoot()
+        app._play_in_progress = True
+        app._manual_paused = True
+        app._user_paused_flag = True
+        app._pause_stack = ["user"]
+        app._playlist_end_pending = True
+        app._is_playing = False
+        app._spotify_started_by_us = False
+        app._playback_started_ts = 0.0
+        app._current_playlist_uri = "spotify:playlist:old"
+        app.current_game = None
+        app._audio_monitor_running = False
+        app.spotify = MagicMock()
+        app.spotify._last_play_method = "web"
+        app._log = MagicMock()
+        app._pause_started_playlist_if_game_loud = MagicMock()
+
+        def remember(*args, **kwargs):
+            order.append("remember")
+            app._manual_paused = False
+            app._user_paused_flag = False
+            app._pause_stack = []
+
+        def set_play(playing, force_btn=False):
+            order.append((
+                "set_play",
+                app._manual_paused,
+                app._user_paused_flag,
+                list(app._pause_stack),
+            ))
+            app._is_playing = bool(playing)
+
+        app._remember_current_playlist = MagicMock(side_effect=remember)
+        app._set_play_btn_icon = MagicMock(side_effect=set_play)
+        app._schedule_fast_track_refresh = MagicMock(
+            side_effect=lambda: order.append("refresh")
+        )
+
+        GameBeatsApp._on_play_result(
+            app,
+            {
+                "uri": "spotify:playlist:new",
+                "name": "New",
+                "query": "q",
+            },
+            "chill",
+            "q",
+        )
+
+        self.assertEqual(order[0], "remember")
+        self.assertEqual(order[1][0], "set_play")
+        self.assertFalse(order[1][1])
+        self.assertFalse(order[1][2])
+        self.assertEqual(order[1][3], [])
+        self.assertEqual(order[2], "refresh")
+        self.assertGreater(app._playback_started_ts, 0.0)
+        self.assertTrue(app._spotify_started_by_us)
+
     def test_on_play_result_failure_does_not_autostart(self):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)

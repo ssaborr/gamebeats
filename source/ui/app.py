@@ -231,6 +231,11 @@ PLAYLIST_END_NORMAL_EXTRA_SEC = 4.0
 PLAYLIST_END_RETRY_EXTRA_SEC = 10.0
 SPOTIFY_UI_AUDIO_ON_THRESHOLD = 0.0001
 SPOTIFY_UI_AUDIO_OFF_THRESHOLD = 0.0
+# A newly-started playlist can take a few seconds to surface its first track
+# and audible meter data.  During that window the old mix is already silent,
+# so keep the freshly-started play state (and mascot) instead of treating the
+# missing metadata as a pause.
+FRESH_PLAYBACK_GRACE_SEC = 12.0
 
 # The room plate is authored at 400x250 logical pixels and scaled by four
 # before it reaches the app. All ambient overlays use these logical
@@ -992,6 +997,7 @@ class GameBeatsApp:
         self._game_pid = None
         self._audio_monitor_running = False
         self._spotify_started_by_us = False
+        self._playback_started_ts = 0.0
         self._play_in_progress = False
         self._autoplay_pending = False
         self._game_audio = None
@@ -1018,6 +1024,8 @@ class GameBeatsApp:
         self.auth_lbl = ctk.CTkLabel(self.root, text="", fg_color="transparent", text_color=TEXT)
         self.volume_var  = tk.IntVar(value=50)
         self._track_job  = None
+        self._track_refresh_jobs = []
+        self._track_fetch_busy = False
         self._album_photo = None
         self._game_icon_ctk = None
         self._is_playing  = False
@@ -5186,10 +5194,17 @@ class GameBeatsApp:
             def _on_ok():
                 try:
                     self._spotify_started_by_us = True
-                    # Explicit successful start: show the pause icon. Audio
-                    # meter ticks must never do this on their own.
-                    self._set_play_btn_icon(True, force_btn=True)
+                    self._playback_started_ts = time.time()
+                    # Clear the switch-pause flags *before* applying the play
+                    # state.  _set_play_btn_icon checks _intentional_pause_active
+                    # before starting the mascot, so the old order kept the pup
+                    # in gif:0 until the next audio-meter tick.
                     self._remember_current_playlist(picked_uri, picked_name, picked_query, reset_pause_flags=True)
+                    self._set_play_btn_icon(True, force_btn=True)
+                    # The web player often exposes the new song a beat or two
+                    # after starting.  Poll quickly for the first several
+                    # seconds instead of waiting for the 4s steady-state tick.
+                    self._schedule_fast_track_refresh()
                     if self.current_game and not self._audio_monitor_running:
                         self._start_audio_monitor(self.current_game)
                     via = getattr(self.spotify, "_last_play_method", "") or "open"
@@ -5395,6 +5410,11 @@ class GameBeatsApp:
                         # after an auto-resume must not count as a playlist.
                         if self._spotify_loud_streak >= 3:
                             self._playlist_audio_armed = True
+                        if (self._spotify_loud_streak == 1
+                                and not getattr(self, "_playlist_audio_armed", False)):
+                            # The first audible tick is the best moment to ask
+                            # the web player for the real first-track title.
+                            self.root.after(0, self._schedule_fast_track_refresh)
                         intentional_pause = bool(
                             getattr(self, "_manual_paused", False)
                             or getattr(self, "_user_paused_flag", False)
@@ -5816,6 +5836,7 @@ class GameBeatsApp:
         self.root.after(0, lambda: (
             self.playlist_display_lbl.configure(text=f"PLAYLIST: {self._current_playlist_name or '\u2014'}"),
             self.track_lbl.configure(text=self._current_playlist_name or "Spotify Playlist"),
+            self.deck_artist_lbl.configure(text="Spotify"),
         ))
         try:
             self._log(f"_remember_current_playlist: uri={uri}, name={name}, cleared pause flags: manual={self._manual_paused}, user_paused={self._user_paused_flag}, pause_stack_cleared={not bool(getattr(self,'_pause_stack',None))}")
@@ -6884,7 +6905,42 @@ class GameBeatsApp:
             threading.Thread(target=self._fetch_track, daemon=True).start()
         self._track_job = self.root.after(4000, self._poll)
 
+    def _schedule_fast_track_refresh(self):
+        """Poll now-playing a few times right after a playlist starts.
+
+        The steady-state poll is every 4s.  A new web-player track can appear
+        several seconds after the playlist starts, so one slow poll used to
+        leave the old song in the deck until the next tick.  These short
+        follow-ups catch the new metadata as soon as Spotify publishes it.
+        """
+        if getattr(self, "_closing", False):
+            return
+        jobs = getattr(self, "_track_refresh_jobs", None)
+        if jobs is None:
+            jobs = []
+            self._track_refresh_jobs = jobs
+        for job in jobs:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        jobs.clear()
+        for delay in (250, 800, 1600, 3000, 5500):
+            try:
+                jobs.append(self.root.after(delay, self._fetch_track_async))
+            except Exception:
+                pass
+
+    def _fetch_track_async(self):
+        if self.spotify:
+            threading.Thread(target=self._fetch_track, daemon=True).start()
+
     def _fetch_track(self):
+        if not self.spotify:
+            return
+        if getattr(self, "_track_fetch_busy", False):
+            return
+        self._track_fetch_busy = True
         try:
             track = self.spotify.get_current_track()
             if track:
@@ -6895,6 +6951,8 @@ class GameBeatsApp:
         except Exception:
             if not self._intentional_pause_active():
                 self.root.after(0, self._mark_music_missing)
+        finally:
+            self._track_fetch_busy = False
 
     def _now_playing_playlist_title(self, track=None):
         track = track or {}
@@ -6913,6 +6971,8 @@ class GameBeatsApp:
     def _update_np(self, t):
         self._last_track_info = t
         self._last_track_info_ts = time.time()
+        previous_np_key = getattr(self, "_last_np_key", None)
+        fresh_start = self._fresh_playback_grace()
         track_changed = False
         try:
             key = (
@@ -6964,7 +7024,17 @@ class GameBeatsApp:
             or str(t.get("uri") or "") == getattr(self, "SILENT_TRACK_URI", "")
         ):
             song_title = playlist_title or "Spotify"
-        self.track_lbl.configure(text=song_title)
+
+        # Right after a switch, Spotify's mediaSession can still expose the
+        # previous song for a moment.  Do not put that stale title back over
+        # the new playlist name; wait for the first genuinely different track.
+        stale_start_song = False
+        if fresh_start and previous_np_key:
+            prev_name = str(previous_np_key[1] or "").strip().lower()
+            if prev_name and song_title.lower() == prev_name:
+                stale_start_song = True
+        if not stale_start_song:
+            self.track_lbl.configure(text=song_title)
 
         # Keep the deck's playlist line in sync even when the track poller is
         # recovering from a desktop/web hand-off (previously it stayed "—").
@@ -6979,10 +7049,11 @@ class GameBeatsApp:
         artist = str(t.get("artist") or "").strip()
         if not artist or artist.lower() in ("web player", "spotify"):
             artist = "Spotify web player"
-        try:
-            self.deck_artist_lbl.configure(text=artist)
-        except Exception:
-            pass
+        if not stale_start_song:
+            try:
+                self.deck_artist_lbl.configure(text=artist)
+            except Exception:
+                pass
 
         self.artist_lbl.configure(text="")
         self.artist_lbl.pack_forget()
@@ -6997,7 +7068,10 @@ class GameBeatsApp:
         intentional = self._intentional_pause_active()
         # While paused (by the user or by game-audio logic), never let a stale
         # window title / media-session value flip the UI back to playing.
-        effective_is_playing = (not intentional) and (t_is_playing or spotify_sound)
+        effective_is_playing = (
+            (not intentional)
+            and (t_is_playing or spotify_sound or fresh_start)
+        )
         if user_toggle_age > 3.0 and not getattr(self, "_audio_monitor_running", False):
             self._set_play_btn_icon(effective_is_playing)
             self._is_playing = effective_is_playing
@@ -7049,7 +7123,7 @@ class GameBeatsApp:
             )
             if playlist_changed and playlist_title:
                 self._toast.show("PLAYLIST", playlist_title, 2800)
-            elif track_changed and not silent:
+            elif track_changed and not silent and not stale_start_song:
                 self._toast.show(
                     "NOW PLAYING", f"{raw_title} \u2014 {artist}", 2800,
                 )
@@ -7133,6 +7207,23 @@ class GameBeatsApp:
         """
         return self._intentional_pause_active()
 
+    def _fresh_playback_grace(self, now=None) -> bool:
+        """True while a just-started playlist has not produced audio yet.
+
+        Metadata and loopback audio can lag behind the play command by several
+        seconds.  This is not a pause, so silence in that window must not clear
+        _is_playing or freeze the mascot.
+        """
+        if not getattr(self, "_spotify_started_by_us", False):
+            return False
+        if getattr(self, "_playlist_audio_armed", False):
+            return False
+        started = float(getattr(self, "_playback_started_ts", 0.0) or 0.0)
+        if started <= 0.0:
+            return False
+        now = time.time() if now is None else now
+        return (now - started) < FRESH_PLAYBACK_GRACE_SEC
+
     def _player_is_playing_cached(self) -> bool:
         """True when the last polled player state explicitly says 'playing'.
 
@@ -7190,6 +7281,15 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             if not getattr(self, "_audio_monitor_running", False):
                 self._set_play_btn_icon(True)
+            return
+        # A freshly started playlist can be silent while the web player loads
+        # the first track. Keep the play state so the mascot starts bobbing as
+        # soon as the music starts instead of waiting for the audio meter.
+        if self._fresh_playback_grace(now):
+            self._music_missing_since = 0.0
+            self._playlist_end_pending = False
+            if not getattr(self, "_is_playing", False):
+                self._is_playing = True
             return
         self._is_playing = False
         self._track_progress_base = None
@@ -7713,6 +7813,12 @@ class GameBeatsApp:
                 self._track_job = None
         except Exception:
             pass
+        for job in list(getattr(self, "_track_refresh_jobs", []) or []):
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._track_refresh_jobs = []
         try:
             if self._mascot_notifier is not None:
                 self._mascot_notifier.close()
