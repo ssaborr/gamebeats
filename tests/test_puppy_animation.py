@@ -357,6 +357,7 @@ class TestPuppyCanvasNeverMoves(unittest.TestCase):
         app._puppy_hide_job = None
         app._puppy_last_loud_ts = 0.0
         app._mascot_notifier = None
+        app._spotify_started_by_us = True
         app._intentional_pause_active = lambda: False
         app._schedule_room_redraw = MagicMock()
         app.root = MagicMock()

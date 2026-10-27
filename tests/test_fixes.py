@@ -1023,6 +1023,63 @@ class TestAppNewRegressions(unittest.TestCase):
         app._set_play_btn_icon.assert_called_once_with(False, force_btn=True)
         app._update_deck_status.assert_called_once()
         self.assertFalse(app._is_playing)
+        self.assertTrue(app._playlist_switch_pause)
+        self.assertFalse(app._playlist_switch_heard_silence)
+
+    def test_adopt_switch_playback_resumes_icon_and_puppy_immediately(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._playlist_switch_pause = True
+        app._playlist_switch_heard_silence = True
+        app._playlist_switch_started_ts = time.time() - 5.0
+        app._playlist_switch_audio_heard_ts = 0.0
+        app._manual_paused = True
+        app._user_paused_flag = True
+        app._paused_by_game_flag = False
+        app._spotify_started_by_us = False
+        app._playback_started_ts = 0.0
+        app._is_playing = False
+        app._pause_stack = ["user"]
+        app._puppy_action_state = "pause"
+        app._puppy_action_hold = True
+        app._puppy_action_reverse = False
+        app._puppy_singing_overlay = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+        app._set_puppy_singing_visible = MagicMock()
+        app._log = MagicMock()
+
+        result = GameBeatsApp._adopt_playlist_switch_playback(app)
+
+        self.assertTrue(result)
+        self.assertFalse(app._playlist_switch_pause)
+        self.assertFalse(app._playlist_switch_heard_silence)
+        self.assertGreater(app._playlist_switch_audio_heard_ts, 0.0)
+        self.assertFalse(app._manual_paused)
+        self.assertFalse(app._user_paused_flag)
+        self.assertTrue(app._spotify_started_by_us)
+        self.assertTrue(app._is_playing)
+        self.assertEqual(app._pause_stack, [])
+        self.assertIsNone(app._puppy_action_state)
+        app._puppy_singing_overlay.set_animation_locked.assert_called_once_with(False)
+        app._puppy_singing_overlay.set_playback_state.assert_called_once_with(
+            True, animate=False
+        )
+        app._set_play_btn_icon.assert_called_once_with(True, force_btn=True)
+        app._set_puppy_singing_visible.assert_called_once_with(True)
+
+    def test_adopt_switch_playback_ignores_a_real_pause(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._playlist_switch_pause = False
+        app._is_playing = False
+        app._set_play_btn_icon = MagicMock()
+        app._set_puppy_singing_visible = MagicMock()
+
+        self.assertFalse(GameBeatsApp._adopt_playlist_switch_playback(app))
+        app._set_play_btn_icon.assert_not_called()
+        app._set_puppy_singing_visible.assert_not_called()
 
     def test_pause_spotify_for_playlist_switch_sends_command(self):
         from ui.app import GameBeatsApp
@@ -1213,6 +1270,55 @@ class TestAppNewRegressions(unittest.TestCase):
         self.assertGreater(app._playback_started_ts, 0.0)
         self.assertTrue(app._spotify_started_by_us)
 
+    def test_on_play_result_skips_duplicate_change_when_switch_audio_was_heard(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+
+        class ImmediateRoot:
+            def after(self, delay, func=None, *args):
+                if delay == 0 and func is not None:
+                    func(*args)
+                return "job"
+
+        app.root = ImmediateRoot()
+        app._play_in_progress = True
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._playlist_switch_pause = True
+        app._playlist_switch_started_ts = time.time() - 6.0
+        app._playlist_switch_audio_heard_ts = time.time() - 3.0
+        app._pause_stack = []
+        app._playlist_end_pending = True
+        app._is_playing = True
+        app._spotify_started_by_us = True
+        app._playback_started_ts = time.time()
+        app._current_playlist_uri = "spotify:playlist:new"
+        app.current_game = None
+        app._audio_monitor_running = False
+        app.spotify = MagicMock()
+        app.spotify._last_play_method = "web"
+        app._log = MagicMock()
+        app._pause_started_playlist_if_game_loud = MagicMock()
+        app._remember_current_playlist = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+        app._play_puppy_change_animation = MagicMock()
+        app._schedule_fast_track_refresh = MagicMock()
+
+        GameBeatsApp._on_play_result(
+            app,
+            {"uri": "spotify:playlist:new", "name": "New", "query": "q"},
+            "chill",
+            "q",
+        )
+
+        # The monitor already started the bob when audio became audible, so
+        # the late controller result must not interrupt it with another
+        # headset-swap clip.
+        app._play_puppy_change_animation.assert_not_called()
+        self.assertEqual(app._playlist_switch_started_ts, 0.0)
+        self.assertEqual(app._playlist_switch_audio_heard_ts, 0.0)
+
     def test_on_play_result_failure_does_not_autostart(self):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)
@@ -1322,6 +1428,7 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         app._pulse_active = True
         app._pulse_job = MagicMock()
         app._puppy_audio_active = False
+        app._spotify_started_by_us = True
         app.root = MagicMock()
         app._intentional_pause_active = MagicMock(return_value=False)
         return app
@@ -1368,6 +1475,29 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         app._set_play_btn_icon(True)
 
         app._puppy_singing_overlay.show.assert_called_once()
+
+    def test_play_command_without_a_meter_waits_for_gamebeats_playback(self):
+        app = self._make_app()
+        app._spotify_started_by_us = False
+        app._is_playing = False
+        app._audio_monitor_running = False
+        app._spotify_audio_active = False
+
+        app._set_play_btn_icon(True)
+
+        app._puppy_singing_overlay.show.assert_not_called()
+
+    def test_first_launch_does_not_show_puppy_before_gamebeats_playback(self):
+        app = self._make_app()
+        app._spotify_started_by_us = False
+        app._is_playing = False
+        app._audio_monitor_running = True
+        app._puppy_singing_overlay.is_visible.return_value = False
+
+        app._set_puppy_singing_visible(True)
+
+        app._puppy_singing_overlay.show.assert_not_called()
+        self.assertFalse(app._puppy_audio_active)
 
     def test_pause_clears_confirmed_audio_before_the_next_resume(self):
         app = self._make_app()

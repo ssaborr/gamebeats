@@ -1113,6 +1113,14 @@ class GameBeatsApp:
         self._playlist_ended_closing = False  # True while closing/relaunching for next playlist
         self._paused_by_game_flag = False  # Local flag: True when GameBeats paused Spotify
         self._user_paused_flag = False  # True when user manually pauses via player tab
+        # A playlist search intentionally pauses the old mix.  This is a
+        # transient switch pause, not a user/game pause: the first sustained
+        # audio from the newly selected playlist should resume the UI and
+        # puppy immediately instead of waiting for the playlist result.
+        self._playlist_switch_pause = False
+        self._playlist_switch_started_ts = 0.0
+        self._playlist_switch_heard_silence = False
+        self._playlist_switch_audio_heard_ts = 0.0
         # ┌─ PAUSE STACK STATE MANAGEMENT ─────────────────────────────────┐
         # │ Stack entries: [("auto" | "user", timestamp), ...]             │
         # │                                                                  │
@@ -5368,6 +5376,10 @@ class GameBeatsApp:
         if self.spotify and hasattr(self.spotify, "reset_session"):
             self.spotify.reset_session()
         self._spotify_started_by_us = False
+        self._playlist_switch_pause = False
+        self._playlist_switch_heard_silence = False
+        self._playlist_switch_started_ts = 0.0
+        self._playlist_switch_audio_heard_ts = 0.0
         self.root.after(0, lambda: (
             self.game_banner.configure(text="NO SAVED GAME RUNNING", text_color=TEXT_MUTED),
             self.mood_lbl.configure(text="Waiting for a game"),
@@ -5397,6 +5409,13 @@ class GameBeatsApp:
             self._apply_user_pause_state(True)
         except Exception:
             pass
+        # Mark this as a transient switch pause after applying the pause
+        # state.  The audio monitor will clear it as soon as the replacement
+        # playlist produces sustained audio.
+        self._playlist_switch_pause = True
+        self._playlist_switch_started_ts = time.time()
+        self._playlist_switch_heard_silence = False
+        self._playlist_switch_audio_heard_ts = 0.0
         try:
             self._set_play_btn_icon(False, force_btn=True)
             self._update_deck_status()
@@ -5407,6 +5426,62 @@ class GameBeatsApp:
             self._log(f"{label}: pausing current playlist while the next one loads…")
         except Exception:
             pass
+
+    def _adopt_playlist_switch_playback(self):
+        """Resume the UI/puppy as soon as the new playlist is audible.
+
+        The playlist-search worker can take many seconds to report its final
+        result while Spotify has already started the new mix.  Waiting for
+        that result left the play icon and puppy frozen in the switch pause.
+        This runs on the Tk thread from the audio monitor after a sustained
+        loud streak, so it only fires when the replacement playlist is real.
+        """
+        if not getattr(self, "_playlist_switch_pause", False):
+            return False
+        if getattr(self, "_paused_by_game_flag", False):
+            # A real game pause won the race; keep the pause pose.
+            return False
+        self._playlist_switch_pause = False
+        self._playlist_switch_heard_silence = False
+        self._playlist_switch_audio_heard_ts = time.time()
+        self._manual_paused = False
+        self._user_paused_flag = False
+        self._paused_by_game_flag = False
+        self._spotify_started_by_us = True
+        self._playback_started_ts = time.time()
+        self._is_playing = True
+        self._last_spotify_loud_ts = time.time()
+        self._music_missing_since = 0.0
+        self._playlist_end_pending = False
+        try:
+            self._pause_stack.clear()
+        except Exception:
+            pass
+        # This is a fresh playlist, not a resume: drop a held pause pose so
+        # the bob can start on the next room frame.
+        try:
+            if getattr(self, "_puppy_action_state", None) == "pause":
+                self._puppy_action_state = None
+                self._puppy_action_hold = False
+                self._puppy_action_reverse = False
+        except Exception:
+            pass
+        try:
+            overlay = getattr(self, "_puppy_singing_overlay", None)
+            if overlay is not None:
+                overlay.set_animation_locked(False)
+                overlay.set_playback_state(True, animate=False)
+        except Exception:
+            pass
+        self._set_play_btn_icon(True, force_btn=True)
+        self._set_puppy_singing_visible(True)
+        try:
+            self._log(
+                "New playlist audio confirmed - resuming play icon and puppy."
+            )
+        except Exception:
+            pass
+        return True
 
     def _pause_spotify_for_playlist_switch(self):
         """Send the actual Spotify pause on the worker thread, before searching."""
@@ -5464,6 +5539,12 @@ class GameBeatsApp:
             if pause_first:
                 # Silence the old mix before the search/playlist navigation.
                 self._pause_spotify_for_playlist_switch()
+            # Attribute the upcoming audio to GameBeats immediately.  The
+            # controller can take several seconds to return its result after
+            # Spotify is already playing; without this, the overlay gate sees
+            # "not started by us" and waits for that slow result.
+            self._spotify_started_by_us = True
+            self._playback_started_ts = time.time()
             try:
                 if self._is_web_mode():
                     self.root.after(0, lambda q=search_q: self._log(
@@ -5524,6 +5605,14 @@ class GameBeatsApp:
             
             def _on_ok():
                 try:
+                    # The audio monitor may already have adopted this playlist
+                    # when its first sustained audio arrived.  Do not restart
+                    # the headset-swap clip and interrupt an already-bobbing
+                    # puppy in that case.
+                    switch_audio_heard = (
+                        float(getattr(self, "_playlist_switch_audio_heard_ts", 0.0) or 0.0)
+                        > float(getattr(self, "_playlist_switch_started_ts", 0.0) or 0.0)
+                    )
                     self._spotify_started_by_us = True
                     self._playback_started_ts = time.time()
                     # Clear the switch-pause flags *before* applying the play
@@ -5532,7 +5621,10 @@ class GameBeatsApp:
                     # in gif:0 until the next audio-meter tick.
                     self._remember_current_playlist(picked_uri, picked_name, picked_query, reset_pause_flags=True)
                     self._set_play_btn_icon(True, force_btn=True)
-                    self._play_puppy_change_animation(force=True)
+                    if not switch_audio_heard:
+                        self._play_puppy_change_animation(force=True)
+                    self._playlist_switch_started_ts = 0.0
+                    self._playlist_switch_audio_heard_ts = 0.0
                     # The web player often exposes the new song a beat or two
                     # after starting.  Poll quickly for the first several
                     # seconds instead of waiting for the 4s steady-state tick.
@@ -5564,6 +5656,20 @@ class GameBeatsApp:
                 pass
 
             self._playlist_end_pending = False
+            self._playlist_switch_pause = False
+            self._playlist_switch_heard_silence = False
+            self._playlist_switch_started_ts = 0.0
+            self._playlist_switch_audio_heard_ts = 0.0
+            # Do not leave an early "ours" claim behind after a real failure;
+            # otherwise unrelated Spotify audio could reveal the puppy.
+            try:
+                if (
+                    not getattr(self, "_is_playing", False)
+                    and not self._spotify_sound_detected_recently(2.0)
+                ):
+                    self._spotify_started_by_us = False
+            except Exception:
+                pass
             err = getattr(self.spotify, "_last_error", "") or "No playlist found"
             self._log(f"⚠ Playlist did not start: {err[:100]}")
             self._log("No playlist was switched automatically — use Try another if needed.")
@@ -5747,6 +5853,20 @@ class GameBeatsApp:
                             # The first audible tick is the best moment to ask
                             # the web player for the real first-track title.
                             self.root.after(0, self._schedule_fast_track_refresh)
+                        # A replacement playlist often becomes audible before
+                        # the slow search/controller worker returns.  Once the
+                        # old mix has gone silent and the new audio has been
+                        # sustained for ~1s, adopt it immediately so the icon
+                        # and puppy do not sit frozen in the switch pause.
+                        if (
+                            getattr(self, "_playlist_switch_pause", False)
+                            and not getattr(self, "_paused_by_game_flag", False)
+                            and getattr(self, "_playlist_switch_heard_silence", False)
+                            and self._spotify_loud_streak >= 2
+                        ):
+                            self.root.after(
+                                0, self._adopt_playlist_switch_playback
+                            )
                         intentional_pause = bool(
                             getattr(self, "_manual_paused", False)
                             or getattr(self, "_user_paused_flag", False)
@@ -5759,8 +5879,11 @@ class GameBeatsApp:
                             self._is_playing = True
                             if resumed_now:
                                 self.root.after(0, lambda: (
+                                    # First confirmed audio should update the
+                                    # icon immediately; waiting for the resume
+                                    # worker made the button lag behind music.
+                                    self._set_play_btn_icon(True, force_btn=True),
                                     self._react_to_playback_change(True),
-                                    self._set_play_btn_icon(True),
                                 ))
                             else:
                                 self.root.after(
@@ -5770,6 +5893,8 @@ class GameBeatsApp:
                             self._remove_pause_reason("auto")
                     else:
                         self._spotify_loud_streak = 0
+                        if getattr(self, "_playlist_switch_pause", False):
+                            self._playlist_switch_heard_silence = True
                     if game_loud:
                         self._last_game_loud_ts = now
                     if spotify_loud or game_loud:
@@ -5916,13 +6041,32 @@ class GameBeatsApp:
                 or getattr(self, "_user_paused_flag", False)
             )
             game_paused = bool(getattr(self, "_paused_by_game_flag", False))
-            active = bool(visible) and not intentionally_stopped and not notifier_up
+            started_by_us = bool(getattr(self, "_spotify_started_by_us", False))
+            # Do not reveal the puppy for Spotify audio that GameBeats did not
+            # start (including a previous session still playing at launch).
+            active = (
+                bool(visible)
+                and not intentionally_stopped
+                and not notifier_up
+                and started_by_us
+            )
             self._puppy_audio_active = active
             # No room repaint here.  The in-room mascot reads the play state on
             # the master clock, so rebuilding the whole den for every meter
             # dip made the canvas flicker around the puppy.
 
             if overlay is None:
+                return
+
+            if not started_by_us and not notifier_up:
+                # No GameBeats playback has started yet (first launch, or the
+                # user is playing Spotify elsewhere): keep the puppy hidden.
+                try:
+                    if overlay.is_visible():
+                        overlay.hide(immediate=True)
+                except Exception:
+                    pass
+                self._puppy_audio_active = False
                 return
 
             hide_job = getattr(self, "_puppy_hide_job", None)
@@ -6109,6 +6253,8 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             self._playlist_audio_armed = False
             self._spotify_loud_streak = 0
+            self._playlist_switch_pause = False
+            self._playlist_switch_heard_silence = False
             self._add_pause_reason("auto")
             self._is_playing = False
             if already_paused_by_game:
@@ -6151,8 +6297,8 @@ class GameBeatsApp:
                 self._music_missing_since = 0.0
                 self._last_spotify_loud_ts = time.time()
                 self.root.after(0, lambda: (
-                    self._react_to_playback_change(True),
                     self._set_play_btn_icon(True, force_btn=True),
+                    self._react_to_playback_change(True),
                 ))
                 return
         except Exception:
@@ -6179,8 +6325,8 @@ class GameBeatsApp:
             self._music_missing_since = 0.0
             self._last_spotify_loud_ts = time.time()
             self.root.after(0, lambda: (
-                self._react_to_playback_change(True),
                 self._set_play_btn_icon(True, force_btn=True),
+                self._react_to_playback_change(True),
                 self._log("Other audio quiet - resumed Spotify"),
             ))
 
@@ -6225,6 +6371,8 @@ class GameBeatsApp:
         if reset_pause_flags:
             self._manual_paused = False
             self._user_paused_flag = False
+            self._playlist_switch_pause = False
+            self._playlist_switch_heard_silence = False
             if getattr(self, "_pause_stack", None):
                 self._pause_stack.clear()
             self._playlist_end_pending = False
@@ -7347,6 +7495,11 @@ class GameBeatsApp:
 
     def _apply_user_pause_state(self, paused: bool):
         self._user_toggle_ts = time.time()
+        # Any explicit user/auto pause supersedes a transient playlist-switch
+        # pause.  _begin_playlist_switch_pause re-arms the switch flag after
+        # calling this method.
+        self._playlist_switch_pause = False
+        self._playlist_switch_audio_heard_ts = 0.0
         # The next end-of-playlist check must wait until this playlist's
         # audio is actually heard again.  Silence during a pause/resume
         # transition is not a finished playlist.
