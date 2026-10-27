@@ -50,6 +50,7 @@ TEXT = T.TEXT
 TEXT_SEC = T.TEXT_MUTED
 TRANSPARENT_KEY = "#010203"
 
+
 NOTIFIER_CARD_BG = T.SURFACE
 NOTIFIER_CARD_BORDER = T.WOOD
 NOTIFIER_TEXT = T.TEXT
@@ -336,6 +337,41 @@ class PuppySingingOverlay:
 
         win.after(80, self._noactivate_safe)
 
+    def _clamp_to_desktop(self, x, y):
+        """Keep a remembered position on a screen that still exists.
+
+        A saved position from a larger/removed monitor used to place the
+        overlay completely off-screen.  Tk still reported it as "visible",
+        so the puppy silently disappeared even though audio was playing.
+        """
+        win = self._win
+        if win is None:
+            return int(x), int(y)
+        try:
+            left = int(win.winfo_vrootx())
+            top = int(win.winfo_vrooty())
+            width = int(win.winfo_vrootwidth())
+            height = int(win.winfo_vrootheight())
+        except Exception:
+            left = top = 0
+            width = int(win.winfo_screenwidth())
+            height = int(win.winfo_screenheight())
+        if width <= 1:
+            width = int(win.winfo_screenwidth())
+            left = 0
+        if height <= 1:
+            height = int(win.winfo_screenheight())
+            top = 0
+        win.update_idletasks()
+        win_w = max(1, int(win.winfo_reqwidth()))
+        win_h = max(1, int(win.winfo_reqheight()))
+        max_x = max(left, left + width - win_w)
+        max_y = max(top, top + height - win_h)
+        return (
+            max(left, min(int(x), max_x)),
+            max(top, min(int(y), max_y)),
+        )
+
     def _place(self):
         if self._win is None:
             return
@@ -343,7 +379,8 @@ class PuppySingingOverlay:
         # position from a previous session is only a fallback when no anchor
         # is available.
         if self._custom_pos is not None and self._dragged:
-            x, y = self._custom_pos
+            x, y = self._clamp_to_desktop(*self._custom_pos)
+            self._custom_pos = (x, y)
             self._win.geometry(f"+{x}+{y}")
             return
         if self._anchor_getter is not None:
@@ -352,11 +389,12 @@ class PuppySingingOverlay:
             except Exception:
                 pos = None
             if pos:
-                x, y = pos
+                x, y = self._clamp_to_desktop(*pos)
                 self._win.geometry(f"+{int(x)}+{int(y)}")
                 return
         if self._saved_pos is not None:
-            x, y = self._saved_pos
+            x, y = self._clamp_to_desktop(*self._saved_pos)
+            self._saved_pos = (x, y)
             self._win.geometry(f"+{x}+{y}")
             return
         win = self._win
@@ -373,6 +411,7 @@ class PuppySingingOverlay:
             "top-left": (margin, margin),
         }
         x, y = positions.get(self._corner, positions["bottom-right"])
+        x, y = self._clamp_to_desktop(x, y)
         win.geometry(f"+{x}+{y}")
 
     def _state_frames(self, state):

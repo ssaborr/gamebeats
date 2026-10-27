@@ -77,6 +77,7 @@ CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
 TOKENS_FILE = os.path.join(BASE_DIR, "tokens.json")
 LOG_FILE    = os.path.join(BASE_DIR, "gamebeats.log")
 
+
 def _repo_root_dir() -> str:
     if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
@@ -290,6 +291,10 @@ SPOTIFY_UI_AUDIO_OFF_THRESHOLD = 0.0
 # so keep the freshly-started play state (and mascot) instead of treating the
 # missing metadata as a pause.
 FRESH_PLAYBACK_GRACE_SEC = 12.0
+# If Spotify's local-status call stalls, do not leave an explicit skip
+# thinking forever.  The normal metadata completion usually lands in ~1-2s;
+# this is only a safety net for a hung fetch while audio is still playing.
+SKIP_COMPLETION_WATCHDOG_MS = 4000
 
 # The room plate is authored at 400x250 logical pixels and scaled by four
 # before it reaches the app. All ambient overlays use these logical
@@ -1144,6 +1149,7 @@ class GameBeatsApp:
         self._play_request_seq = 0
         self._active_play_request_id = 0
         self._skip_request_seq = 0
+        self._skip_completion_job = None
         # ┌─ PAUSE STACK STATE MANAGEMENT ─────────────────────────────────┐
         # │ Stack entries: [("auto" | "user", timestamp), ...]             │
         # │                                                                  │
@@ -3172,6 +3178,59 @@ class GameBeatsApp:
         except Exception:
             self._puppy_thinking_timeout_job = None
 
+    def _cancel_skip_completion_watchdog(self):
+        job = getattr(self, "_skip_completion_job", None)
+        self._skip_completion_job = None
+        root = getattr(self, "root", None)
+        if job is not None and root is not None:
+            try:
+                root.after_cancel(job)
+            except Exception:
+                pass
+
+    def _schedule_skip_completion_watchdog(self, request_id):
+        """Finish an explicit skip if Spotify metadata never arrives.
+
+        The normal path completes from fresh metadata (usually within two
+        seconds).  A hung local-status request used to leave the thinking loop
+        up for many seconds while the replacement track was already audible.
+        """
+        self._cancel_skip_completion_watchdog()
+        root = getattr(self, "root", None)
+        if root is None:
+            return
+        try:
+            self._skip_completion_job = root.after(
+                SKIP_COMPLETION_WATCHDOG_MS,
+                lambda rid=request_id: self._finish_stalled_skip(rid),
+            )
+        except Exception:
+            self._skip_completion_job = None
+
+    def _finish_stalled_skip(self, request_id):
+        self._skip_completion_job = None
+        if request_id != int(getattr(self, "_skip_request_seq", 0) or 0):
+            return
+        if not self._puppy_thinking_active():
+            return
+        if getattr(self, "_puppy_thinking_reason", "") != "track":
+            return
+        if self._intentional_pause_active():
+            return
+        # A failed skip can leave silence.  Only celebrate when the player is
+        # actually producing audio; otherwise leave the normal timeout alone.
+        try:
+            recently_loud = self._spotify_sound_detected_recently(2.0)
+        except Exception:
+            recently_loud = False
+        if not (
+            getattr(self, "_spotify_audio_active", False)
+            or getattr(self, "_is_playing", False)
+            or recently_loud
+        ):
+            return
+        self._finish_puppy_thinking(play_change=True)
+
     def _puppy_thinking_timeout(self, reason=""):
         if not self._puppy_thinking_active():
             return
@@ -3181,6 +3240,7 @@ class GameBeatsApp:
 
     def _stop_puppy_thinking(self, *, hold_pause=False, update_overlay=True):
         """End the thinking loop without starting a headset-swap clip."""
+        self._cancel_skip_completion_watchdog()
         if not self._puppy_thinking_active():
             return False
         self._cancel_puppy_thinking_timeout()
@@ -3219,6 +3279,8 @@ class GameBeatsApp:
             # Old asset bundles fall back to the previous one-shot clip.
             return self._play_puppy_change_animation(force=True)
         switch_pause = bool(getattr(self, "_playlist_switch_pause", False))
+        if str(reason or "track") != "track":
+            self._cancel_skip_completion_watchdog()
         if getattr(self, "_paused_by_game_flag", False):
             return False
         if self._puppy_animation_locked() and not switch_pause:
@@ -3253,6 +3315,7 @@ class GameBeatsApp:
 
     def _finish_puppy_thinking(self, *, play_change=True):
         """Stop thinking and play one headset-swap clip when appropriate."""
+        self._cancel_skip_completion_watchdog()
         if not self._puppy_thinking_active():
             return False
         self._cancel_puppy_thinking_timeout()
@@ -6052,6 +6115,10 @@ class GameBeatsApp:
             err = getattr(self.spotify, "_last_error", "") or "No playlist found"
             self._log(f"⚠ Playlist did not start: {err[:100]}")
             self._log("No playlist was switched automatically — use Try another if needed.")
+            # Do not leave the loading loop running for 45s after a real
+            # failure.  A queued long-press will start its own thinking loop.
+            if getattr(self, "_pending_play_request", None) is None:
+                self._stop_puppy_thinking(hold_pause=False)
             # A queued long-press still deserves a real attempt even if this
             # particular search/play failed.
             self._finish_play_query(request_id)
@@ -6425,6 +6492,8 @@ class GameBeatsApp:
             )
             game_paused = bool(getattr(self, "_paused_by_game_flag", False))
             started_by_us = bool(getattr(self, "_spotify_started_by_us", False))
+            switch_pause = bool(getattr(self, "_playlist_switch_pause", False))
+            thinking = self._puppy_thinking_active()
             # Do not reveal the puppy for Spotify audio that GameBeats did not
             # start (including a previous session still playing at launch).
             active = (
@@ -6453,6 +6522,30 @@ class GameBeatsApp:
                 return
 
             hide_job = getattr(self, "_puppy_hide_job", None)
+            if (
+                switch_pause
+                and thinking
+                and not notifier_up
+                and not game_paused
+                and started_by_us
+            ):
+                # The next playlist is still loading, so there may be no audio
+                # meter ticks.  Keep the thinking loop on screen instead of
+                # hiding it or locking into the drooped pause pose.
+                if hide_job is not None:
+                    try:
+                        self.root.after_cancel(hide_job)
+                    except Exception:
+                        pass
+                    self._puppy_hide_job = None
+                try:
+                    overlay.set_animation_locked(False)
+                    overlay.play_thinking_animation()
+                except Exception:
+                    pass
+                overlay.show()
+                return
+
             if active:
                 self._puppy_last_loud_ts = time.time()
                 if hide_job is not None:
@@ -6524,6 +6617,13 @@ class GameBeatsApp:
         self._puppy_hide_job = None
         overlay = getattr(self, "_puppy_singing_overlay", None)
         if overlay is None:
+            return
+        if (
+            getattr(self, "_playlist_switch_pause", False)
+            and self._puppy_thinking_active()
+        ):
+            # A playlist search can take 20+ seconds without any audio.  The
+            # thinking overlay is the loading indicator and must stay up.
             return
         try:
             if time.time() - float(getattr(self, "_puppy_last_loud_ts", 0.0) or 0.0) < 1.0:
@@ -7886,40 +7986,57 @@ class GameBeatsApp:
         self._playlist_audio_armed = False
         self._spotify_loud_streak = 0
         if paused:
-            self._manual_paused = True
-            self._user_paused_flag = True
-            self._paused_by_game_flag = False
-            self._add_pause_reason("user")
-            self._remove_pause_reason("auto")
-            self._playlist_end_pending = False
-            self._music_missing_since = 0.0
-            if not preserve_thinking:
+            if preserve_thinking:
+                # This is the transient playlist-switch pause, not a real
+                # user pause.  Keep the thinking loop visible and do not lock
+                # the overlay into the drooped pause pose.  A game pause is
+                # still left intact and remains authoritative.
+                self._playlist_end_pending = False
+                self._music_missing_since = 0.0
+                self._playlist_end_prompt_not_before = (
+                    time.time() + max(3.0, self._playlist_end_delay_seconds())
+                )
+                self._set_play_btn_icon(False, force_btn=True)
+                if getattr(self, "_mascot_notifier", None) is not None:
+                    try:
+                        self._mascot_notifier.close()
+                    except Exception:
+                        pass
+                    self._mascot_notifier = None
+            else:
+                self._manual_paused = True
+                self._user_paused_flag = True
+                self._paused_by_game_flag = False
+                self._add_pause_reason("user")
+                self._remove_pause_reason("auto")
+                self._playlist_end_pending = False
+                self._music_missing_since = 0.0
                 # A real pause owns the drooped pose.  Clear the room thinking
                 # loop here; the overlay lock below replaces its clip too.
                 self._stop_puppy_thinking(
                     hold_pause=False, update_overlay=False
                 )
-            # Keep the playlist-end prompt from firing immediately after a
-            # resume (audio may need a moment to come back).
-            self._playlist_end_prompt_not_before = (
-                time.time() + max(3.0, self._playlist_end_delay_seconds())
-            )
-            # Lock the desktop puppy before the button update can trigger its
-            # visibility path, so a long-press cannot start a change clip
-            # during the pause.
-            try:
-                overlay = getattr(self, "_puppy_singing_overlay", None)
-                if overlay is not None:
-                    overlay.set_animation_locked(True, animate=True)
-            except Exception:
-                pass
-            self._set_play_btn_icon(False, force_btn=True)
-            if getattr(self, "_mascot_notifier", None) is not None:
+                # Keep the playlist-end prompt from firing immediately after a
+                # resume (audio may need a moment to come back).
+                self._playlist_end_prompt_not_before = (
+                    time.time() + max(3.0, self._playlist_end_delay_seconds())
+                )
+                # Lock the desktop puppy before the button update can trigger
+                # its visibility path, so a long-press cannot start a change
+                # clip during the pause.
                 try:
-                    self._mascot_notifier.close()
+                    overlay = getattr(self, "_puppy_singing_overlay", None)
+                    if overlay is not None:
+                        overlay.set_animation_locked(True, animate=True)
                 except Exception:
                     pass
-                self._mascot_notifier = None
+                self._set_play_btn_icon(False, force_btn=True)
+                if getattr(self, "_mascot_notifier", None) is not None:
+                    try:
+                        self._mascot_notifier.close()
+                    except Exception:
+                        pass
+                    self._mascot_notifier = None
         else:
             self._manual_paused = False
             self._user_paused_flag = False
@@ -8201,6 +8318,12 @@ class GameBeatsApp:
             request_id = self._skip_request_seq
             watch_playback = self._clear_user_pause_for_skip()
             self._start_puppy_thinking_animation(reason="track")
+            # Detect the new track's metadata quickly so the headset-swap
+            # completion clip follows the music instead of waiting for the
+            # next 4s steady-state poll.
+            self._schedule_fast_track_refresh()
+            if not watch_playback:
+                self._schedule_skip_completion_watchdog(request_id)
             threading.Thread(
                 target=self._media_next,
                 args=(watch_playback, request_id),
@@ -8227,6 +8350,9 @@ class GameBeatsApp:
             request_id = self._skip_request_seq
             watch_playback = self._clear_user_pause_for_skip()
             self._start_puppy_thinking_animation(reason="track")
+            self._schedule_fast_track_refresh()
+            if not watch_playback:
+                self._schedule_skip_completion_watchdog(request_id)
             threading.Thread(
                 target=self._media_prev,
                 args=(watch_playback, request_id),
@@ -8341,21 +8467,32 @@ class GameBeatsApp:
                 # A playlist switch/long-press already owns the change clip.
                 # Suppress the title-poll echo so one user action does not
                 # produce a second, unrelated animation a few seconds later.
-                quiet_change = (
-                    now < float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0)
-                    or getattr(self, "_pending_play_request", None) is not None
-                    or getattr(self, "_playlist_switch_pause", False)
+                pending_request = (
+                    getattr(self, "_pending_play_request", None) is not None
+                )
+                switch_loading = (
+                    bool(getattr(self, "_playlist_switch_pause", False))
+                    and getattr(self, "_puppy_thinking_reason", "") == "playlist"
                 )
                 if self._puppy_thinking_active():
                     # A next/previous click owns the transition.  Finish the
                     # thinking loop as soon as the new track is actually
-                    # playing, then play one completion clip.
-                    if not quiet_change:
+                    # playing, then play one completion clip.  The cooldown
+                    # below only exists to suppress *automatic* track-change
+                    # reactions; it must not leave an explicit skip thinking.
+                    if not (pending_request or switch_loading):
                         self._finish_puppy_thinking(play_change=True)
-                elif not quiet_change:
-                    # Ordinary track changes should not play the headset-swap
-                    # clip.  Keep only the tiny in-place head-turn reaction.
-                    self._puppy_reaction_until = now + 1.15
+                else:
+                    quiet_change = (
+                        now < float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0)
+                        or pending_request
+                        or getattr(self, "_playlist_switch_pause", False)
+                    )
+                    if not quiet_change:
+                        # Ordinary track changes should not play the
+                        # headset-swap clip.  Keep only the tiny in-place
+                        # head-turn reaction.
+                        self._puppy_reaction_until = now + 1.15
             self._last_np_key = key
         except Exception:
             pass

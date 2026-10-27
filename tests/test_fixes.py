@@ -1030,6 +1030,65 @@ class TestAppNewRegressions(unittest.TestCase):
         self.assertFalse(app._playlist_switch_pause_confirmed)
         self.assertGreater(app._track_change_anim_quiet_until, time.time())
 
+    def test_transient_switch_pause_does_not_lock_the_thinking_overlay(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._user_toggle_ts = 0.0
+        app._playlist_switch_pause = True
+        app._playlist_audio_armed = True
+        app._spotify_loud_streak = 4
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._paused_by_game_flag = False
+        app._playlist_end_pending = True
+        app._music_missing_since = 12.0
+        app._playlist_end_delay_seconds = MagicMock(return_value=4.0)
+        app._mascot_notifier = None
+        app._puppy_singing_overlay = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+        app._stop_puppy_thinking = MagicMock()
+
+        GameBeatsApp._apply_user_pause_state(
+            app, True, preserve_thinking=True
+        )
+
+        self.assertFalse(app._manual_paused)
+        self.assertFalse(app._user_paused_flag)
+        self.assertFalse(app._paused_by_game_flag)
+        self.assertTrue(app._playlist_switch_pause)
+        self.assertFalse(app._playlist_audio_armed)
+        self.assertEqual(app._spotify_loud_streak, 0)
+        app._puppy_singing_overlay.set_animation_locked.assert_not_called()
+        app._stop_puppy_thinking.assert_not_called()
+        app._set_play_btn_icon.assert_called_once_with(False, force_btn=True)
+
+    def test_transient_switch_pause_keeps_a_real_game_pause(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._user_toggle_ts = 0.0
+        app._playlist_switch_pause = True
+        app._playlist_audio_armed = True
+        app._spotify_loud_streak = 0
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._paused_by_game_flag = True
+        app._playlist_end_pending = False
+        app._music_missing_since = 0.0
+        app._playlist_end_delay_seconds = MagicMock(return_value=4.0)
+        app._mascot_notifier = None
+        app._puppy_singing_overlay = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+
+        GameBeatsApp._apply_user_pause_state(
+            app, True, preserve_thinking=True
+        )
+
+        self.assertTrue(app._paused_by_game_flag)
+        self.assertFalse(app._manual_paused)
+        self.assertFalse(app._user_paused_flag)
+
     def test_adopt_switch_playback_resumes_icon_and_puppy_immediately(self):
         from ui.app import GameBeatsApp
 
@@ -1524,6 +1583,52 @@ class TestAppNewRegressions(unittest.TestCase):
 
         app._finish_puppy_thinking.assert_called_once_with(play_change=True)
         app._play_puppy_change_animation.assert_not_called()
+
+    def test_update_np_finishes_skip_thinking_during_quiet_cooldown(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._last_np_key = ("old", "Old", "Artist")
+        app._last_track_info = {}
+        app._last_track_info_ts = 0.0
+        app._track_change_anim_quiet_until = time.time() + 5.0
+        app._pending_play_request = None
+        app._playlist_switch_pause = False
+        app._puppy_thinking_reason = "track"
+        app._puppy_reaction_until = 0.0
+        app._puppy_thinking_active = MagicMock(return_value=True)
+        app._finish_puppy_thinking = MagicMock(return_value=True)
+        app._play_puppy_change_animation = MagicMock()
+        app._fresh_playback_grace = MagicMock(return_value=False)
+
+        GameBeatsApp._update_np(
+            app, {"uri": "new", "name": "New", "artist": "Artist"}
+        )
+
+        app._finish_puppy_thinking.assert_called_once_with(play_change=True)
+
+    def test_update_np_keeps_playlist_loading_thinking(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._last_np_key = ("old", "Old", "Artist")
+        app._last_track_info = {}
+        app._last_track_info_ts = 0.0
+        app._track_change_anim_quiet_until = 0.0
+        app._pending_play_request = None
+        app._playlist_switch_pause = True
+        app._puppy_thinking_reason = "playlist"
+        app._puppy_reaction_until = 0.0
+        app._puppy_thinking_active = MagicMock(return_value=True)
+        app._finish_puppy_thinking = MagicMock(return_value=True)
+        app._play_puppy_change_animation = MagicMock()
+        app._fresh_playback_grace = MagicMock(return_value=False)
+
+        GameBeatsApp._update_np(
+            app, {"uri": "new", "name": "New", "artist": "Artist"}
+        )
+
+        app._finish_puppy_thinking.assert_not_called()
 
     def test_fresh_playback_grace_holds_until_audio_or_timeout(self):
         from ui.app import FRESH_PLAYBACK_GRACE_SEC, GameBeatsApp
@@ -2049,6 +2154,65 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
 
         app._puppy_singing_overlay.hide.assert_called_once_with()
 
+    def test_playlist_switch_keeps_thinking_overlay_visible_without_audio(self):
+        app = self._make_app()
+        app._playlist_switch_pause = True
+        app._puppy_thinking_active = MagicMock(return_value=True)
+        app._paused_by_game_flag = False
+
+        app._set_puppy_singing_visible(False)
+
+        app._puppy_singing_overlay.set_animation_locked.assert_called_with(False)
+        app._puppy_singing_overlay.play_thinking_animation.assert_called_once_with()
+        app._puppy_singing_overlay.show.assert_called_once()
+        app._puppy_singing_overlay.hide.assert_not_called()
+
+    def test_playlist_switch_thinking_is_not_hidden_after_quiet(self):
+        app = self._make_app()
+        app._playlist_switch_pause = True
+        app._puppy_thinking_active = MagicMock(return_value=True)
+
+        app._hide_puppy_after_quiet()
+
+        app._puppy_singing_overlay.hide.assert_not_called()
+
+
+class TestOverlayPlacement(unittest.TestCase):
+    def _overlay(self, *, saved=None, custom=None, dragged=False):
+        from ui.mascot_notifier import PuppySingingOverlay
+
+        overlay = PuppySingingOverlay.__new__(PuppySingingOverlay)
+        win = MagicMock()
+        win.winfo_vrootx.return_value = 0
+        win.winfo_vrooty.return_value = 0
+        win.winfo_vrootwidth.return_value = 1463
+        win.winfo_vrootheight.return_value = 914
+        win.winfo_reqwidth.return_value = 263
+        win.winfo_reqheight.return_value = 205
+        overlay._win = win
+        overlay._saved_pos = saved
+        overlay._custom_pos = custom
+        overlay._dragged = dragged
+        overlay._anchor_getter = None
+        overlay._corner = "bottom-right"
+        return overlay
+
+    def test_stale_saved_position_is_clamped_into_the_current_desktop(self):
+        overlay = self._overlay(saved=(2353, 1319))
+
+        overlay._place()
+
+        overlay._win.geometry.assert_called_once_with("+1200+709")
+        self.assertEqual(overlay._saved_pos, (1200, 709))
+
+    def test_dragged_position_cannot_be_restored_offscreen(self):
+        overlay = self._overlay(custom=(-40, -30), dragged=True)
+
+        overlay._place()
+
+        overlay._win.geometry.assert_called_once_with("+0+0")
+        self.assertEqual(overlay._custom_pos, (0, 0))
+
 
 class TestAudioMonitorRegression(unittest.TestCase):
     def _make_app(self):
@@ -2192,6 +2356,67 @@ class TestOtherAudioDetection(unittest.TestCase):
         self.assertFalse(loud)
         self.assertEqual(mode, "other-session")
         self.assertFalse(dbg["other_loud"])
+
+
+class TestSkipCompletionWatchdog(unittest.TestCase):
+    def _app(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.root = MagicMock()
+        app.root.after.return_value = "job"
+        app._skip_request_seq = 5
+        app._skip_completion_job = None
+        app._puppy_thinking_active = MagicMock(return_value=True)
+        app._puppy_thinking_reason = "track"
+        app._intentional_pause_active = MagicMock(return_value=False)
+        app._spotify_audio_active = True
+        app._is_playing = True
+        app._spotify_sound_detected_recently = MagicMock(return_value=False)
+        app._finish_puppy_thinking = MagicMock(return_value=True)
+        return app
+
+    def test_watchdog_finishes_a_stalled_skip_while_audio_is_playing(self):
+        from ui.app import GameBeatsApp
+
+        app = self._app()
+        GameBeatsApp._finish_stalled_skip(app, 5)
+
+        app._finish_puppy_thinking.assert_called_once_with(play_change=True)
+
+    def test_watchdog_ignores_stale_paused_or_silent_skips(self):
+        from ui.app import GameBeatsApp
+
+        app = self._app()
+        GameBeatsApp._finish_stalled_skip(app, 4)
+        app._finish_puppy_thinking.assert_not_called()
+
+        app._puppy_thinking_reason = "playlist"
+        GameBeatsApp._finish_stalled_skip(app, 5)
+        app._finish_puppy_thinking.assert_not_called()
+
+        app._puppy_thinking_reason = "track"
+        app._intentional_pause_active.return_value = True
+        GameBeatsApp._finish_stalled_skip(app, 5)
+        app._finish_puppy_thinking.assert_not_called()
+
+        app._intentional_pause_active.return_value = False
+        app._spotify_audio_active = False
+        app._is_playing = False
+        GameBeatsApp._finish_stalled_skip(app, 5)
+        app._finish_puppy_thinking.assert_not_called()
+
+    def test_watchdog_is_scheduled_for_the_current_skip(self):
+        from ui.app import SKIP_COMPLETION_WATCHDOG_MS, GameBeatsApp
+
+        app = self._app()
+        GameBeatsApp._schedule_skip_completion_watchdog(app, 5)
+
+        app.root.after.assert_called_once()
+        delay, callback = app.root.after.call_args.args
+        self.assertEqual(delay, SKIP_COMPLETION_WATCHDOG_MS)
+        callback()
+        app._finish_puppy_thinking.assert_called_once_with(play_change=True)
 
 
 class TestSkipWhilePaused(unittest.TestCase):
