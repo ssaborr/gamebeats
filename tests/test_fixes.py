@@ -2,7 +2,7 @@ import sys
 import os
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SOURCE_DIR = os.path.join(BASE_DIR, "source")
@@ -486,6 +486,7 @@ class TestAppIntentionalPause(unittest.TestCase):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)
         app.spotify = self._browser_controller()
+        app.spotify._player_is_playing.return_value = True
         app._spotify_active_source = MagicMock(return_value="browser")
         self._bind_app_method(app, "_spotify_browser_page_kind")
         self._bind_app_method(app, "_send_spotify_browser_command")
@@ -496,9 +497,114 @@ class TestAppIntentionalPause(unittest.TestCase):
         app._remember_spotify_pause_claim = MagicMock()
 
         self.assertTrue(app._send_spotify_pause_command())
-        app.spotify._pause_player.assert_called_once_with(app.spotify._page)
+        app.spotify._page.keyboard.press.assert_called_once_with("Space")
+        app.spotify._pause_player.assert_not_called()
         app._send_targeted_spotify_command.assert_not_called()
         self.assertEqual(app._paused_spotify_source, "browser")
+
+    def test_browser_resume_uses_space_and_skips_slow_control_click(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = self._browser_controller()
+        app.spotify._player_is_playing.return_value = False
+        app._spotify_browser_page_kind = MagicMock(return_value="controller")
+        self._bind_app_method(app, "_send_spotify_browser_command")
+
+        self.assertTrue(app._send_spotify_browser_command("play"))
+        app.spotify._page.keyboard.press.assert_called_once_with("Space")
+        app.spotify._play_player.assert_not_called()
+
+    def test_browser_toggle_is_idempotent(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = self._browser_controller()
+        app._spotify_browser_page_kind = MagicMock(return_value="controller")
+        self._bind_app_method(app, "_send_spotify_browser_command")
+
+        # Already paused: a pause request must not press Space again.
+        app.spotify._player_is_playing.return_value = False
+        self.assertTrue(app._send_spotify_browser_command("pause"))
+        app.spotify._page.keyboard.press.assert_not_called()
+        app.spotify._pause_player.assert_not_called()
+
+        # Already playing: a play request must not press Space again.
+        app.spotify._player_is_playing.return_value = True
+        self.assertTrue(app._send_spotify_browser_command("play"))
+        app.spotify._page.keyboard.press.assert_not_called()
+        app.spotify._play_player.assert_not_called()
+
+    def test_browser_unknown_state_uses_verified_fallback(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = self._browser_controller()
+        app.spotify._player_is_playing.return_value = None
+        app._spotify_browser_page_kind = MagicMock(return_value="controller")
+        self._bind_app_method(app, "_send_spotify_browser_command")
+
+        self.assertTrue(app._send_spotify_browser_command("pause"))
+        app.spotify._page.keyboard.press.assert_not_called()
+        app.spotify._pause_player.assert_called_once_with(app.spotify._page)
+
+    def test_browser_shortcut_failure_uses_verified_control(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = self._browser_controller()
+        app.spotify._player_is_playing.return_value = True
+        app.spotify._page.keyboard.press.side_effect = RuntimeError("no keyboard")
+        app._spotify_browser_page_kind = MagicMock(return_value="controller")
+        self._bind_app_method(app, "_send_spotify_browser_command")
+
+        self.assertTrue(app._send_spotify_browser_command("pause"))
+        app.spotify._pause_player.assert_called_once_with(app.spotify._page)
+
+    def test_browser_command_rejects_non_spotify_page(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = self._browser_controller(
+            "https://www.youtube.com/watch?v=wrong_target"
+        )
+        app._spotify_browser_page_kind = MagicMock(return_value="controller")
+        self._bind_app_method(app, "_send_spotify_browser_command")
+
+        self.assertFalse(app._send_spotify_browser_command("pause"))
+        app.spotify._page.keyboard.press.assert_not_called()
+        app.spotify._pause_player.assert_not_called()
+
+    def test_active_source_fast_path_confirms_last_source(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app.spotify._last_audio_source = "desktop"
+        app._paused_spotify_source = ""
+        app._spotify_source_available = MagicMock(return_value=True)
+        app._spotify_source_peak = MagicMock(return_value=(0.2, "ok"))
+        app._spotify_browser_page_kind = MagicMock(return_value="")
+        self._bind_app_method(app, "_spotify_active_source")
+
+        self.assertEqual(app._spotify_active_source(), "desktop")
+        app._spotify_source_peak.assert_called_once_with("desktop")
+        app._spotify_browser_page_kind.assert_not_called()
+
+    def test_active_source_fast_path_rejects_silent_last_source(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app.spotify._last_audio_source = "desktop"
+        app._paused_spotify_source = ""
+        app._spotify_source_available = MagicMock(return_value=True)
+        app._spotify_source_peak = MagicMock(
+            side_effect=[(0.0, "ok"), (0.0, "ok"), (0.25, "ok")]
+        )
+        app._spotify_browser_page_kind = MagicMock(return_value="")
+        app._spotify_desktop_controller = MagicMock(return_value=MagicMock())
+        self._bind_app_method(app, "_spotify_active_source")
+
+        self.assertEqual(app._spotify_active_source(), "desktop")
+        # The stale candidate was checked, then the full desktop check found audio.
+        self.assertEqual(
+            app._spotify_source_peak.call_args_list,
+            [call("desktop"), call("desktop")],
+        )
 
     def test_desktop_pause_uses_only_the_desktop_controller(self):
         from ui.app import GameBeatsApp

@@ -7907,6 +7907,31 @@ class GameBeatsApp:
                     return False
             except Exception:
                 return False
+
+            desired = action == "play"
+            try:
+                state = controller._player_is_playing(page)
+            except Exception:
+                state = None
+            if state is desired:
+                # Already in the requested state.  Do not toggle back.
+                return True
+
+            # Spotify's play/pause control can spend several seconds waiting
+            # to become "actionable" while the page's Space shortcut still
+            # toggles immediately.  Send Space only to this already-verified
+            # Spotify page; never a global media key.  The caller still waits
+            # for real audio before declaring success, and a retry re-reads
+            # the state above so it cannot press twice.
+            if state is not None:
+                try:
+                    page.keyboard.press("Space")
+                    return True
+                except Exception:
+                    pass
+
+            # Unknown page state (or the shortcut failed): use Spotify's own
+            # verified control path.  It is slower, but remains page-scoped.
             method_name = "_pause_player" if action == "pause" else "_play_player"
             method = getattr(controller, method_name, None)
             if not callable(method):
@@ -7982,6 +8007,24 @@ class GameBeatsApp:
         """Pick the one source GameBeats is allowed to control right now."""
         if getattr(self, "spotify", None) is None:
             return ""
+        threshold = SPOTIFY_SOURCE_AUDIBLE_THRESHOLD
+
+        # Fast path: the last source that actually produced audio is usually
+        # still the right one.  Confirm it with its own meter before returning,
+        # so a stale flag can never make us target a silent source.  This also
+        # avoids a browser-thread round trip for desktop playback.
+        for candidate in (
+            str(getattr(self, "_paused_spotify_source", "") or ""),
+            str(getattr(self.spotify, "_last_audio_source", "") or ""),
+        ):
+            if candidate not in ("browser", "desktop"):
+                continue
+            if not self._spotify_source_available(candidate):
+                continue
+            peak, status = self._spotify_source_peak(candidate)
+            if status == "ok" and peak >= threshold:
+                return candidate
+
         browser_kind = self._spotify_browser_page_kind()
         browser_peak, browser_status = (0.0, "no-page")
         if browser_kind:
@@ -7991,7 +8034,6 @@ class GameBeatsApp:
         if desktop is not None:
             desktop_peak, desktop_status = self._spotify_source_peak("desktop")
 
-        threshold = SPOTIFY_SOURCE_AUDIBLE_THRESHOLD
         b_ok = browser_status == "ok" and browser_peak >= threshold
         d_ok = desktop_status == "ok" and desktop_peak >= threshold
         if b_ok and browser_peak >= desktop_peak and browser_kind:
