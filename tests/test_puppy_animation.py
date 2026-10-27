@@ -274,19 +274,23 @@ class TestRoomGifAsset(unittest.TestCase):
         self.assertIn(("thinking", PUPPY_THINKING_GIF), PUPPY_ROOM_STATE_GIFS)
         self.assertIn(("thinking", PUPPY_THINKING_GIF), PUPPY_OVERLAY_STATE_GIFS)
 
-    def test_thinking_gif_plays_six_intro_frames_then_ping_pongs(self):
+    def test_thinking_gif_plays_six_intro_frames_then_slow_ping_pong(self):
         from ui.puppy_gif import thinking_frame_index
 
         durations = (120,) * 9
         self.assertEqual(thinking_frame_index(0, durations), 0)
         self.assertEqual(thinking_frame_index(600, durations), 5)
+        # Six 120 ms intro frames, then frame 7 starts the tail.
         self.assertEqual(thinking_frame_index(720, durations), 6)
-        self.assertEqual(thinking_frame_index(840, durations), 7)
-        self.assertEqual(thinking_frame_index(960, durations), 8)
-        self.assertEqual(thinking_frame_index(1080, durations), 7)
-        self.assertEqual(thinking_frame_index(1200, durations), 6)
+        # The 7-8-9-8 loop is held for 180 ms per step: 50% slower than the
+        # authored 120 ms frames.  The intro above keeps its original cadence.
+        self.assertEqual(thinking_frame_index(840, durations), 6)
+        self.assertEqual(thinking_frame_index(900, durations), 7)
+        self.assertEqual(thinking_frame_index(1080, durations), 8)
+        self.assertEqual(thinking_frame_index(1260, durations), 7)
+        self.assertEqual(thinking_frame_index(1440, durations), 6)
         # The tail keeps repeating; it never reaches a terminal frame.
-        self.assertEqual(thinking_frame_index(10320, durations), 6)
+        self.assertEqual(thinking_frame_index(10800, durations), 6)
 
     def test_room_and_overlay_use_the_same_bobbing_mascot(self):
         from ui.app import PUPPY_ROOM_GIF
@@ -599,13 +603,14 @@ class TestRoomPuppyActions(unittest.TestCase):
         self.assertEqual(app._puppy_action_state, "thinking")
         self.assertEqual(app._puppy_action_loops, 0)
         self.assertEqual(app._puppy_frame_name(now=100.0), "action:thinking:0")
-        # Six intro frames at 120 ms each, then frame 7 (index 6).
+        # Six intro frames at 120 ms each, then a 50%-slower 180 ms tail.
         self.assertEqual(app._puppy_frame_name(now=100.6), "action:thinking:5")
         self.assertEqual(app._puppy_frame_name(now=100.72), "action:thinking:6")
-        self.assertEqual(app._puppy_frame_name(now=100.84), "action:thinking:7")
-        self.assertEqual(app._puppy_frame_name(now=100.96), "action:thinking:8")
-        self.assertEqual(app._puppy_frame_name(now=101.08), "action:thinking:7")
-        self.assertEqual(app._puppy_frame_name(now=101.2), "action:thinking:6")
+        self.assertEqual(app._puppy_frame_name(now=100.84), "action:thinking:6")
+        self.assertEqual(app._puppy_frame_name(now=100.9), "action:thinking:7")
+        self.assertEqual(app._puppy_frame_name(now=101.08), "action:thinking:8")
+        self.assertEqual(app._puppy_frame_name(now=101.26), "action:thinking:7")
+        self.assertEqual(app._puppy_frame_name(now=101.44), "action:thinking:6")
         # The loop is indefinite: it must not fall back to the bob.
         self.assertTrue(
             app._puppy_frame_name(now=160.0).startswith("action:thinking:")
@@ -919,6 +924,29 @@ class TestDesktopPuppyControls(unittest.TestCase):
         self.assertEqual(overlay._state, "pause")
         self.assertTrue(overlay._active_hold)
         self.assertFalse(overlay._active_reverse)
+
+    def test_thinking_overlay_samples_the_slow_tail_evenly(self):
+        from ui.mascot_notifier import PUPPY_THINKING_ANIMATION_INTERVAL
+
+        overlay = self._make_overlay(playing=True)
+        self._add_thinking_frames(overlay)
+        self.assertTrue(overlay.play_thinking_animation())
+
+        # A 120 ms tick would alternate 120/240 ms holds for the 180 ms tail
+        # frames.  The thinking loop samples at 60 ms instead.
+        overlay._win.after.reset_mock()
+        with patch(
+            "ui.mascot_notifier.time.monotonic",
+            return_value=overlay._state_started + 0.72,
+        ):
+            overlay._animate()
+
+        self.assertEqual(overlay._idx, 6)
+        self.assertEqual(
+            overlay._win.after.call_args.args[0],
+            PUPPY_THINKING_ANIMATION_INTERVAL,
+        )
+        self.assertEqual(PUPPY_THINKING_ANIMATION_INTERVAL, 60)
 
     def test_switch_unlock_can_start_thinking_then_finish_with_change(self):
         overlay = self._make_overlay(playing=False)

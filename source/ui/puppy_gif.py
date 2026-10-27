@@ -36,9 +36,11 @@ PUPPY_CHANGE_GIF = "changing playlist or song.gif"
 PUPPY_PAUSE_GIF = "pause and resume overlay anime.gif"
 PUPPY_THINKING_GIF = "puppy-thinking.gif"
 # The thinking GIF has nine authored frames.  Play the first six once, then
-# ping-pong through frames 7-8-9-8 until the new track/playlist is ready.
+# ping-pong through frames 7-8-9-8 until the new track/playlist is ready.  The
+# short tail loop reads better at 50% slower than the intro's authored cadence.
 THINKING_INTRO_FRAMES = 6
 THINKING_TAIL_FRAMES = (6, 7, 8, 7)
+THINKING_TAIL_DURATION_SCALE = 1.5
 _RESAMPLE = getattr(Image, "Resampling", Image).NEAREST
 _CACHE = {}
 
@@ -401,6 +403,9 @@ def thinking_frame_index(elapsed_ms: float, durations_ms) -> int:
     tail = tuple(index for index in THINKING_TAIL_FRAMES if index < len(durations))
     if not tail:
         return len(durations) - 1
-    tail_durations = tuple(durations[index] for index in tail)
+    tail_durations = tuple(
+        max(1, int(round(durations[index] * THINKING_TAIL_DURATION_SCALE)))
+        for index in tail
+    )
     offset = elapsed - intro_total
     return tail[frame_index_at(offset, tail_durations)]

@@ -72,6 +72,9 @@ PUPPY_IDLE_FRAME = "idle_0"
 # The GIFs are authored at 120 ms per frame. Keep that cadence so the bob reads
 # at the same speed in the room and in the desktop overlay.
 PUPPY_ANIMATION_INTERVAL = 120
+# The thinking tail runs at 180 ms per frame.  Sample it twice as often so Tk's
+# fixed timer cannot stretch a 180 ms frame across two uneven 120 ms ticks.
+PUPPY_THINKING_ANIMATION_INTERVAL = 60
 # Short presses toggle playback; holding a little longer asks for another mix.
 PUPPY_LONG_CLICK_MS = 650
 PUPPY_CLICK_MOVE_TOLERANCE = 7
@@ -972,10 +975,13 @@ class PuppySingingOverlay:
             if result == "hold":
                 self._after = None
                 return
+            interval = (
+                PUPPY_THINKING_ANIMATION_INTERVAL
+                if state == "thinking"
+                else PUPPY_ANIMATION_INTERVAL
+            )
             try:
-                self._after = self._win.after(
-                    max(5, PUPPY_ANIMATION_INTERVAL), self._animate
-                )
+                self._after = self._win.after(max(5, interval), self._animate)
             except Exception:
                 pass
             return
