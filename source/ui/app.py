@@ -1121,6 +1121,13 @@ class GameBeatsApp:
         self._playlist_switch_started_ts = 0.0
         self._playlist_switch_heard_silence = False
         self._playlist_switch_audio_heard_ts = 0.0
+        self._playlist_switch_pause_confirmed = False
+        # Coalesce "Try another" requests instead of silently dropping them
+        # while the previous controller operation is still finishing.
+        self._pending_play_request = None
+        self._track_change_anim_quiet_until = 0.0
+        self._play_request_seq = 0
+        self._active_play_request_id = 0
         # ┌─ PAUSE STACK STATE MANAGEMENT ─────────────────────────────────┐
         # │ Stack entries: [("auto" | "user", timestamp), ...]             │
         # │                                                                  │
@@ -3176,7 +3183,20 @@ class GameBeatsApp:
             return False
         if not force and now < getattr(self, "_puppy_change_cooldown_until", 0.0):
             return False
+        if self._puppy_action_active("change"):
+            # A long-press starts the overlay clip immediately and then calls
+            # this method.  Restarting the room clip there made the puppy
+            # visibly stutter.  One active change clip is enough.
+            self._track_change_anim_quiet_until = max(
+                float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0),
+                now + 2.0,
+            )
+            return False
         self._puppy_change_cooldown_until = now + 2.0
+        self._track_change_anim_quiet_until = max(
+            float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0),
+            now + 7.0,
+        )
         self._start_puppy_action("change", loops=1)
         if overlay is not None:
             try:
@@ -5327,13 +5347,21 @@ class GameBeatsApp:
         if self._play_in_progress:
             return
         self._play_in_progress = True
+        play_started = False
+        self._play_request_seq = int(getattr(self, "_play_request_seq", 0)) + 1
+        request_id = self._play_request_seq
+        self._active_play_request_id = request_id
+        # Attribute the upcoming audio to GameBeats before the controller
+        # returns.  The controller can take 20+ seconds to confirm playback;
+        # gating the overlay on that result made it appear long after music.
+        self._spotify_started_by_us = True
+        self._playback_started_ts = time.time()
         try:
             if self._is_web_mode() and self.spotify:
                 if not self.spotify.ensure_active_device():
                     err = getattr(self.spotify, "_last_error", "") or "browser failed"
                     self.root.after(0, lambda e=err: self._log(
                         f"⚠ Web player failed to start: {e}"))
-                    self._play_in_progress = False
                     return
             elif self.spotify:
                 self.spotify.ensure_active_device()
@@ -5343,6 +5371,7 @@ class GameBeatsApp:
                 ok = bool(self.spotify.play_playlist(playlist_uri))
             except Exception:
                 ok = False
+            play_started = ok
 
             if ok:
                 self._spotify_started_by_us = True
@@ -5362,13 +5391,32 @@ class GameBeatsApp:
             self.root.after(0, lambda e=ex: self._log(
                 f"Custom playlist error: {e}"))
         finally:
-            self._play_in_progress = False
+            if not play_started and request_id == getattr(self, "_active_play_request_id", 0):
+                # Do not leave an early "ours" claim behind when the assigned
+                # playlist genuinely failed to start.
+                try:
+                    if (
+                        not getattr(self, "_is_playing", False)
+                        and not self._spotify_sound_detected_recently(2.0)
+                    ):
+                        self._spotify_started_by_us = False
+                except Exception:
+                    pass
+            # Clear the busy flag and run any queued request on the Tk thread,
+            # after the success callback above has updated the deck.
+            try:
+                self.root.after(0, lambda rid=request_id: self._finish_play_query(rid))
+            except Exception:
+                self._play_in_progress = False
 
     def _on_game_lost(self):
         self._stop_audio_monitor()
         self.current_game = None
         self._game_pid = None
         self._play_in_progress = False
+        self._pending_play_request = None
+        self._play_request_seq = int(getattr(self, "_play_request_seq", 0)) + 1
+        self._active_play_request_id = 0
         self._playlist_end_pending = False
         self._music_missing_since = 0.0
         if self.spotify and self._spotify_started_by_us:
@@ -5380,6 +5428,7 @@ class GameBeatsApp:
         self._playlist_switch_heard_silence = False
         self._playlist_switch_started_ts = 0.0
         self._playlist_switch_audio_heard_ts = 0.0
+        self._playlist_switch_pause_confirmed = False
         self.root.after(0, lambda: (
             self.game_banner.configure(text="NO SAVED GAME RUNNING", text_color=TEXT_MUTED),
             self.mood_lbl.configure(text="Waiting for a game"),
@@ -5416,6 +5465,13 @@ class GameBeatsApp:
         self._playlist_switch_started_ts = time.time()
         self._playlist_switch_heard_silence = False
         self._playlist_switch_audio_heard_ts = 0.0
+        self._playlist_switch_pause_confirmed = False
+        # The user already chose a new playlist; suppress incidental title
+        # changes from replaying the change clip while it loads.
+        self._track_change_anim_quiet_until = max(
+            float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0),
+            time.time() + 12.0,
+        )
         try:
             self._set_play_btn_icon(False, force_btn=True)
             self._update_deck_status()
@@ -5444,6 +5500,11 @@ class GameBeatsApp:
         self._playlist_switch_pause = False
         self._playlist_switch_heard_silence = False
         self._playlist_switch_audio_heard_ts = time.time()
+        self._playlist_switch_pause_confirmed = False
+        self._track_change_anim_quiet_until = max(
+            float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0),
+            time.time() + 6.0,
+        )
         self._manual_paused = False
         self._user_paused_flag = False
         self._paused_by_game_flag = False
@@ -5491,6 +5552,10 @@ class GameBeatsApp:
             ok = self._send_spotify_pause_command(was_playing=True)
         except Exception:
             ok = False
+        # Only adopt replacement audio after the old mix was actually paused.
+        # Otherwise a momentary gap in the old playlist could be mistaken for
+        # the new one starting.
+        self._playlist_switch_pause_confirmed = bool(ok)
         try:
             msg = (
                 "Current playlist paused; finding the next one…"
@@ -5501,11 +5566,97 @@ class GameBeatsApp:
         except Exception:
             pass
 
-    def _play_query_for_game(self, info, force_new=False, exclude_uris=None, reason="Playing", one_shot: bool = False, pause_first: bool = False):
-        if self._play_in_progress:
+    def _finish_play_query(self, request_id=None):
+        """Mark the controller operation done, then run a queued request.
+
+        This must stay on the Tk thread: keeping ``_play_in_progress`` true
+        until the result's UI callback runs prevents a long-press in between
+        from being overwritten by the old result.
+        """
+        if (
+            request_id is not None
+            and request_id != getattr(self, "_active_play_request_id", 0)
+        ):
+            # A newer request owns the UI now; do not clear its busy state.
+            return
+        self._play_in_progress = False
+        self._process_pending_play_request()
+
+    def _queue_pending_play_request(
+        self, info, force_new=False, exclude_uris=None,
+        reason="Playing", one_shot: bool = False, pause_first: bool = False,
+    ):
+        """Remember one latest playlist request while another is loading.
+
+        The Spotify controller can keep finalising for 10-20 seconds after
+        the new mix is already audible.  Dropping a long-press during that
+        window made "Try another" feel random.  Keep the newest request and
+        run it as soon as the active controller operation really finishes.
+        """
+        self._pending_play_request = {
+            "info": info,
+            "force_new": bool(force_new),
+            "exclude_uris": set(exclude_uris or []),
+            "reason": reason,
+            "one_shot": bool(one_shot),
+            "pause_first": bool(pause_first),
+        }
+        try:
+            self._log(
+                "Another playlist is still loading - queued this request."
+            )
+        except Exception:
+            pass
+
+    def _process_pending_play_request(self):
+        """Start the queued request once no playlist worker is active."""
+        if getattr(self, "_play_in_progress", False):
+            return
+        pending = getattr(self, "_pending_play_request", None)
+        if not pending:
+            return
+        self._pending_play_request = None
+        if getattr(self, "_closing", False):
+            return
+        info = pending.get("info")
+        if info is not None and info is not getattr(self, "current_game", None):
+            try:
+                self._log("Queued playlist request discarded (game changed).")
+            except Exception:
+                pass
+            return
+        try:
+            self._play_query_for_game(
+                info,
+                force_new=pending.get("force_new", False),
+                exclude_uris=pending.get("exclude_uris"),
+                reason=pending.get("reason", "Playing"),
+                one_shot=pending.get("one_shot", False),
+                pause_first=pending.get("pause_first", False),
+                _from_queue=True,
+            )
+        except Exception as ex:
+            try:
+                self._log(f"Queued playlist request failed: {ex}")
+            except Exception:
+                pass
+
+    def _play_query_for_game(self, info, force_new=False, exclude_uris=None, reason="Playing", one_shot: bool = False, pause_first: bool = False, _from_queue: bool = False):
+        if self._play_in_progress and not _from_queue:
+            self._queue_pending_play_request(
+                info,
+                force_new=force_new,
+                exclude_uris=exclude_uris,
+                reason=reason,
+                one_shot=one_shot,
+                pause_first=pause_first,
+            )
             return
         if pause_first:
             self._begin_playlist_switch_pause(reason)
+        self._play_request_seq = int(getattr(self, "_play_request_seq", 0)) + 1
+        request_id = self._play_request_seq
+        self._active_play_request_id = request_id
 
         requested_excludes = set(exclude_uris or [])
         skip_uris = self._skip_playlist_uris(requested_excludes)
@@ -5554,7 +5705,7 @@ class GameBeatsApp:
                             err = getattr(self.spotify, "_last_error", "") or "browser failed"
                             self.root.after(0, lambda e=err: self._log(
                                 f"⚠ Web player failed to start: {e}"))
-                            self.root.after(0, lambda: self._on_play_result(None, mood, search_q))
+                            self.root.after(0, lambda rid=request_id: self._on_play_result(None, mood, search_q, rid))
                             return
                 elif self.spotify:
                     self.spotify.ensure_active_device()
@@ -5584,12 +5735,23 @@ class GameBeatsApp:
                 result = None
                 if self.spotify:
                     self.spotify._last_error = str(ex)
-            self.root.after(0, lambda r=result, q=search_q: self._on_play_result(r, mood, q))
+            self.root.after(0, lambda r=result, q=search_q, rid=request_id: self._on_play_result(r, mood, q, rid))
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _on_play_result(self, result, mood, search_q):
-        self._play_in_progress = False
+    def _on_play_result(self, result, mood, search_q, request_id=None):
+        if (
+            request_id is not None
+            and request_id != getattr(self, "_active_play_request_id", 0)
+        ):
+            try:
+                self._log("Ignored a stale playlist result.")
+            except Exception:
+                pass
+            return
+        # Keep _play_in_progress true until the scheduled UI callback has
+        # applied this result.  A long-press in that gap is queued instead of
+        # racing the stale result.
         # If playback started successfully, clear the pending playlist-end
         # marker so the monitor can prompt again on future ends.
         try:
@@ -5605,13 +5767,16 @@ class GameBeatsApp:
             
             def _on_ok():
                 try:
-                    # The audio monitor may already have adopted this playlist
-                    # when its first sustained audio arrived.  Do not restart
-                    # the headset-swap clip and interrupt an already-bobbing
-                    # puppy in that case.
-                    switch_audio_heard = (
-                        float(getattr(self, "_playlist_switch_audio_heard_ts", 0.0) or 0.0)
-                        > float(getattr(self, "_playlist_switch_started_ts", 0.0) or 0.0)
+                    # A playlist switch already showed exactly one change
+                    # clip when the user asked for it.  The controller result
+                    # can arrive many seconds later; do not replay the clip
+                    # then, and do not replay it if a newer request is queued.
+                    switch_started = (
+                        float(getattr(self, "_playlist_switch_started_ts", 0.0) or 0.0)
+                        > 0.0
+                    )
+                    pending_after = (
+                        getattr(self, "_pending_play_request", None) is not None
                     )
                     self._spotify_started_by_us = True
                     self._playback_started_ts = time.time()
@@ -5621,10 +5786,18 @@ class GameBeatsApp:
                     # in gif:0 until the next audio-meter tick.
                     self._remember_current_playlist(picked_uri, picked_name, picked_query, reset_pause_flags=True)
                     self._set_play_btn_icon(True, force_btn=True)
-                    if not switch_audio_heard:
+                    # Keep title polling from triggering a second change
+                    # reaction right after the playlist starts.
+                    self._track_change_anim_quiet_until = max(
+                        float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0),
+                        time.time() + 6.0,
+                    )
+                    if not switch_started and not pending_after:
                         self._play_puppy_change_animation(force=True)
                     self._playlist_switch_started_ts = 0.0
                     self._playlist_switch_audio_heard_ts = 0.0
+                    self._playlist_switch_heard_silence = False
+                    self._playlist_switch_pause_confirmed = False
                     # The web player often exposes the new song a beat or two
                     # after starting.  Poll quickly for the first several
                     # seconds instead of waiting for the 4s steady-state tick.
@@ -5640,6 +5813,10 @@ class GameBeatsApp:
                     self.root.after(800, self._pause_started_playlist_if_game_loud)
                 except Exception:
                     pass
+                finally:
+                    # Run a coalesced long-press only after this result's UI
+                    # state has been applied, so it cannot be overwritten.
+                    self._finish_play_query(request_id)
             self.root.after(0, _on_ok)
             return
         else:
@@ -5660,6 +5837,7 @@ class GameBeatsApp:
             self._playlist_switch_heard_silence = False
             self._playlist_switch_started_ts = 0.0
             self._playlist_switch_audio_heard_ts = 0.0
+            self._playlist_switch_pause_confirmed = False
             # Do not leave an early "ours" claim behind after a real failure;
             # otherwise unrelated Spotify audio could reveal the puppy.
             try:
@@ -5673,6 +5851,9 @@ class GameBeatsApp:
             err = getattr(self.spotify, "_last_error", "") or "No playlist found"
             self._log(f"⚠ Playlist did not start: {err[:100]}")
             self._log("No playlist was switched automatically — use Try another if needed.")
+            # A queued long-press still deserves a real attempt even if this
+            # particular search/play failed.
+            self._finish_play_query(request_id)
 
     def _auto_pause_allowed(self, spotify_loud: bool = False) -> bool:
         """True when game/other audio should pause Spotify.
@@ -5861,8 +6042,9 @@ class GameBeatsApp:
                         if (
                             getattr(self, "_playlist_switch_pause", False)
                             and not getattr(self, "_paused_by_game_flag", False)
+                            and getattr(self, "_playlist_switch_pause_confirmed", False)
                             and getattr(self, "_playlist_switch_heard_silence", False)
-                            and self._spotify_loud_streak >= 2
+                            and self._spotify_loud_streak >= 1
                         ):
                             self.root.after(
                                 0, self._adopt_playlist_switch_playback
@@ -6255,6 +6437,7 @@ class GameBeatsApp:
             self._spotify_loud_streak = 0
             self._playlist_switch_pause = False
             self._playlist_switch_heard_silence = False
+            self._playlist_switch_pause_confirmed = False
             self._add_pause_reason("auto")
             self._is_playing = False
             if already_paused_by_game:
@@ -6373,6 +6556,7 @@ class GameBeatsApp:
             self._user_paused_flag = False
             self._playlist_switch_pause = False
             self._playlist_switch_heard_silence = False
+            self._playlist_switch_pause_confirmed = False
             if getattr(self, "_pause_stack", None):
                 self._pause_stack.clear()
             self._playlist_end_pending = False
@@ -7500,6 +7684,7 @@ class GameBeatsApp:
         # calling this method.
         self._playlist_switch_pause = False
         self._playlist_switch_audio_heard_ts = 0.0
+        self._playlist_switch_pause_confirmed = False
         # The next end-of-playlist check must wait until this playlist's
         # audio is actually heard again.  Silence during a pause/resume
         # transition is not a finished playlist.
@@ -7827,9 +8012,19 @@ class GameBeatsApp:
                 self._last_np_key is not None and key != self._last_np_key
             )
             if track_changed:
-                # In-place track-change reaction: head turn + ear perk.
-                self._puppy_reaction_until = time.time() + 1.15
-                self._play_puppy_change_animation()
+                now = time.time()
+                # A playlist switch/long-press already owns the change clip.
+                # Suppress the title-poll echo so one user action does not
+                # produce a second, unrelated animation a few seconds later.
+                quiet_change = (
+                    now < float(getattr(self, "_track_change_anim_quiet_until", 0.0) or 0.0)
+                    or getattr(self, "_pending_play_request", None) is not None
+                    or getattr(self, "_playlist_switch_pause", False)
+                )
+                if not quiet_change:
+                    # In-place track-change reaction: head turn + ear perk.
+                    self._puppy_reaction_until = now + 1.15
+                    self._play_puppy_change_animation()
             self._last_np_key = key
         except Exception:
             pass

@@ -652,6 +652,21 @@ class TestRoomPuppyActions(unittest.TestCase):
             app._puppy_singing_overlay.play_change_animation.call_count, 1
         )
 
+    def test_duplicate_change_request_does_not_restart_a_running_clip(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_change_cooldown_until = 0.0
+
+        self.assertTrue(app._play_puppy_change_animation(force=True))
+        started = app._puppy_action_started
+
+        self.assertFalse(app._play_puppy_change_animation(force=True))
+
+        self.assertEqual(app._puppy_action_started, started)
+        self.assertEqual(
+            app._puppy_singing_overlay.play_change_animation.call_count, 1
+        )
+
     def test_paused_music_blocks_room_change_animation(self):
         app = self._make_app()
         app._is_playing = False
@@ -820,6 +835,19 @@ class TestDesktopPuppyControls(unittest.TestCase):
         overlay._win.geometry.assert_not_called()
         overlay._on_toggle_play_pause.assert_not_called()
         self.assertIsNone(overlay._long_job)
+
+    def test_change_animation_is_idempotent_while_active(self):
+        overlay = self._make_overlay(playing=True)
+
+        self.assertTrue(overlay.play_change_animation())
+        overlay._idx = 1
+        started = overlay._state_started
+
+        self.assertTrue(overlay.play_change_animation())
+
+        self.assertEqual(overlay._state, "change")
+        self.assertEqual(overlay._idx, 1)
+        self.assertEqual(overlay._state_started, started)
 
     def test_change_animation_is_not_cut_off_by_new_track_state(self):
         overlay = self._make_overlay(playing=False)

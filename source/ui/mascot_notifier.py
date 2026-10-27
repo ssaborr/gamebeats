@@ -467,7 +467,26 @@ class PuppySingingOverlay:
         else:
             self._set_state("pause", reverse=False, hold=True, loops=1)
 
+    def _change_animation_active(self):
+        """True while the current headset-swap clip is still playing."""
+        if getattr(self, "_state", "idle") != "change":
+            return False
+        frames, durations = self._state_frames("change")
+        if not frames:
+            return False
+        total = sum(durations) or len(frames) * PUPPY_ANIMATION_INTERVAL
+        if total <= 0:
+            return True
+        elapsed = max(0.0, (time.monotonic() - self._state_started) * 1000.0)
+        loops = max(1, int(getattr(self, "_active_loops", 1) or 1))
+        return elapsed < total * loops
+
     def play_change_animation(self):
+        # A long-press starts this clip directly and the app's try-another
+        # callback asks for it again a moment later.  Never restart an
+        # already-running change clip: one long-press must produce one clip.
+        if self._change_animation_active():
+            return True
         # A long-press must not start the headset-swap clip while the music is
         # paused.  Keep the drooped lock pose instead; the caller can still
         # perform its playlist action.
