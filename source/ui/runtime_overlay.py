@@ -104,7 +104,7 @@ class RuntimeOverlay(ctk.CTkToplevel):
 
         title_lbl = ctk.CTkLabel(
             header, text="\u25b6  GB / REMOTE", fg_color="transparent",
-            text_color=ACCENT2, font=T.pixel_font(11, "bold"),
+            text_color=ACCENT2, font=T.pixel_font(12, "bold"),
         )
         title_lbl.pack(side=tk.LEFT)
 
@@ -126,38 +126,38 @@ class RuntimeOverlay(ctk.CTkToplevel):
         ctrl.pack_propagate(False)
 
         self.prev_btn = ctk.CTkButton(
-            ctrl, text="\u23ee", command=self._on_prev,
+            ctrl, text=T.media_icon("prev"), command=self._on_prev,
             fg_color=SURFACE3, text_color=TEXT,
             hover_color=SURFACE4,
             width=56, height=56, corner_radius=28,
             border_width=2, border_color=T.WOOD,
-            font=T.retro_font(20, "bold"),
+            font=T.icon_font(22),
         )
         self.prev_btn.pack(side=tk.LEFT, padx=(0, 8))
 
         self.play_btn = ctk.CTkButton(
-            ctrl, text="\u25b6", command=self._toggle_play_pause,
+            ctrl, text=T.media_icon("play"), command=self._toggle_play_pause,
             fg_color=ACCENT2, text_color=BG,
             hover_color=T.ACCENT_HOV,
             width=84, height=84, corner_radius=42,
-            font=T.retro_font(34, "bold"),
+            font=T.icon_font(34),
         )
         self.play_btn.pack(side=tk.LEFT, expand=True)
 
         self.next_btn = ctk.CTkButton(
-            ctrl, text="\u23ed", command=self._on_next,
+            ctrl, text=T.media_icon("next"), command=self._on_next,
             fg_color=SURFACE3, text_color=TEXT,
             hover_color=SURFACE4,
             width=56, height=56, corner_radius=28,
             border_width=2, border_color=T.WOOD,
-            font=T.retro_font(20, "bold"),
+            font=T.icon_font(22),
         )
         self.next_btn.pack(side=tk.RIGHT, padx=(8, 0))
 
         # ── Status ────────────────────────────────────────────────────────────
         self.status_lbl = ctk.CTkLabel(
             container, text="Ready when you are.", fg_color="transparent",
-            text_color=TEXT_SEC, font=T.retro_font(17),
+            text_color=TEXT_SEC, font=T.retro_font(18),
         )
         self.status_lbl.pack(anchor=tk.CENTER, pady=(0, 8))
 
@@ -176,7 +176,7 @@ class RuntimeOverlay(ctk.CTkToplevel):
             fg_color=SURFACE2, text_color=AMBER,
             hover_color=SURFACE4, corner_radius=0, height=44,
             border_width=2, border_color=T.WOOD,
-            font=T.pixel_font(9, "bold"),
+            font=T.pixel_font(10, "bold"),
         )
         self.block_btn.grid(row=0, column=0, padx=(0, 5), sticky="ew")
 
@@ -186,7 +186,7 @@ class RuntimeOverlay(ctk.CTkToplevel):
             hover_color=T.ACCENT_DIM,
             corner_radius=0, height=44,
             border_width=2, border_color=T.WOOD,
-            font=T.pixel_font(9, "bold"),
+            font=T.pixel_font(10, "bold"),
         )
         self.try_btn.grid(row=0, column=1, padx=(5, 0), sticky="ew")
 
@@ -198,7 +198,7 @@ class RuntimeOverlay(ctk.CTkToplevel):
                 "DRAG THIS HEADER TO MOVE THE PANEL"
             ),
             fg_color="transparent", text_color=TEXT_MUT,
-            font=T.retro_font(14), wraplength=360, justify=tk.LEFT,
+            font=T.retro_font(15), wraplength=360, justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(8, 0))
 
     def _start_drag(self, event):
@@ -237,8 +237,8 @@ class RuntimeOverlay(ctk.CTkToplevel):
         if accepted is False:
             return False
         self._is_playing = True
-        self.play_btn.configure(text="⏸")
-        self.status_lbl.configure(text="\u25b6 Playing", text_color=ACCENT)
+        self.play_btn.configure(text=T.media_icon("pause"))
+        self.status_lbl.configure(text="Playing", text_color=ACCENT)
         return True
 
     def _pause(self):
@@ -246,24 +246,24 @@ class RuntimeOverlay(ctk.CTkToplevel):
         if accepted is False:
             return False
         self._is_playing = False
-        self.play_btn.configure(text="▶")
-        self.status_lbl.configure(text="⏸ Paused", text_color=AMBER)
+        self.play_btn.configure(text=T.media_icon("play"))
+        self.status_lbl.configure(text="Paused", text_color=AMBER)
         return True
 
     def _on_prev(self):
-        self.status_lbl.configure(text="⏮ Previous", text_color=TEXT_SEC)
+        self.status_lbl.configure(text="Previous track", text_color=TEXT_SEC)
         self.on_prev()
 
     def _on_next(self):
-        self.status_lbl.configure(text="⏭ Next", text_color=TEXT_SEC)
+        self.status_lbl.configure(text="Next track", text_color=TEXT_SEC)
         self.on_next()
 
     def _on_block(self):
-        self.status_lbl.configure(text="🚫 Playlist blocked", text_color=RED)
+        self.status_lbl.configure(text="Playlist blocked", text_color=RED)
         self.on_block()
 
     def _on_try_another(self):
-        self.status_lbl.configure(text="↺ Finding another...", text_color=TEXT_SEC)
+        self.status_lbl.configure(text="Finding another...", text_color=TEXT_SEC)
         self.on_try_another()
 
     # ── Visibility ────────────────────────────────────────────────────────────
@@ -334,11 +334,11 @@ class RuntimeOverlay(ctk.CTkToplevel):
         if playing is not None:
             self._is_playing = playing
             if playing:
-                self.play_btn.configure(text="⏸")
-                self.status_lbl.configure(text="\u25b6 Playing", text_color=ACCENT)
+                self.play_btn.configure(text=T.media_icon("pause"))
+                self.status_lbl.configure(text="Playing", text_color=ACCENT)
             else:
-                self.play_btn.configure(text="▶")
-                self.status_lbl.configure(text="⏸ Paused", text_color=AMBER)
+                self.play_btn.configure(text=T.media_icon("play"))
+                self.status_lbl.configure(text="Paused", text_color=AMBER)
 
     def notify_game_active(self):
         """Called when game audio starts — auto-hide overlay."""

@@ -1810,12 +1810,13 @@ class TestPlaybackUiResponsiveness(unittest.TestCase):
         self.assertFalse(app._spotify_audio_active)
 
     def test_forced_action_updates_visible_icon(self):
+        from ui import theme as T
         app = self._make_app()
         app._is_playing = True
 
         app._set_play_btn_icon(False, force_btn=True)
 
-        app.play_btn.update_text.assert_called_with("▶")
+        app.play_btn.update_text.assert_called_with(T.media_icon("play"))
 
     def test_real_play_state_change_redraws_once(self):
         app = self._make_app()
@@ -2110,6 +2111,96 @@ class TestOtherAudioDetection(unittest.TestCase):
         self.assertFalse(loud)
         self.assertEqual(mode, "other-session")
         self.assertFalse(dbg["other_loud"])
+
+
+class TestSkipWhilePaused(unittest.TestCase):
+    def _app(self):
+        from ui.app import GameBeatsApp
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._manual_paused = True
+        app._user_paused_flag = True
+        app._paused_by_game_flag = False
+        app._pause_stack = [("user", time.time())]
+        app._playlist_switch_pause = True
+        app._playlist_switch_heard_silence = True
+        app._playlist_switch_pause_confirmed = True
+        app._playlist_switch_audio_heard_ts = 123.0
+        app._playlist_audio_armed = True
+        app._spotify_loud_streak = 4
+        app._music_missing_since = 100.0
+        app._playlist_end_pending = True
+        app._user_toggle_ts = 0.0
+        app._playlist_end_prompt_not_before = 0.0
+        app._playlist_end_delay_seconds = MagicMock(return_value=4.0)
+        return app
+
+    def test_next_while_paused_clears_only_the_user_pause(self):
+        from ui.app import GameBeatsApp
+        app = self._app()
+
+        self.assertTrue(GameBeatsApp._clear_user_pause_for_skip(app))
+
+        self.assertFalse(app._manual_paused)
+        self.assertFalse(app._user_paused_flag)
+        self.assertFalse(app._playlist_switch_pause)
+        self.assertFalse(app._playlist_end_pending)
+        self.assertFalse(app._playlist_audio_armed)
+        self.assertEqual(app._spotify_loud_streak, 0)
+        self.assertEqual(app._pause_stack, [])
+        self.assertGreater(app._user_toggle_ts, 0.0)
+        self.assertGreater(app._playlist_end_prompt_not_before, time.time())
+
+    def test_skip_does_not_clear_a_game_audio_pause(self):
+        from ui.app import GameBeatsApp
+        app = self._app()
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._paused_by_game_flag = True
+        app._pause_stack = [("auto", time.time())]
+
+        self.assertFalse(GameBeatsApp._clear_user_pause_for_skip(app))
+        self.assertTrue(app._paused_by_game_flag)
+        self.assertEqual(app._pause_stack[0][0], "auto")
+
+    def test_confirmed_skip_audio_updates_the_visible_playing_state(self):
+        from ui.app import GameBeatsApp
+        app = self._app()
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._pause_stack = []
+        app._skip_request_seq = 7
+        app._is_playing = False
+        app._spotify_started_by_us = False
+        app._playback_started_ts = 0.0
+        app._last_spotify_loud_ts = 0.0
+        app._spotify_audio_active = False
+        app._intentional_pause_active = MagicMock(return_value=False)
+        app._set_play_btn_icon = MagicMock()
+        app._set_puppy_singing_visible = MagicMock()
+        app._remove_pause_reason = MagicMock()
+
+        self.assertTrue(GameBeatsApp._adopt_skip_playback(app, 7))
+        self.assertTrue(app._is_playing)
+        self.assertTrue(app._spotify_started_by_us)
+        self.assertTrue(app._spotify_audio_active)
+        app._set_play_btn_icon.assert_called_once_with(True, force_btn=True)
+        app._set_puppy_singing_visible.assert_called_once_with(True)
+
+    def test_stale_skip_result_is_ignored(self):
+        from ui.app import GameBeatsApp
+        app = self._app()
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._skip_request_seq = 8
+        app._is_playing = False
+        app._intentional_pause_active = MagicMock(return_value=False)
+        app._set_play_btn_icon = MagicMock()
+        app._set_puppy_singing_visible = MagicMock()
+        app._remove_pause_reason = MagicMock()
+
+        self.assertFalse(GameBeatsApp._adopt_skip_playback(app, 7))
+        self.assertFalse(app._is_playing)
+        app._set_play_btn_icon.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ class TestAmbientPooling(unittest.TestCase):
         app._anim_tick = 0
         app._ambient = {}
         app._room_canvas = MagicMock()
+        app._room_label_hits = {}
         return app
 
     def test_ambient_layer_is_built_once_and_only_animated_afterward(self):
@@ -72,10 +73,14 @@ class TestAmbientPooling(unittest.TestCase):
         created = canvas.create_rectangle.call_count
         deleted = canvas.delete.call_count
 
-        for zone in ("shelf", "panel", "crate", "crt", None):
+        for zone in ("shelf", "panel", "crate", None):
             app._set_room_hover(zone)
             app._anim_tick += 1
             app._animate_room_ambient(2000.0, app._anim_tick)
+
+        # The CRT is decorative now; asking for its old hover zone is a no-op.
+        app._set_room_hover("crt")
+        self.assertIsNone(app._room_hover)
 
         self.assertEqual(canvas.create_rectangle.call_count, created)
         self.assertEqual(canvas.delete.call_count, deleted)
@@ -89,18 +94,30 @@ class TestAmbientPooling(unittest.TestCase):
             call for call in canvas.create_rectangle.call_args_list
             if "hotspot_outline" in call.kwargs.get("tags", ())
         ]
-        self.assertEqual(len(outline_calls), 4)
+        self.assertEqual(len(outline_calls), 3)
         for call in outline_calls:
             self.assertEqual(call.kwargs.get("fill"), "")
             self.assertTrue(call.kwargs.get("outline"))
 
-        app._set_room_hover("crt")
+        app._set_room_hover("shelf")
         brightened = [
             call for call in canvas.itemconfigure.call_args_list
             if call.kwargs.get("outline")
         ]
         self.assertTrue(brightened)
         self.assertTrue(all(call.kwargs.get("fill") is None for call in brightened))
+
+    def test_crt_never_becomes_a_hover_zone(self):
+        app = self._app()
+        app._room_canvas.winfo_width.return_value = 1000
+        app._room_canvas.winfo_height.return_value = 620
+        app._build_room_ambient(app._room_canvas, 1000, 620)
+
+        # Centre of the CRT hotspot.
+        scale, left, top = app._room_layout(1000, 620)
+        x = int((70 - left) * scale)
+        y = int((116 - top) * scale)
+        self.assertEqual(app._room_zone_at(x, y), None)
 
     def test_reduce_motion_hides_rain_and_keeps_the_pool_static(self):
         app = self._app(reduce_motion=True)
@@ -118,6 +135,53 @@ class TestAmbientPooling(unittest.TestCase):
         app._animate_room_ambient(3000.0, 10)
         self.assertEqual(canvas.create_rectangle.call_count, created)
         self.assertEqual(canvas.delete.call_count, deleted)
+
+
+class TestRoomClickTargets(unittest.TestCase):
+    def _app(self):
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_bbox = (0, 0, 0, 0)
+        app._room_label_hits = {}
+        app._room_hotspots = {
+            "shelf": (10, 10, 60, 60),
+            "panel": (10, 70, 60, 120),
+        }
+        app._nav = MagicMock()
+        return app
+
+    def test_clicking_anywhere_in_a_hotspot_navigates(self):
+        from types import SimpleNamespace
+
+        app = self._app()
+        result = GameBeatsApp._on_room_canvas_click(
+            app, SimpleNamespace(x=35, y=35)
+        )
+        self.assertEqual(result, "break")
+        app._nav.assert_called_once_with("games")
+
+    def test_label_box_outside_the_hotspot_still_navigates(self):
+        from types import SimpleNamespace
+
+        app = self._app()
+        app._room_label_hits = {
+            "lbl_crate": (100, 200, 240, 236, "crate"),
+        }
+        result = GameBeatsApp._on_room_canvas_click(
+            app, SimpleNamespace(x=150, y=215)
+        )
+        self.assertEqual(result, "break")
+        app._nav.assert_called_once_with("playlists")
+
+    def test_crt_click_is_decorative_only(self):
+        from types import SimpleNamespace
+
+        app = self._app()
+        app._room_hotspots["crt"] = (70, 70, 100, 100)
+        result = GameBeatsApp._on_room_canvas_click(
+            app, SimpleNamespace(x=80, y=80)
+        )
+        self.assertIsNone(result)
+        app._nav.assert_not_called()
 
 
 class TestVUPooling(unittest.TestCase):

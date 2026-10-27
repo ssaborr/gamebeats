@@ -308,6 +308,14 @@ ROOM_HOTSPOTS = {
     "crate": (308, 164, 384, 188),
     "crt": (32, 86, 108, 146),
 }
+# The CRT is decorative on purpose: it gets no hover outline and no cursor
+# change.  The three object hotspots below are full click targets, not just
+# hover hints; clicking anywhere inside one navigates to its page.
+ROOM_HOTSPOT_PAGES = {
+    "shelf": "games",
+    "panel": "settings",
+    "crate": "playlists",
+}
 ROOM_SHELF_CASES = (
     (292, 72, 298, 90),
     (300, 84, 316, 90),
@@ -404,18 +412,22 @@ class RoundedButton(ctk.CTkButton):
 class CircleBtn(ctk.CTkButton):
     def __init__(self, parent, text="", command=None, size=60,
                  bg=SURFACE3, fg=TEXT, font_size=16, canvas_bg=SURFACE,
-                 accent=False, **kwargs):
+                 accent=False, icon=False, **kwargs):
         super().__init__(
             parent, text=text, command=command,
             width=size, height=size, corner_radius=size // 2,
             fg_color=bg, text_color=fg,
-            font=T.retro_font(font_size, "bold"),
+            font=(
+                T.icon_font(font_size)
+                if icon else T.retro_font(font_size, "bold")
+            ),
             border_width=0,
             hover_color=T.ACCENT_HOV if accent else SURFACE4,
             **kwargs,
         )
         self.size = size
         self.accent = accent
+        self._icon = bool(icon)
         add_focus_ring(self, base_border=None, width=2)
 
     def update_text(self, t):
@@ -1128,6 +1140,7 @@ class GameBeatsApp:
         self._track_change_anim_quiet_until = 0.0
         self._play_request_seq = 0
         self._active_play_request_id = 0
+        self._skip_request_seq = 0
         # ┌─ PAUSE STACK STATE MANAGEMENT ─────────────────────────────────┐
         # │ Stack entries: [("auto" | "user", timestamp), ...]             │
         # │                                                                  │
@@ -1960,8 +1973,8 @@ class GameBeatsApp:
         self._ambient = {}
         self._room_layout_info = None
         self._room_hotspots = {}
+        self._room_label_hits = {}
         self._room_hover = None
-        self._crt_boost_until = 0.0
         self._vu_items = []
         self._vu_key = None
         self._vu_colors = []
@@ -2035,14 +2048,8 @@ class GameBeatsApp:
         )
         brand_title.pack(side=tk.LEFT)
 
-        brand_sub = ctk.CTkLabel(
-            brand, text="THE DEN / VOL. 01", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(9),
-        )
-        brand_sub.pack(side=tk.LEFT, padx=(12, 0))
-
         self._brand_frame = brand
-        self._brand_widgets = [brand, paw, brand_title, brand_sub]
+        self._brand_widgets = [brand, paw, brand_title]
 
         # Window buttons (far right first)
         win_controls = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
@@ -2683,21 +2690,21 @@ class GameBeatsApp:
 
         self.game_banner = ctk.CTkLabel(
             name_col, text="NO SAVED GAME RUNNING", fg_color="transparent",
-            text_color=TEXT, font=T.pixel_font(11, "bold"),
+            text_color=TEXT, font=T.pixel_font(12, "bold"),
             anchor="w", justify=tk.LEFT, wraplength=160,
         )
         self.game_banner.pack(fill=tk.X)
 
         self.mood_lbl = ctk.CTkLabel(
             name_col, text="Waiting for a game", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(13),
+            text_color=TEXT_MUTED, font=T.retro_font(14),
             anchor="w", justify=tk.LEFT, wraplength=160,
         )
         self.mood_lbl.pack(fill=tk.X, pady=(1, 0))
 
         self.playlist_display_lbl = ctk.CTkLabel(
             cart_label, text="PLAYLIST: \u2014", fg_color="transparent",
-            text_color=GOLD, font=T.retro_font(13),
+            text_color=GOLD, font=T.retro_font(14),
             anchor="w", justify=tk.LEFT, wraplength=190,
         )
         self.playlist_display_lbl.pack(fill=tk.X, padx=7, pady=(4, 0))
@@ -2735,13 +2742,13 @@ class GameBeatsApp:
 
         self.deck_status_lbl = ctk.CTkLabel(
             status_row, text="\u25cb  STANDING BY", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(9, "bold"),
+            text_color=TEXT_MUTED, font=T.pixel_font(10, "bold"),
         )
         self.deck_status_lbl.pack(side=tk.LEFT)
 
         ctk.CTkLabel(
             status_row, text="SIDE A / AUTO", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(8),
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
         ).pack(side=tk.RIGHT)
 
         self.track_lbl = ctk.CTkLabel(
@@ -2753,7 +2760,7 @@ class GameBeatsApp:
 
         self.deck_artist_lbl = ctk.CTkLabel(
             inner, text="Connect Spotify in Control Panel", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(15),
+            text_color=TEXT_MUTED, font=T.retro_font(16),
             anchor="w", justify=tk.LEFT,
         )
         self.deck_artist_lbl.pack(fill=tk.X, pady=(0, 1))
@@ -2796,27 +2803,27 @@ class GameBeatsApp:
         self._vu_canvas.bind("<Configure>", lambda e: self._draw_vu())
 
         self.prev_btn = CircleBtn(
-            ctrl, "\u23ee", command=self._prev, size=30, font_size=13,
-            bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT,
+            ctrl, T.media_icon("prev"), command=self._prev, size=32,
+            font_size=17, bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT, icon=True,
         )
         self.prev_btn.pack(side=tk.LEFT, padx=3)
 
         self.play_btn = CircleBtn(
-            ctrl, "\u25b6", command=self._play_pause_toggle,
-            size=40, bg=GOLD, fg=BG, font_size=17,
-            canvas_bg=NIGHT, accent=True,
+            ctrl, T.media_icon("play"), command=self._play_pause_toggle,
+            size=42, bg=GOLD, fg=BG, font_size=22,
+            canvas_bg=NIGHT, accent=True, icon=True,
         )
-        self.play_btn.pack(side=tk.LEFT, padx=3)
+        self.play_btn.pack(side=tk.LEFT, padx=4)
 
         self.next_btn = CircleBtn(
-            ctrl, "\u23ed", command=self._next, size=30, font_size=13,
-            bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT,
+            ctrl, T.media_icon("next"), command=self._next, size=32,
+            font_size=17, bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT, icon=True,
         )
         self.next_btn.pack(side=tk.LEFT, padx=3)
 
         self.status_log_lbl = ctk.CTkLabel(
             inner, text="GameBeats ready.", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.retro_font(13),
+            text_color=TEXT_MUTED, font=T.retro_font(14),
             anchor="w", justify=tk.LEFT,
         )
         self.status_log_lbl.pack(fill=tk.X, pady=(3, 0))
@@ -2831,7 +2838,7 @@ class GameBeatsApp:
         auto.pack(side=tk.LEFT)
         ctk.CTkLabel(
             auto, text="AUTO", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(8),
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
         ).pack(side=tk.LEFT, padx=(0, 4))
         self._auto_toggle = PixelToggle(
             auto, variable=self.auto_mode, bg=DECK, width=44, height=20,
@@ -2843,7 +2850,7 @@ class GameBeatsApp:
         seamless.pack(side=tk.LEFT, padx=(14, 0))
         ctk.CTkLabel(
             seamless, text="KEEP MUSIC", fg_color="transparent",
-            text_color=TEXT_MUTED, font=T.pixel_font(8),
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
         ).pack(side=tk.LEFT, padx=(0, 4))
         self._keep_music_toggle = PixelToggle(
             seamless, variable=self.seamless_music_var,
@@ -3379,14 +3386,14 @@ class GameBeatsApp:
         self._room_layout_info = layout
         reduce_motion = self._reduce_motion_enabled()
         self._room_hotspots = {
-            name: self._room_rect(layout, *zone)
-            for name, zone in ROOM_HOTSPOTS.items()
+            name: self._room_rect(layout, *ROOM_HOTSPOTS[name])
+            for name in ROOM_HOTSPOT_PAGES
         }
 
         outlines = {}
         outline_width = max(1, int(round(layout[0] * 0.32)))
-        for name, zone in ROOM_HOTSPOTS.items():
-            rect = self._room_rect(layout, *zone)
+        for name in ROOM_HOTSPOT_PAGES:
+            rect = self._room_rect(layout, *ROOM_HOTSPOTS[name])
             outlines[name] = canvas.create_rectangle(
                 *rect, fill="", outline=ACCENT, width=outline_width,
                 state="hidden", tags=("ambient", "hotspot_outline", f"hotspot_{name}"),
@@ -3548,19 +3555,16 @@ class GameBeatsApp:
                 )
                 canvas.coords(drop["id"], *rect)
 
-            hot_crt = self._room_hover == "crt"
-            crt_boost = now < getattr(self, "_crt_boost_until", 0.0)
-            scan_speed = 5.2 if (hot_crt or crt_boost) else 2.2
-            scan_color = MINT if (hot_crt or crt_boost) else ACCENT_DIM
+            # The CRT is pure ambience.  It no longer reacts to hovering; the
+            # scanline drift and occasional glitch stay on a slow, constant
+            # loop so the room feels alive without a hotspot outline.
             for scan in ambient["crt_scan"]:
-                y = 94.0 + ((tick * scan_speed + scan["offset"]) % 38.0)
+                y = 94.0 + ((tick * 2.2 + scan["offset"]) % 38.0)
                 rect = self._room_rect(layout, 40.5, y, 99.5, y + 0.55)
                 canvas.coords(scan["id"], *rect)
-                canvas.itemconfigure(scan["id"], fill=scan_color)
+                canvas.itemconfigure(scan["id"], fill=ACCENT_DIM)
 
-            show_glitch = (
-                hot_crt or crt_boost or (tick % 37 in (0, 1, 2))
-            )
+            show_glitch = tick % 37 in (0, 1, 2)
             glitch = ambient["crt_glitch"]
             if show_glitch:
                 gx = 42.0 + ((tick * 13) % 54)
@@ -3666,6 +3670,10 @@ class GameBeatsApp:
                 pass
 
     def _set_room_hover(self, zone):
+        # Only the three navigable objects get a hover treatment.  The CRT is
+        # decorative and must not draw an outline or change the cursor.
+        if zone not in ROOM_HOTSPOT_PAGES:
+            zone = None
         if zone == self._room_hover:
             return
         self._room_hover = zone
@@ -3673,12 +3681,7 @@ class GameBeatsApp:
         canvas = getattr(self, "_room_canvas", None)
         if canvas is not None:
             try:
-                if zone in ("shelf", "panel", "crate"):
-                    canvas.configure(cursor="hand2")
-                elif zone == "crt":
-                    canvas.configure(cursor="crosshair")
-                else:
-                    canvas.configure(cursor="")
+                canvas.configure(cursor="hand2" if zone else "")
             except Exception:
                 pass
         try:
@@ -3688,13 +3691,25 @@ class GameBeatsApp:
         except Exception:
             pass
 
-    def _on_room_canvas_motion(self, event):
-        zone = None
+    def _room_zone_at(self, x, y):
+        """Return the navigable room zone under a canvas point.
+
+        Label boxes extend beyond some hotspots (the crate label sits below
+        the record crate), so both the label rectangle and the larger object
+        region count as a click target.
+        """
+        for _tag, (x0, y0, x1, y1, zone) in getattr(
+            self, "_room_label_hits", {}
+        ).items():
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return zone
         for name, bbox in getattr(self, "_room_hotspots", {}).items():
-            if bbox[0] <= event.x <= bbox[2] and bbox[1] <= event.y <= bbox[3]:
-                zone = name
-                break
-        self._set_room_hover(zone)
+            if bbox[0] <= x <= bbox[2] and bbox[1] <= y <= bbox[3]:
+                return name if name in ROOM_HOTSPOT_PAGES else None
+        return None
+
+    def _on_room_canvas_motion(self, event):
+        self._set_room_hover(self._room_zone_at(event.x, event.y))
 
     def _on_room_canvas_leave(self, _event=None):
         self._set_room_hover(None)
@@ -3964,6 +3979,7 @@ class GameBeatsApp:
             pass
 
         # Room object labels
+        self._room_label_hits = {}
         label_x = int(w * 0.79)
         self._draw_room_label(canvas, label_x, int(h * 0.36),
                               "THE GAME SHELF", "lbl_shelf",
@@ -4007,11 +4023,11 @@ class GameBeatsApp:
 
     def _draw_room_label(self, canvas, x, y, text, tag, command):
         try:
-            fs = max(8, int(canvas.winfo_width() * 0.0056))
-            pad = max(8, int(fs * 1.1))
-            box_h = max(24, int(fs * 2.6))
+            fs = max(10, int(canvas.winfo_width() * 0.0085))
+            pad = max(10, int(fs * 1.25))
+            box_h = max(30, int(fs * 2.9))
             txt = canvas.create_text(
-                x + pad, y + (box_h - fs) // 2 - 1, text=text, anchor="nw",
+                x + pad, y + box_h // 2, text=text, anchor="w",
                 font=(F_PIXEL, -fs), fill=GOLD, tags=("overlay", f"{tag}_txt"),
             )
             bbox = canvas.bbox(txt)
@@ -4024,9 +4040,14 @@ class GameBeatsApp:
             )
             canvas.tag_raise(txt, box)
             canvas.create_text(
-                x + box_w - pad, y + box_h // 2, text="\u2197", anchor="e",
-                font=(F_RETRO, -max(12, int(fs * 1.5))), fill=CREAM,
-                tags=("overlay", f"{tag}_arrow"),
+                x + box_w - pad, y + box_h // 2, text="\u2197",
+                anchor="e", font=(F_RETRO, -max(13, int(fs * 1.45))),
+                fill=CREAM, tags=("overlay", f"{tag}_arrow"),
+            )
+            zone = {"lbl_shelf": "shelf", "lbl_board": "panel",
+                    "lbl_crate": "crate"}.get(tag)
+            self._room_label_hits[tag] = (
+                x, y, x + box_w, y + box_h, zone,
             )
             for part in (f"{tag}_txt", f"{tag}_box", f"{tag}_arrow"):
                 canvas.tag_bind(part, "<Button-1>", lambda e, c=command: c())
@@ -4068,12 +4089,13 @@ class GameBeatsApp:
                 return
         except Exception:
             pass
-        try:
-            if self._room_hover == "crt":
-                self._crt_boost_until = time.time() + 0.9
-                self._on_room_canvas_motion(event)
-        except Exception:
-            pass
+        zone = self._room_zone_at(event.x, event.y)
+        page = ROOM_HOTSPOT_PAGES.get(zone)
+        if page:
+            self._nav(page)
+            # The same click can also hit a canvas text/box tag binding. Stop
+            # here so a single click never navigates twice.
+            return "break"
 
     def _pet_puppy(self):
         now = time.time()
@@ -7259,23 +7281,6 @@ class GameBeatsApp:
 
     # ── CONTROLS ──────────────────────────────────────────────────────────────
 
-    def _start_play_btn_pulse(self):
-        if not hasattr(self, "_pulse_job") or self._pulse_job is None:
-            self._pulse_active = True
-            self._pulse_loop(0)
-
-    def _pulse_loop(self, step):
-        if not getattr(self, "_pulse_active", False) or self._closing:
-            if hasattr(self, "play_btn"):
-                self.play_btn.configure(fg_color=GOLD)
-            self._pulse_job = None
-            return
-        colors = [GOLD, "#FFD89A", ORANGE, "#FFC06A"]
-        col = colors[step % len(colors)]
-        if hasattr(self, "play_btn"):
-            self.play_btn.configure(fg_color=col)
-        self._pulse_job = self.root.after(450, lambda: self._pulse_loop(step + 1))
-
     def _set_play_btn_icon(self, playing: bool, force_btn: bool = False):
         """Update internal playing state and control button icons.
 
@@ -7299,16 +7304,24 @@ class GameBeatsApp:
                 self._react_to_playback_change(playing)
             except Exception:
                 pass
-        if playing:
-            self._start_play_btn_pulse()
-        else:
-            self._pulse_active = False
+        # The play button used to pulse between four golds while playing.  That
+        # made the pause/resume icon look like it was flickering, especially
+        # when audio ticks repeated.  Keep the button a single solid gold.
+        if getattr(self, "_pulse_job", None):
+            try:
+                self.root.after_cancel(self._pulse_job)
+            except Exception:
+                pass
+            self._pulse_job = None
+        self._pulse_active = False
         # Only an explicit user/auto action may change the visible icon.
         # Audio-meter ticks call this method too, and letting them overwrite
         # the icon is what made the UI show "paused" while music was audible.
         if force_btn and hasattr(self, "play_btn"):
             try:
-                self.play_btn.update_text("\u23F8" if playing else "\u25B6")
+                self.play_btn.update_text(
+                    T.media_icon("pause") if playing else T.media_icon("play")
+                )
             except Exception:
                 pass
         try:
@@ -7747,6 +7760,93 @@ class GameBeatsApp:
                 except Exception:
                     pass
 
+    def _clear_user_pause_for_skip(self) -> bool:
+        """A next/previous command is also an intent to hear the new track.
+
+        Spotify starts audio on some players when you press "next" while
+        paused.  The old pause flags made the audio monitor keep the UI in the
+        paused pose even though the new song was audible.  Clear only a user
+        pause here; a game-audio pause is still authoritative until the game
+        is quiet again.  The UI only flips to playing once the new audio is
+        actually confirmed.
+        """
+        user_paused = bool(
+            getattr(self, "_manual_paused", False)
+            or getattr(self, "_user_paused_flag", False)
+        )
+        if not user_paused:
+            return False
+        self._manual_paused = False
+        self._user_paused_flag = False
+        self._remove_pause_reason("user")
+        if not getattr(self, "_paused_by_game_flag", False):
+            try:
+                self.spotify._paused_by_game = False
+            except Exception:
+                pass
+        self._playlist_switch_pause = False
+        self._playlist_switch_heard_silence = False
+        self._playlist_switch_pause_confirmed = False
+        self._playlist_switch_audio_heard_ts = 0.0
+        self._playlist_audio_armed = False
+        self._spotify_loud_streak = 0
+        self._music_missing_since = 0.0
+        self._playlist_end_pending = False
+        self._user_toggle_ts = time.time()
+        self._playlist_end_prompt_not_before = (
+            self._user_toggle_ts + max(4.0, self._playlist_end_delay_seconds())
+        )
+        return True
+
+    def _skip_request_is_current(self, request_id) -> bool:
+        try:
+            return int(request_id) == int(
+                getattr(self, "_skip_request_seq", 0) or 0
+            )
+        except Exception:
+            return False
+
+    def _confirm_skip_playback(self, request_id):
+        """Wait briefly for a paused next/prev command to start audio."""
+        deadline = time.time() + 2.4
+        while time.time() < deadline:
+            if not self._skip_request_is_current(request_id):
+                return False
+            if self._intentional_pause_active():
+                return False
+            playing = self._spotify_audio_playing_now()
+            if not playing:
+                playing = bool(self._read_spotify_is_playing())
+            if playing:
+                self.root.after(
+                    0, lambda rid=request_id: self._adopt_skip_playback(rid)
+                )
+                return True
+            time.sleep(0.15)
+        return False
+
+    def _adopt_skip_playback(self, request_id) -> bool:
+        """Show playing after a next/prev command produced real audio."""
+        if not self._skip_request_is_current(request_id):
+            return False
+        if self._intentional_pause_active():
+            return False
+        self._manual_paused = False
+        self._user_paused_flag = False
+        self._remove_pause_reason("user")
+        self._remove_pause_reason("auto")
+        self._spotify_started_by_us = True
+        self._playback_started_ts = time.time()
+        self._last_spotify_loud_ts = self._playback_started_ts
+        self._spotify_audio_active = True
+        self._music_missing_since = 0.0
+        self._playlist_end_pending = False
+        self._playlist_audio_armed = True
+        self._is_playing = True
+        self._set_play_btn_icon(True, force_btn=True)
+        self._set_puppy_singing_visible(True)
+        return True
+
     def _begin_play_pause(self) -> bool:
         """Take the play/pause lock, with a watchdog so it can never stick."""
         if getattr(self, "_play_pause_busy", False):
@@ -7901,10 +8001,19 @@ class GameBeatsApp:
 
     def _next(self):
         if self.spotify:
+            self._skip_request_seq = int(
+                getattr(self, "_skip_request_seq", 0) or 0
+            ) + 1
+            request_id = self._skip_request_seq
+            watch_playback = self._clear_user_pause_for_skip()
             self._play_puppy_change_animation(force=True)
-            threading.Thread(target=self._media_next, daemon=True).start()
+            threading.Thread(
+                target=self._media_next,
+                args=(watch_playback, request_id),
+                daemon=True,
+            ).start()
 
-    def _media_next(self):
+    def _media_next(self, watch_playback=False, request_id=None):
         try:
             if hasattr(self.spotify, "media_next"):
                 self.spotify.media_next()
@@ -7912,10 +8021,31 @@ class GameBeatsApp:
                 self.spotify.next_track()
         except Exception as ex:
             self.root.after(0, lambda e=ex: self._log(f"Next track error: {e}"))
+            return
+        if watch_playback:
+            self._confirm_skip_playback(request_id)
 
     def _prev(self):
         if self.spotify:
-            threading.Thread(target=self.spotify.media_prev, daemon=True).start()
+            self._skip_request_seq = int(
+                getattr(self, "_skip_request_seq", 0) or 0
+            ) + 1
+            request_id = self._skip_request_seq
+            watch_playback = self._clear_user_pause_for_skip()
+            threading.Thread(
+                target=self._media_prev,
+                args=(watch_playback, request_id),
+                daemon=True,
+            ).start()
+
+    def _media_prev(self, watch_playback=False, request_id=None):
+        try:
+            self.spotify.media_prev()
+        except Exception as ex:
+            self.root.after(0, lambda e=ex: self._log(f"Previous track error: {e}"))
+            return
+        if watch_playback:
+            self._confirm_skip_playback(request_id)
 
     def _on_vol(self, val):
         v = int(float(val))

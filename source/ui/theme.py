@@ -209,6 +209,69 @@ def ctk_font(size, weight="normal", slant="roman"):
     return ctk.CTkFont(family=F_UI, size=size, weight=weight, slant=slant)
 
 
+# ── Media icons ─────────────────────────────────────────────────────────────
+# Windows ships a proper icon font with correctly centred transport glyphs.
+# The old unicode media characters were rendered by VT323/fallback fonts at
+# odd baselines, which made the play/pause icon look off-centre inside its
+# circle. Detect the best installed icon family lazily, then fall back to the
+# unicode symbols on systems without it.
+_ICON_FAMILY = None
+_ICON_FAMILY_READY = False
+
+# Segoe Fluent Icons / Segoe MDL2 Assets codepoints for the media set.
+ICON_PLAY = "\ue768"
+ICON_PAUSE = "\ue769"
+ICON_PREV = "\ue892"
+ICON_NEXT = "\ue893"
+ICON_TRY_AGAIN = "\ue72c"
+ICON_BLOCK = "\ue733"
+
+
+def icon_family():
+    """Return a usable Windows icon font family, or None."""
+    global _ICON_FAMILY, _ICON_FAMILY_READY
+    if _ICON_FAMILY_READY:
+        return _ICON_FAMILY
+    _ICON_FAMILY_READY = True
+    if sys.platform != "win32":
+        return None
+    try:
+        import tkinter.font as tkfont
+        families = set(tkfont.families())
+        for candidate in (
+            "Segoe Fluent Icons",
+            "Segoe MDL2 Assets",
+            "Segoe UI Symbol",
+        ):
+            if candidate in families:
+                _ICON_FAMILY = candidate
+                return _ICON_FAMILY
+    except Exception:
+        pass
+    return None
+
+
+def icon_font(size, weight="normal"):
+    """Font for the system icon glyph set (media glyphs are centre-aligned)."""
+    family = icon_family()
+    if not family:
+        return retro_font(size, weight=weight)
+    return ctk.CTkFont(family=family, size=size, weight=weight)
+
+
+def media_icon(name):
+    """Return a transport glyph with a safe unicode fallback."""
+    fluent = icon_family() is not None
+    return {
+        "play": ICON_PLAY if fluent else "\u25b6",
+        "pause": ICON_PAUSE if fluent else "\u23f8",
+        "prev": ICON_PREV if fluent else "\u23ee",
+        "next": ICON_NEXT if fluent else "\u23ed",
+        "try_again": ICON_TRY_AGAIN if fluent else "\u21ba",
+        "block": ICON_BLOCK if fluent else "\u2298",
+    }.get(str(name), "")
+
+
 # ── Reusable widgets ────────────────────────────────────────────────────────
 
 def elevate_frame(parent, fg_color=SURFACE, border_color=BORDER, border_width=1,
