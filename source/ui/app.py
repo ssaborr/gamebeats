@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import urllib.request
+from urllib.parse import urlparse
 from io import BytesIO
 import subprocess
 
@@ -286,6 +287,10 @@ PLAYLIST_END_NORMAL_EXTRA_SEC = 4.0
 PLAYLIST_END_RETRY_EXTRA_SEC = 10.0
 SPOTIFY_UI_AUDIO_ON_THRESHOLD = 0.0001
 SPOTIFY_UI_AUDIO_OFF_THRESHOLD = 0.0
+# The stop/resume paths use a purposefully stricter gate than the visual VU
+# meter.  It is the same threshold core uses for source selection, so a tiny
+# residual tail cannot make a pause look like a failure (or vice versa).
+SPOTIFY_SOURCE_AUDIBLE_THRESHOLD = 0.0015
 # A newly-started playlist can take a few seconds to surface its first track
 # and audible meter data.  During that window the old mix is already silent,
 # so keep the freshly-started play state (and mascot) instead of treating the
@@ -295,6 +300,19 @@ FRESH_PLAYBACK_GRACE_SEC = 12.0
 # thinking forever.  The normal metadata completion usually lands in ~1-2s;
 # this is only a safety net for a hung fetch while audio is still playing.
 SKIP_COMPLETION_WATCHDOG_MS = 4000
+
+
+def _is_spotify_web_url(url) -> bool:
+    """True only for the real open.spotify.com web player host."""
+    try:
+        parsed = urlparse(str(url or ""))
+        return (
+            parsed.scheme in ("http", "https")
+            and (parsed.hostname or "").lower() == "open.spotify.com"
+        )
+    except Exception:
+        return False
+
 
 # The room plate is authored at 400x250 logical pixels and scaled by four
 # before it reaches the app. All ambient overlays use these logical
@@ -1133,6 +1151,10 @@ class GameBeatsApp:
         self._playlist_ended_closing = False  # True while closing/relaunching for next playlist
         self._paused_by_game_flag = False  # Local flag: True when GameBeats paused Spotify
         self._user_paused_flag = False  # True when user manually pauses via player tab
+        # "browser" or "desktop" - the source we actually stopped.  Resume uses
+        # this instead of a union audio meter that can include unrelated media.
+        self._paused_spotify_source = ""
+        self._spotify_browser_kind_cache = (0.0, "")
         # A playlist search intentionally pauses the old mix.  This is a
         # transient switch pause, not a user/game pause: the first sustained
         # audio from the newly selected playlist should resume the UI and
@@ -2164,12 +2186,14 @@ class GameBeatsApp:
         )
         self._clock_lbl.pack(side=tk.LEFT)
 
-        ctk.CTkButton(
-            topline, text="\u2726  THE LITTLE DETAILS", command=lambda: self._nav("faq"),
-            fg_color="transparent", text_color=ROSE, hover_color=SURFACE3,
-            width=194, height=28, corner_radius=0,
-            font=T.pixel_font(9),
-        ).pack(side=tk.RIGHT, padx=(0, 28))
+        details_btn = T.FooterButton(
+            topline, text="THE LITTLE DETAILS",
+            icon=T.ui_icon("faq"), command=lambda: self._nav("faq"),
+            width=194, height=28, base_color=BG, hover_color=SURFACE3,
+            text_color=ROSE, icon_color=ROSE, text_size=9, icon_size=12,
+        )
+        details_btn.pack(side=tk.RIGHT, padx=(0, 28), pady=8)
+        self._tooltips.attach(details_btn, "Field notes, shortcuts and help")
 
         # ── Content ──────────────────────────────────────────────────────────
         self.content = ctk.CTkFrame(container, fg_color=BG, corner_radius=0)
@@ -2185,24 +2209,17 @@ class GameBeatsApp:
         nav.pack(side=tk.LEFT, padx=(26, 0), fill=tk.Y)
 
         nav_items = [
-            ("main", "\u2302", "01 / THE DEN"),
-            ("games", "\u25a5", "02 / GAME SHELF"),
-            ("playlists", "\u25c9", "03 / RECORD CRATE"),
-            ("settings", "\u2692", "04 / CONTROL PANEL"),
+            ("main", "den", "THE DEN"),
+            ("games", "games", "GAME SHELF"),
+            ("playlists", "playlists", "RECORD CRATE"),
+            ("settings", "settings", "CONTROL PANEL"),
         ]
-        for page, icon, label in nav_items:
-            btn = ctk.CTkButton(
-                nav, text=f"{icon}  {label}", command=lambda p=page: self._nav(p),
-                # Paint the full 148x34 hit area. A transparent CTkButton
-                # canvas looks identical on the footer but can make the blank
-                # part of the button feel dead to the mouse; a solid NIGHT
-                # fill keeps the whole rectangle clickable.
-                fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
-                width=148, height=34, corner_radius=0,
-                font=T.pixel_font(9), anchor="w",
+        for page, icon_name, label in nav_items:
+            btn = T.FooterButton(
+                nav, text=label, icon=T.ui_icon(icon_name),
+                command=lambda p=page: self._nav(p), width=148, height=34,
             )
             btn.pack(side=tk.LEFT, padx=(0, 4), pady=14)
-            self._make_footer_button_clickable(btn)
             self._footer_buttons[page] = btn
 
         tools = ctk.CTkFrame(footer, fg_color="transparent", corner_radius=0)
@@ -2214,31 +2231,25 @@ class GameBeatsApp:
         )
         self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))
 
-        overlay_btn = ctk.CTkButton(
-            tools, text="\u2723  OVERLAY", command=self._show_control_overlay,
-            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
-            width=94, height=34, corner_radius=0, font=T.pixel_font(9),
+        overlay_btn = T.FooterButton(
+            tools, text="OVERLAY", icon=T.ui_icon("overlay"),
+            command=self._show_control_overlay, width=98, height=34,
         )
         overlay_btn.pack(side=tk.RIGHT, padx=2, pady=14)
-        self._make_footer_button_clickable(overlay_btn)
         self._footer_tools["overlay"] = overlay_btn
 
-        faq_btn = ctk.CTkButton(
-            tools, text="\u2726  FAQ", command=lambda: self._nav("faq"),
-            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
-            width=74, height=34, corner_radius=0, font=T.pixel_font(9),
+        faq_btn = T.FooterButton(
+            tools, text="FAQ", icon=T.ui_icon("faq"),
+            command=lambda: self._nav("faq"), width=74, height=34,
         )
         faq_btn.pack(side=tk.RIGHT, padx=2, pady=14)
-        self._make_footer_button_clickable(faq_btn)
         self._footer_tools["faq"] = faq_btn
 
-        blocked_btn = ctk.CTkButton(
-            tools, text="\u2298  BLOCKED", command=lambda: self._nav("blocked"),
-            fg_color=NIGHT, text_color=TEXT_MUTED, hover_color=SURFACE2,
-            width=102, height=34, corner_radius=0, font=T.pixel_font(9),
+        blocked_btn = T.FooterButton(
+            tools, text="BLOCKED", icon=T.ui_icon("blocked"),
+            command=lambda: self._nav("blocked"), width=106, height=34,
         )
         blocked_btn.pack(side=tk.RIGHT, padx=2, pady=14)
-        self._make_footer_button_clickable(blocked_btn)
         self._footer_tools["blocked"] = blocked_btn
 
         nav_hints = {
@@ -2387,7 +2398,7 @@ class GameBeatsApp:
             except Exception:
                 pass
         try:
-            self.playlist_display_lbl.configure(wraplength=max(150, cart_w - 40))
+            self.playlist_display_lbl.configure(wraplength=max(130, cart_w - 58))
         except Exception:
             pass
         try:
@@ -2428,21 +2439,16 @@ class GameBeatsApp:
             self._show_control_overlay()
             return
 
+        previous = getattr(self, "_active_page_widget", None)
         self._current_page = page
-
-        for f in [
+        frames = [
             getattr(self, "_page_main", None),
             getattr(self, "_page_playlists", None),
             getattr(self, "_page_games", None),
             getattr(self, "_page_blocked", None),
             getattr(self, "_page_settings", None),
             getattr(self, "_page_faq", None),
-        ]:
-            try:
-                if f:
-                    f.pack_forget()
-            except Exception:
-                pass
+        ]
 
         page_map = {
             "main": getattr(self, "_page_main", None),
@@ -2453,8 +2459,26 @@ class GameBeatsApp:
             "faq": getattr(self, "_page_faq", None),
         }
         target = page_map.get(page)
-        if target:
-            target.pack(fill=tk.BOTH, expand=True)
+
+        # The den uses the full height of the content area.  Every other page
+        # keeps the breadcrumb / clock strip so the room label does not feel
+        # disconnected from the rest of the app.
+        self._set_topline_visible(page != "main")
+
+        for frame in frames:
+            if frame is None or frame is target:
+                continue
+            try:
+                frame.place_forget()
+            except Exception:
+                try:
+                    frame.pack_forget()
+                except Exception:
+                    pass
+
+        if target is not None:
+            self._show_page(target, previous)
+            self._active_page_widget = target
 
         self._paint_footer(page)
 
@@ -2468,6 +2492,119 @@ class GameBeatsApp:
             self._load_playlists()
         if page == "blocked":
             self._refresh_blocked_page()
+
+    def _set_topline_visible(self, visible):
+        """Show or hide the breadcrumb strip without disturbing pack order."""
+        topline = getattr(self, "topline", None)
+        content = getattr(self, "content", None)
+        if topline is None:
+            return
+        try:
+            managed = bool(topline.winfo_manager())
+        except Exception:
+            managed = False
+        try:
+            if visible:
+                if not managed:
+                    topline.pack(fill=tk.X, before=content)
+            elif managed:
+                topline.pack_forget()
+        except Exception:
+            pass
+
+    def _cancel_page_transition(self):
+        job = getattr(self, "_page_transition_job", None)
+        if job is not None:
+            try:
+                self.root.after_cancel(job)
+            except Exception:
+                pass
+        self._page_transition_job = None
+
+    def _show_page(self, target, previous=None):
+        """Reveal a page with a short slide-in, or instantly if motion is off."""
+        self._cancel_page_transition()
+        if target is None:
+            return
+
+        if target is previous:
+            try:
+                target.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                pass
+            return
+
+        if previous is None or self._reduce_motion_enabled():
+            try:
+                target.place(x=0, y=0, relwidth=1, relheight=1)
+                target.lift()
+            except Exception:
+                pass
+            if previous is not None:
+                try:
+                    previous.place_forget()
+                except Exception:
+                    pass
+            return
+
+        try:
+            self.content.update_idletasks()
+            width = max(1, int(self.content.winfo_width()))
+        except Exception:
+            width = WIN_W
+        offset = max(8, min(24, int(width * 0.018)))
+        self._page_transition_target = target
+        self._page_transition_previous = previous
+        self._page_transition_offset = offset
+        self._page_transition_step = 0
+        self._page_transition_steps = 6
+        try:
+            target.place(x=offset, y=0, relwidth=1, relheight=1)
+            target.lift()
+            self._page_transition_job = self.root.after(
+                14, self._step_page_transition
+            )
+        except Exception:
+            try:
+                target.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                pass
+
+    def _step_page_transition(self):
+        self._page_transition_job = None
+        target = getattr(self, "_page_transition_target", None)
+        if target is None:
+            return
+        step = int(getattr(self, "_page_transition_step", 0)) + 1
+        total = max(1, int(getattr(self, "_page_transition_steps", 6)))
+        self._page_transition_step = step
+        if step >= total:
+            try:
+                target.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                pass
+            previous = getattr(self, "_page_transition_previous", None)
+            if previous is not None and previous is not target:
+                try:
+                    previous.place_forget()
+                except Exception:
+                    pass
+            self._page_transition_target = None
+            self._page_transition_previous = None
+            return
+        remaining = (1.0 - (step / float(total))) ** 2
+        offset = int(getattr(self, "_page_transition_offset", 12) * remaining)
+        try:
+            target.place(x=max(0, offset), y=0, relwidth=1, relheight=1)
+            target.lift()
+            self._page_transition_job = self.root.after(
+                14, self._step_page_transition
+            )
+        except Exception:
+            try:
+                target.place(x=0, y=0, relwidth=1, relheight=1)
+            except Exception:
+                pass
 
     def _make_footer_button_clickable(self, button):
         """Give every part of a footer button the hand cursor.
@@ -2493,7 +2630,9 @@ class GameBeatsApp:
     def _paint_footer(self, page):
         for key, btn in getattr(self, "_footer_buttons", {}).items():
             try:
-                if key == page:
+                if hasattr(btn, "set_active"):
+                    btn.set_active(key == page)
+                elif key == page:
                     btn.configure(fg_color=SURFACE2, text_color=ACCENT)
                 else:
                     btn.configure(fg_color=NIGHT, text_color=TEXT_MUTED)
@@ -2501,7 +2640,9 @@ class GameBeatsApp:
                 pass
         for key, btn in getattr(self, "_footer_tools", {}).items():
             try:
-                if key == page:
+                if hasattr(btn, "set_active"):
+                    btn.set_active(key == page)
+                elif key == page:
                     btn.configure(fg_color=SURFACE2, text_color=ACCENT)
                 else:
                     btn.configure(fg_color=NIGHT, text_color=TEXT_MUTED)
@@ -2577,6 +2718,12 @@ class GameBeatsApp:
                 except Exception:
                     pass
 
+        self._active_page_widget = None
+        self._page_transition_job = None
+        self._page_transition_target = None
+        self._page_transition_previous = None
+        self._page_transition_step = 0
+        self._page_transition_steps = 6
         self._nav("main")
 
     def _card(self, parent, pady=0):
@@ -2711,12 +2858,23 @@ class GameBeatsApp:
         )
         self.mood_lbl.pack(fill=tk.X, pady=(1, 0))
 
+        playlist_panel = ctk.CTkFrame(
+            cart_label, fg_color=SURFACE3, corner_radius=3,
+            border_width=1, border_color=BORDER2,
+        )
+        playlist_panel.pack(fill=tk.X, padx=7, pady=(4, 0))
+
+        ctk.CTkLabel(
+            playlist_panel, text="\u25b8  NOW LOADED", fg_color="transparent",
+            text_color=ACCENT, font=T.pixel_font(8, "bold"), anchor="w",
+        ).pack(fill=tk.X, padx=8, pady=(5, 0))
+
         self.playlist_display_lbl = ctk.CTkLabel(
-            cart_label, text="PLAYLIST: \u2014", fg_color="transparent",
-            text_color=GOLD, font=T.retro_font(14),
+            playlist_panel, text="Nothing loaded yet", fg_color="transparent",
+            text_color=CREAM, font=T.retro_font(18),
             anchor="w", justify=tk.LEFT, wraplength=190,
         )
-        self.playlist_display_lbl.pack(fill=tk.X, padx=7, pady=(4, 0))
+        self.playlist_display_lbl.pack(fill=tk.X, padx=8, pady=(0, 6))
 
         cassette = tk.Canvas(
             cart_label, height=28, width=1, bg=NIGHT, highlightthickness=0,
@@ -4205,7 +4363,7 @@ class GameBeatsApp:
         # Room object labels
         self._room_label_hits = {}
         label_x = int(w * 0.79)
-        self._draw_room_label(canvas, label_x, int(h * 0.36),
+        self._draw_room_label(canvas, label_x, int(h * 0.335),
                               "THE GAME SHELF", "lbl_shelf",
                               lambda: self._nav("games"))
         self._draw_room_label(canvas, label_x, int(h * 0.60),
@@ -5678,7 +5836,7 @@ class GameBeatsApp:
         self.root.after(0, lambda: (
             self.game_banner.configure(text="NO SAVED GAME RUNNING", text_color=TEXT_MUTED),
             self.mood_lbl.configure(text="Waiting for a game"),
-            self.playlist_display_lbl.configure(text="PLAYLIST: \u2014"),
+            self.playlist_display_lbl.configure(text="Nothing loaded yet"),
             self.track_lbl.configure(text="Nothing playing"),
             self.deck_artist_lbl.configure(text="Connect Spotify in Control Panel"),
             self._set_status("Watching games", ACCENT),
@@ -6769,12 +6927,16 @@ class GameBeatsApp:
         self._playlist_audio_armed = False
         self._spotify_loud_streak = 0
 
-        # Check if Spotify is ALREADY loud. If so, don't risk a toggle inversion.
-        try:
-            from core.audio_monitor import get_spotify_loopback_peak, SPOTIFY_LOOPBACK_LOUD
-            s_peak, _, s_status = get_spotify_loopback_peak()
-            if s_status == "ok" and s_peak >= SPOTIFY_LOOPBACK_LOUD:
+        # Check only the source that was actually paused.  A union loopback
+        # meter can stay "loud" because of unrelated browser audio (for example
+        # YouTube) and would otherwise skip the real Spotify resume.
+        source = str(getattr(self, "_paused_spotify_source", "") or "")
+        if source:
+            s_peak, s_status = self._spotify_source_peak(source)
+            if (s_status == "ok"
+                    and s_peak >= SPOTIFY_SOURCE_AUDIBLE_THRESHOLD):
                 # Spotify is already playing. Mark it resumed and skip command.
+                self._paused_spotify_source = ""
                 self._paused_by_game_flag = False
                 self._remove_pause_reason("auto")
                 self._is_playing = True
@@ -6785,19 +6947,10 @@ class GameBeatsApp:
                     self._react_to_playback_change(True),
                 ))
                 return
-        except Exception:
-            pass
 
         ok = False
         try:
-            if hasattr(self, "_send_spotify_resume_command"):
-                ok = bool(self._send_spotify_resume_command())
-            elif hasattr(self.spotify, "ensure_playing"):
-                ok = bool(self.spotify.ensure_playing())
-            elif hasattr(self.spotify, "resume"):
-                ok = bool(self.spotify.resume())
-            else:
-                ok = bool(self.spotify.media_play_pause())
+            ok = bool(self._send_spotify_resume_command())
         except Exception as ex:
             self.root.after(0, lambda e=ex: self._log(f"Other-audio resume failed: {e}"))
 
@@ -6876,7 +7029,7 @@ class GameBeatsApp:
             self._playlist_audio_armed = False
             self._spotify_loud_streak = 0
         self.root.after(0, lambda: (
-            self.playlist_display_lbl.configure(text=f"PLAYLIST: {self._current_playlist_name or '\u2014'}"),
+            self.playlist_display_lbl.configure(text=(self._current_playlist_name or "Nothing loaded yet")),
             self.track_lbl.configure(text=self._current_playlist_name or "Spotify Playlist"),
             self.deck_artist_lbl.configure(text="Spotify"),
         ))
@@ -7678,103 +7831,286 @@ class GameBeatsApp:
                 continue
         return None
 
-    def _spotify_audio_playing_now(self) -> bool:
-        """Best-effort *actual* audio check, not a cached playback flag.
+    def _spotify_browser_page_kind(self) -> str:
+        """Return 'controller' / 'player' only when that page is Spotify.
 
-        UI Automation can stop finding Spotify's transport button (especially
-        in the compact mini-player).  In that state core keeps returning its
-        last known play flag, which is how GameBeats could show "playing" while
-        Spotify was visibly paused.  An audio sample is the tie-breaker.
+        Playwright objects are thread-affine, so the URL check runs on the
+        browser worker thread.  An empty result means we must not send any
+        browser command: the page may be YouTube or another site.
         """
+        controller = getattr(self, "spotify", None)
+        if controller is None:
+            return ""
+        now = time.time()
+        cached = getattr(self, "_spotify_browser_kind_cache", None)
+        if cached and 0.0 <= now - cached[0] <= 1.0:
+            return cached[1]
+
+        def _classify():
+            for kind, attr in (("controller", "_page"), ("player", "_player_page")):
+                page = getattr(controller, attr, None)
+                if page is None:
+                    continue
+                try:
+                    if page.is_closed():
+                        continue
+                    url = str(getattr(page, "url", "") or "")
+                except Exception:
+                    continue
+                if _is_spotify_web_url(url):
+                    return kind
+            return ""
+
+        browser_call = getattr(controller, "_browser_call", None)
+        result = ""
+        if callable(browser_call):
+            try:
+                result = str(browser_call(_classify, timeout=2.0, default="") or "")
+            except TypeError:
+                try:
+                    result = str(browser_call(_classify) or "")
+                except Exception:
+                    result = ""
+            except Exception:
+                result = ""
+        else:
+            try:
+                result = str(_classify() or "")
+            except Exception:
+                result = ""
+        self._spotify_browser_kind_cache = (time.time(), result)
+        return result
+
+    def _send_spotify_browser_command(
+        self, action: str, paused_by_game: bool = False
+    ) -> bool:
+        """Control only a browser page that is still on open.spotify.com."""
+        controller = getattr(self, "spotify", None)
+        if controller is None or action not in ("play", "pause"):
+            return False
+        kind = self._spotify_browser_page_kind()
+        if kind not in ("controller", "player"):
+            return False
+        attr = "_player_page" if kind == "player" else "_page"
+
+        def _work():
+            page = getattr(controller, attr, None)
+            if page is None:
+                return False
+            try:
+                if page.is_closed():
+                    return False
+                url = str(getattr(page, "url", "") or "")
+                if not _is_spotify_web_url(url):
+                    # The page navigated between the source check and the
+                    # command.  Never press Space on an arbitrary website.
+                    return False
+            except Exception:
+                return False
+            method_name = "_pause_player" if action == "pause" else "_play_player"
+            method = getattr(controller, method_name, None)
+            if not callable(method):
+                return False
+            try:
+                return bool(method(page))
+            except Exception:
+                return False
+
+        browser_call = getattr(controller, "_browser_call", None)
+        if callable(browser_call):
+            try:
+                return bool(browser_call(_work, timeout=15.0, default=False))
+            except TypeError:
+                try:
+                    return bool(browser_call(_work) or False)
+                except Exception:
+                    return False
+            except Exception:
+                return False
         try:
-            from core.audio_monitor import get_spotify_loopback_peak
-            peak, _db, status = get_spotify_loopback_peak()
-            if status == "ok" and float(peak) > SPOTIFY_UI_AUDIO_ON_THRESHOLD:
-                return True
+            return bool(_work())
         except Exception:
-            pass
-        # The monitor runs every ~0.5s.  Its confirmed state is a useful
-        # second sample for browser/desktop source switching.
-        try:
-            if getattr(self, "_spotify_audio_active", False):
-                if self._spotify_sound_detected_recently(0.9):
-                    return True
-        except Exception:
-            pass
+            return False
+
+    def _spotify_desktop_controller(self):
+        """Return Spotify's desktop controller if one is available."""
+        controller = getattr(self, "spotify", None)
+        if controller is None:
+            return None
+        helper = getattr(controller, "_desktop_helper", None)
+        if callable(helper):
+            desktop = getattr(controller, "_desktop_player", None)
+            if desktop is None:
+                try:
+                    desktop = helper()
+                except Exception:
+                    desktop = None
+            return desktop
+        return controller
+
+    def _spotify_source_available(self, source: str) -> bool:
+        if source == "browser":
+            return bool(self._spotify_browser_page_kind())
+        if source == "desktop":
+            desktop = self._spotify_desktop_controller()
+            if desktop is None:
+                return False
+            return any(
+                callable(getattr(desktop, name, None))
+                for name in ("ensure_paused", "pause", "media_stop")
+            )
         return False
 
-    def _wait_for_spotify_playback(self, playing: bool, timeout: float = 1.6) -> bool:
-        """Wait briefly for audible playback to match the requested state."""
+    def _spotify_source_peak(self, source: str) -> tuple:
+        """(peak, status) for one Spotify source, never a union meter."""
+        try:
+            from core.audio_monitor import (
+                get_browser_spotify_peak,
+                get_desktop_spotify_peak,
+            )
+            if source == "browser":
+                peak, status = get_browser_spotify_peak()
+            elif source == "desktop":
+                peak, status = get_desktop_spotify_peak()
+            else:
+                return 0.0, "unknown"
+            return float(peak or 0.0), str(status or "")
+        except Exception:
+            return 0.0, "unknown"
+
+    def _spotify_active_source(self) -> str:
+        """Pick the one source GameBeats is allowed to control right now."""
+        if getattr(self, "spotify", None) is None:
+            return ""
+        browser_kind = self._spotify_browser_page_kind()
+        browser_peak, browser_status = (0.0, "no-page")
+        if browser_kind:
+            browser_peak, browser_status = self._spotify_source_peak("browser")
+        desktop = self._spotify_desktop_controller()
+        desktop_peak, desktop_status = (0.0, "no-desktop")
+        if desktop is not None:
+            desktop_peak, desktop_status = self._spotify_source_peak("desktop")
+
+        threshold = SPOTIFY_SOURCE_AUDIBLE_THRESHOLD
+        b_ok = browser_status == "ok" and browser_peak >= threshold
+        d_ok = desktop_status == "ok" and desktop_peak >= threshold
+        if b_ok and browser_peak >= desktop_peak and browser_kind:
+            return "browser"
+        if d_ok:
+            return "desktop"
+
+        preferred = str(getattr(self, "_paused_spotify_source", "") or "")
+        if preferred == "browser" and browser_kind:
+            return "browser"
+        if preferred == "desktop" and desktop is not None:
+            return "desktop"
+
+        last = str(getattr(self.spotify, "_last_audio_source", "") or "")
+        if last == "browser" and browser_kind:
+            return "browser"
+        if last == "desktop" and desktop is not None:
+            return "desktop"
+
+        uses_browser = getattr(self.spotify, "_uses_browser_player", None)
+        if browser_kind and callable(uses_browser):
+            try:
+                if uses_browser():
+                    return "browser"
+            except Exception:
+                pass
+        if desktop is not None:
+            return "desktop"
+        if browser_kind:
+            return "browser"
+        return ""
+
+    def _send_spotify_source_command(
+        self, source: str, action: str, paused_by_game: bool = False
+    ) -> bool:
+        if action not in ("play", "pause"):
+            return False
+        if source == "browser":
+            return self._send_spotify_browser_command(action, paused_by_game)
+        if source == "desktop":
+            desktop = self._spotify_desktop_controller()
+            if desktop is None:
+                return False
+            try:
+                if action == "pause":
+                    method = getattr(desktop, "ensure_paused", None)
+                    if callable(method):
+                        return bool(method(paused_by_game=paused_by_game))
+                    for name in ("pause", "media_stop"):
+                        method = getattr(desktop, name, None)
+                        if callable(method):
+                            return bool(method())
+                    return False
+                method = getattr(desktop, "ensure_playing", None)
+                if callable(method):
+                    return bool(method())
+                for name in ("resume", "play"):
+                    method = getattr(desktop, name, None)
+                    if callable(method):
+                        return bool(method())
+            except Exception:
+                return False
+            return False
+        return False
+
+    def _spotify_source_matches(
+        self, source: str, playing: bool, allow_unknown: bool = False
+    ) -> bool:
+        if not source:
+            return not bool(playing)
+        peak, status = self._spotify_source_peak(source)
+        if status != "ok":
+            # An unavailable meter cannot prove either state.  The caller may
+            # trust a successful targeted command, but otherwise fail closed.
+            return bool(allow_unknown)
+        if playing:
+            return peak >= SPOTIFY_SOURCE_AUDIBLE_THRESHOLD
+        return peak < SPOTIFY_SOURCE_AUDIBLE_THRESHOLD
+
+    def _spotify_audio_playing_now(self) -> bool:
+        """Best-effort *actual* audio check for one safe Spotify source."""
+        source = self._spotify_active_source()
+        if not source:
+            return False
+        peak, status = self._spotify_source_peak(source)
+        return bool(status == "ok" and peak > SPOTIFY_UI_AUDIO_ON_THRESHOLD)
+
+    def _wait_for_spotify_playback(
+        self, playing: bool, timeout: float = 1.6, source: str = None,
+        allow_unknown: bool = False,
+    ) -> bool:
+        """Wait briefly for one Spotify source to match the requested state."""
+        target_source = source
+        if target_source is None:
+            target_source = self._spotify_active_source()
         deadline = time.time() + max(0.0, float(timeout))
         while True:
-            if self._spotify_audio_playing_now() == bool(playing):
+            if self._spotify_source_matches(
+                target_source, playing, allow_unknown=allow_unknown
+            ):
                 return True
             if time.time() >= deadline:
                 return False
             time.sleep(0.12)
 
     def _spotify_desktop_is_primary_source(self) -> bool:
-        """True when resume/pause should go straight to the desktop client.
-
-        UI Automation can spend several seconds probing Spotify's compact
-        player before failing.  The audio monitor already knows which source is
-        audible, so use that to send the fast targeted command first.
-        """
-        try:
-            controller = self.spotify
-            if controller is None:
-                return False
-            # A desktop controller is unambiguous.
-            if (hasattr(controller, "_desktop_audible")
-                    and hasattr(controller, "_send_playback_command")):
-                return True
-            if getattr(controller, "_last_audio_source", "") == "desktop":
-                return True
-            checker = getattr(controller, "_uses_desktop_player", None)
-            if callable(checker):
-                return bool(checker())
-        except Exception:
-            pass
-        return False
+        """Compatibility helper: is the desktop client the safe source?"""
+        return self._spotify_active_source() == "desktop"
 
     def _send_targeted_spotify_command(self, action: str) -> bool:
-        """Send a Spotify-window play/pause command without a global media key.
+        """Compatibility wrapper for the source-targeted command path.
 
-        Core's UI Automation path fails when Spotify is in its compact/mini
-        player because the "Player controls" group is not exposed.  WM_APPCOMMAND
-        posted directly to a Spotify window is still targeted at Spotify and is
-        the reliable fallback used by core's own playlist launch code.
+        This never sends WM_APPCOMMAND or a global media key; it only controls
+        the desktop client's own UI or a Spotify browser page.
         """
-        if not self.spotify or action not in ("play", "pause"):
+        source = self._spotify_active_source()
+        if not source:
             return False
-        candidates = []
-        try:
-            desktop = getattr(self.spotify, "_desktop_player", None)
-            if desktop is None and hasattr(self.spotify, "_desktop_helper"):
-                try:
-                    desktop = self.spotify._desktop_helper()
-                except Exception:
-                    desktop = None
-            if desktop is not None:
-                candidates.append(desktop)
-        except Exception:
-            pass
-        candidates.append(self.spotify)
-
-        seen = set()
-        for player in candidates:
-            if player is None or id(player) in seen:
-                continue
-            seen.add(id(player))
-            sender = getattr(player, "_send_playback_command", None)
-            if not callable(sender):
-                continue
-            try:
-                if bool(sender(action)):
-                    return True
-            except Exception:
-                continue
-        return False
+        return self._send_spotify_source_command(source, action)
 
     def _spotify_is_playing_for_toggle(self) -> bool:
         """Resolve clicks from explicit/audio state instead of stale UI state."""
@@ -7803,65 +8139,38 @@ class GameBeatsApp:
     ) -> bool:
         if not self.spotify:
             return False
-        if was_playing is None:
-            was_playing = bool(getattr(self, "_is_playing", False))
+        source = self._spotify_active_source()
         monitor_live = bool(getattr(self, "_audio_monitor_running", False))
 
         def _mark_paused():
             self._remember_spotify_playback_state(False)
             self._remember_spotify_pause_claim(bool(paused_by_game))
+            self._paused_spotify_source = source or ""
 
-        # When Spotify's desktop client is the audible source, send the fast
-        # targeted command first.  This avoids UI Automation spending seconds
-        # probing the compact player before it fails.
-        targeted_sent = False
-        if self._spotify_desktop_is_primary_source():
-            targeted_sent = self._send_targeted_spotify_command("pause")
-            if targeted_sent:
-                if not monitor_live:
-                    _mark_paused()
-                    return True
-                if self._wait_for_spotify_playback(False, timeout=0.9):
-                    _mark_paused()
-                    return True
+        if not source:
+            # Nothing safe to control. Do not guess with a global media command.
+            _mark_paused()
+            return True
 
-        ok = False
-        try:
-            if hasattr(self.spotify, "ensure_paused"):
-                try:
-                    ok = bool(self.spotify.ensure_paused(
-                        paused_by_game=paused_by_game
-                    ))
-                except TypeError:
-                    ok = bool(self.spotify.ensure_paused())
-            elif hasattr(self.spotify, "pause"):
-                ok = bool(self.spotify.pause(paused_by_game=paused_by_game))
-            elif hasattr(self.spotify, "media_stop"):
-                ok = bool(self.spotify.media_stop())
-            elif hasattr(self.spotify, "media_play_pause"):
-                ok = bool(self.spotify.media_play_pause())
-        except Exception:
-            ok = False
+        ok = self._send_spotify_source_command(
+            source, "pause", paused_by_game=paused_by_game
+        )
 
-        # If ensure_paused() claimed success because the moment it sampled was
-        # quiet, or UI Automation could not find the mini-player button, send
-        # the idempotent targeted pause.  This is safe even if already paused.
-        if (not ok) or bool(was_playing):
-            if not targeted_sent:
-                targeted_sent = self._send_targeted_spotify_command("pause")
-            ok = ok or targeted_sent
-
-        # Only report success when the requested state is actually audible/
-        # silent.  This is what prevents the UI from drifting away from Spotify.
         if monitor_live:
-            if self._wait_for_spotify_playback(False, timeout=1.2):
+            if self._wait_for_spotify_playback(
+                False, timeout=1.6, source=source, allow_unknown=ok
+            ):
                 _mark_paused()
                 return True
-            # One bounded targeted retry for slow Electron windows.
-            if self._send_targeted_spotify_command("pause"):
-                if self._wait_for_spotify_playback(False, timeout=1.2):
-                    _mark_paused()
-                    return True
+            # One bounded retry on the same safe source for slow Electron UIs.
+            retry_ok = self._send_spotify_source_command(
+                source, "pause", paused_by_game=paused_by_game
+            )
+            if retry_ok and self._wait_for_spotify_playback(
+                False, timeout=1.4, source=source, allow_unknown=retry_ok
+            ):
+                _mark_paused()
+                return True
             return False
         if ok:
             _mark_paused()
@@ -7870,10 +8179,11 @@ class GameBeatsApp:
     def _send_spotify_resume_command(self) -> bool:
         if not self.spotify:
             return False
-        if self._spotify_audio_playing_now():
-            self._remember_spotify_playback_state(True)
-            self._remember_spotify_pause_claim(False)
-            return True
+        source = str(getattr(self, "_paused_spotify_source", "") or "")
+        if source and not self._spotify_source_available(source):
+            source = ""
+        if not source:
+            source = self._spotify_active_source()
         monitor_live = bool(getattr(self, "_audio_monitor_running", False))
         try:
             _clear_spotify_mixer_mute()
@@ -7883,83 +8193,59 @@ class GameBeatsApp:
         def _mark_playing():
             self._remember_spotify_playback_state(True)
             self._remember_spotify_pause_claim(False)
+            self._paused_spotify_source = ""
 
-        # Fast path for the desktop player.  The targeted WM_APPCOMMAND is
-        # delivered immediately and does not depend on the compact player's
-        # UIA tree being exposed.
-        targeted_sent = False
-        if self._spotify_desktop_is_primary_source():
-            targeted_sent = self._send_targeted_spotify_command("play")
-            if targeted_sent:
-                if not monitor_live:
-                    _mark_playing()
-                    return True
-                if self._wait_for_spotify_playback(True, timeout=0.9):
-                    _mark_playing()
-                    return True
+        if source and not monitor_live and not self._spotify_source_available(source):
+            return False
+        if source and self._spotify_source_matches(source, True):
+            _mark_playing()
+            return True
+        if not source:
+            return False
 
-        ok = False
-        try:
-            if hasattr(self.spotify, "ensure_playing"):
-                ok = bool(self.spotify.ensure_playing())
-            elif hasattr(self.spotify, "resume"):
-                ok = bool(self.spotify.resume())
-            elif hasattr(self.spotify, "play"):
-                ok = bool(self.spotify.play())
-            elif hasattr(self.spotify, "media_play_pause"):
-                ok = bool(self.spotify.media_play_pause())
-        except Exception:
-            ok = False
-
-        # UI Automation is the common failure point in the compact player.
-        # Use Spotify-targeted WM_APPCOMMAND as a fallback; never play_playlist
-        # here (that navigates and restarts the mix).
-        if not ok and not targeted_sent:
-            targeted_sent = self._send_targeted_spotify_command("play")
-        ok = ok or targeted_sent
+        ok = self._send_spotify_source_command(source, "play")
 
         if monitor_live:
-            if self._wait_for_spotify_playback(True, timeout=1.6):
+            if self._wait_for_spotify_playback(
+                True, timeout=1.8, source=source, allow_unknown=ok
+            ):
                 _mark_playing()
                 return True
-            # ensure_playing() can return True from a stale cached state.  Send
-            # the idempotent targeted play and verify actual audio once more.
-            if self._send_targeted_spotify_command("play"):
-                if self._wait_for_spotify_playback(True, timeout=1.4):
-                    _mark_playing()
-                    return True
+            # The cached state can be stale.  Retry once, still only on the
+            # source that was actually paused.
+            retry_ok = self._send_spotify_source_command(source, "play")
+            if retry_ok and self._wait_for_spotify_playback(
+                True, timeout=1.6, source=source, allow_unknown=retry_ok
+            ):
+                _mark_playing()
+                return True
             return False
         if ok:
             _mark_playing()
         return ok
 
     def _remember_spotify_pause_claim(self, paused: bool):
-        """Keep core's game-pause claim in sync with a targeted command.
-
-        The fast desktop path bypasses core's ensure_* methods, so core's
-        private ``_paused_by_game`` flag would otherwise go stale.
-        """
-        try:
-            if self.spotify is not None:
-                self.spotify._paused_by_game = bool(paused)
-        except Exception:
-            pass
-        try:
-            desktop = getattr(self.spotify, "_desktop_player", None)
-            if desktop is not None:
-                desktop._paused_by_game = bool(paused)
-        except Exception:
-            pass
+        """Keep core's game-pause claim in sync with a targeted command."""
+        targets = [getattr(self, "spotify", None)]
+        desktop = self._spotify_desktop_controller()
+        if desktop is not None:
+            targets.append(desktop)
+        seen = set()
+        for target in targets:
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            try:
+                target._paused_by_game = bool(paused)
+            except Exception:
+                continue
 
     def _remember_spotify_playback_state(self, playing: bool):
         """Mirror a confirmed targeted command into core's cached state."""
-        targets = [self.spotify]
-        try:
-            desktop = getattr(self.spotify, "_desktop_player", None)
-            if desktop is not None:
-                targets.append(desktop)
-        except Exception:
-            pass
+        targets = [getattr(self, "spotify", None)]
+        desktop = self._spotify_desktop_controller()
+        if desktop is not None:
+            targets.append(desktop)
         seen = set()
         for target in targets:
             if target is None or id(target) in seen:
@@ -8517,7 +8803,7 @@ class GameBeatsApp:
             if not self._play_in_progress:
                 self._current_playlist_name = "Spotify Playlist"
                 self.root.after(0, lambda: self.playlist_display_lbl.configure(
-                    text=f"PLAYLIST: {self._current_playlist_name}"
+                    text=self._current_playlist_name
                 ))
 
         playlist_title = self._now_playing_playlist_title(t)
@@ -8548,7 +8834,7 @@ class GameBeatsApp:
         if playlist_title and playlist_title.lower() != "nothing playing":
             try:
                 self.playlist_display_lbl.configure(
-                    text=f"PLAYLIST: {playlist_title}"
+                    text=playlist_title
                 )
             except Exception:
                 pass

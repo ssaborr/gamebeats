@@ -132,5 +132,106 @@ class TestShortcutGuard(unittest.TestCase):
         self.assertFalse(app._shortcut_modified(event))
 
 
+class TestToplineVisibility(unittest.TestCase):
+    def _app(self):
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.topline = MagicMock()
+        app.content = MagicMock()
+        return app
+
+    def test_den_hides_the_breadcrumb_strip(self):
+        app = self._app()
+        app.topline.winfo_manager.return_value = "pack"
+        GameBeatsApp._set_topline_visible(app, False)
+        app.topline.pack_forget.assert_called_once_with()
+
+    def test_other_pages_restore_the_breadcrumb_strip_before_content(self):
+        app = self._app()
+        app.topline.winfo_manager.return_value = ""
+        GameBeatsApp._set_topline_visible(app, True)
+        app.topline.pack.assert_called_once_with(
+            fill="x", before=app.content
+        )
+
+    def test_nav_uses_den_visibility_rule(self):
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._page_main = MagicMock()
+        app._page_playlists = None
+        app._page_games = None
+        app._page_blocked = None
+        app._page_settings = None
+        app._page_faq = None
+        app._active_page_widget = None
+        app._set_topline_visible = MagicMock()
+        app._show_page = MagicMock()
+        app._paint_footer = MagicMock()
+        app._redraw_room = MagicMock()
+        app._start_puppy_animation = MagicMock()
+        app._stop_puppy_animation = MagicMock()
+
+        GameBeatsApp._nav(app, "main")
+
+        app._set_topline_visible.assert_called_once_with(False)
+
+
+class TestPageTransition(unittest.TestCase):
+    def _app(self, reduce_motion):
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.root = MagicMock()
+        app.content = MagicMock()
+        app.content.winfo_width.return_value = 1000
+        app._page_transition_job = None
+        app._reduce_motion_enabled = MagicMock(return_value=reduce_motion)
+        return app
+
+    def test_reduce_motion_shows_the_page_immediately(self):
+        app = self._app(True)
+        target = MagicMock()
+        previous = MagicMock()
+
+        GameBeatsApp._show_page(app, target, previous)
+
+        target.place.assert_called_once_with(
+            x=0, y=0, relwidth=1, relheight=1
+        )
+        previous.place_forget.assert_called_once_with()
+        app.root.after.assert_not_called()
+
+    def test_normal_switch_slides_the_new_page_in(self):
+        app = self._app(False)
+        target = MagicMock()
+        previous = MagicMock()
+        app.root.after.return_value = "transition-job"
+
+        GameBeatsApp._show_page(app, target, previous)
+
+        target.place.assert_called_once_with(
+            x=18, y=0, relwidth=1, relheight=1
+        )
+        target.lift.assert_called_once_with()
+        app.root.after.assert_called_once()
+        self.assertEqual(app._page_transition_target, target)
+        self.assertEqual(app._page_transition_previous, previous)
+
+    def test_transition_finishes_at_rest_and_hides_the_old_page(self):
+        app = self._app(False)
+        target = MagicMock()
+        previous = MagicMock()
+        app._page_transition_target = target
+        app._page_transition_previous = previous
+        app._page_transition_offset = 18
+        app._page_transition_step = 5
+        app._page_transition_steps = 6
+
+        GameBeatsApp._step_page_transition(app)
+
+        target.place.assert_called_once_with(
+            x=0, y=0, relwidth=1, relheight=1
+        )
+        previous.place_forget.assert_called_once_with()
+        self.assertIsNone(app._page_transition_target)
+        self.assertIsNone(app._page_transition_previous)
+
+
 if __name__ == "__main__":
     unittest.main()

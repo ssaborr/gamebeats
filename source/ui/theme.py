@@ -226,6 +226,15 @@ ICON_NEXT = "\ue893"
 ICON_TRY_AGAIN = "\ue72c"
 ICON_BLOCK = "\ue733"
 
+# Segoe Fluent Icons / MDL2 navigation set. These read more clearly at a
+# glance than the old mixed unicode glyphs and share a single baseline.
+ICON_HOME = "\ue80f"
+ICON_GAME = "\ue7fc"
+ICON_MUSIC = "\ue8d6"
+ICON_SETTINGS = "\ue713"
+ICON_HELP = "\ue897"
+ICON_OVERLAY = "\ue7f4"
+
 
 def icon_family():
     """Return a usable Windows icon font family, or None."""
@@ -269,6 +278,20 @@ def media_icon(name):
         "next": ICON_NEXT if fluent else "\u23ed",
         "try_again": ICON_TRY_AGAIN if fluent else "\u21ba",
         "block": ICON_BLOCK if fluent else "\u2298",
+    }.get(str(name), "")
+
+
+def ui_icon(name):
+    """Return a crisp navigation glyph with a readable unicode fallback."""
+    fluent = icon_family() is not None
+    return {
+        "den": ICON_HOME if fluent else "\u2302",
+        "games": ICON_GAME if fluent else "\u25a5",
+        "playlists": ICON_MUSIC if fluent else "\u25c9",
+        "settings": ICON_SETTINGS if fluent else "\u2692",
+        "blocked": ICON_BLOCK if fluent else "\u2298",
+        "faq": ICON_HELP if fluent else "\u2726",
+        "overlay": ICON_OVERLAY if fluent else "\u25a3",
     }.get(str(name), "")
 
 
@@ -432,6 +455,98 @@ def rule(parent, color=BORDER, pady=(4, 8)):
     ctk.CTkFrame(parent, fg_color=color, height=2, corner_radius=0).pack(
         fill=tk.X, pady=pady,
     )
+
+
+class FooterButton(ctk.CTkFrame):
+    """Icon + label footer control with a full, stable click target.
+
+    CustomTkinter buttons only accept one font, so an icon-font glyph and a
+    pixel-font label cannot share a single CTkButton.  Keeping the two in one
+    frame also makes the whole padded rectangle clickable.
+    """
+
+    def __init__(
+        self, parent, text="", icon="", command=None,
+        width=148, height=34, base_color=NIGHT, hover_color=SURFACE2,
+        text_color=TEXT_MUTED, icon_color=WOOD, text_size=9, icon_size=14,
+        **kwargs,
+    ):
+        super().__init__(
+            parent, fg_color=base_color, corner_radius=0,
+            width=width, height=height, **kwargs,
+        )
+        self.pack_propagate(False)
+        self.command = command
+        self._base_color = base_color
+        self._hover_color = hover_color
+        self._text_color = text_color
+        self._icon_color = icon_color
+        self._active = False
+        self._hovered = False
+
+        pad_left = 10
+        self.icon_lbl = ctk.CTkLabel(
+            self, text=icon, width=22 if icon else 0,
+            fg_color="transparent", text_color=icon_color,
+            font=icon_font(icon_size),
+        )
+        if icon:
+            self.icon_lbl.pack(side=tk.LEFT, padx=(pad_left, 5))
+        self.text_lbl = ctk.CTkLabel(
+            self, text=text, fg_color="transparent", text_color=text_color,
+            font=pixel_font(text_size), anchor="w",
+        )
+        self.text_lbl.pack(
+            side=tk.LEFT, fill=tk.X, expand=True,
+            padx=(0 if icon else pad_left, 8),
+        )
+
+        for widget in (self, self.icon_lbl, self.text_lbl):
+            try:
+                widget.configure(cursor="hand2")
+                widget.bind("<Button-1>", self._on_click, add="+")
+                widget.bind("<Return>", self._on_click, add="+")
+                widget.bind("<space>", self._on_click, add="+")
+                widget.bind("<Enter>", self._on_enter, add="+")
+                widget.bind("<Leave>", self._on_leave, add="+")
+            except Exception:
+                pass
+
+    def _on_click(self, _event=None):
+        if callable(self.command):
+            self.command()
+
+    def _on_enter(self, _event=None):
+        self._hovered = True
+        self._paint()
+
+    def _on_leave(self, _event=None):
+        self._hovered = False
+        self._paint()
+
+    def _paint(self):
+        if self._active:
+            bg = SURFACE2
+            icon_color = ACCENT
+            text_color = TEXT
+        elif self._hovered:
+            bg = self._hover_color
+            icon_color = TEXT
+            text_color = TEXT
+        else:
+            bg = self._base_color
+            icon_color = self._icon_color
+            text_color = self._text_color
+        try:
+            self.configure(fg_color=bg)
+            self.icon_lbl.configure(text_color=icon_color)
+            self.text_lbl.configure(text_color=text_color)
+        except Exception:
+            pass
+
+    def set_active(self, active):
+        self._active = bool(active)
+        self._paint()
 
 
 class SidebarPanel(ctk.CTkFrame):
