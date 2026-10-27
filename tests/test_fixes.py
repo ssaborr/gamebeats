@@ -1019,7 +1019,9 @@ class TestAppNewRegressions(unittest.TestCase):
 
         GameBeatsApp._begin_playlist_switch_pause(app, "Blocked")
 
-        app._apply_user_pause_state.assert_called_once_with(True)
+        app._apply_user_pause_state.assert_called_once_with(
+            True, preserve_thinking=True
+        )
         app._set_play_btn_icon.assert_called_once_with(False, force_btn=True)
         app._update_deck_status.assert_called_once()
         self.assertFalse(app._is_playing)
@@ -1296,6 +1298,55 @@ class TestAppNewRegressions(unittest.TestCase):
         app._remember_current_playlist.assert_called_once()
         app._play_puppy_change_animation.assert_called_once_with(force=True)
 
+    def test_on_play_result_finishes_playlist_thinking_with_one_swap(self):
+        from ui.app import GameBeatsApp
+
+        class ImmediateRoot:
+            def after(self, delay, func=None, *args):
+                if delay == 0 and func is not None:
+                    func(*args)
+                return "job"
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.root = ImmediateRoot()
+        app._play_in_progress = True
+        app._active_play_request_id = 8
+        app._play_request_seq = 8
+        app._pending_play_request = None
+        app._playlist_switch_started_ts = time.time() - 2.0
+        app._playlist_switch_audio_heard_ts = 0.0
+        app._playlist_switch_heard_silence = False
+        app._playlist_switch_pause_confirmed = True
+        app._playlist_end_pending = True
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._is_playing = True
+        app._spotify_started_by_us = True
+        app._playback_started_ts = time.time()
+        app.current_game = None
+        app._audio_monitor_running = False
+        app.spotify = MagicMock()
+        app.spotify._last_play_method = "web"
+        app._log = MagicMock()
+        app._remember_current_playlist = MagicMock()
+        app._set_play_btn_icon = MagicMock()
+        app._finish_puppy_thinking = MagicMock(return_value=True)
+        app._play_puppy_change_animation = MagicMock()
+        app._schedule_fast_track_refresh = MagicMock()
+        app._pause_started_playlist_if_game_loud = MagicMock()
+        app._finish_play_query = MagicMock()
+
+        GameBeatsApp._on_play_result(
+            app,
+            {"uri": "spotify:playlist:new", "name": "New", "query": "q"},
+            "chill",
+            "q",
+            request_id=8,
+        )
+
+        app._finish_puppy_thinking.assert_called_once_with(play_change=True)
+        app._play_puppy_change_animation.assert_not_called()
+
     def test_on_play_result_ignores_a_stale_request(self):
         from ui.app import GameBeatsApp
 
@@ -1350,6 +1401,7 @@ class TestAppNewRegressions(unittest.TestCase):
         app._remember_current_playlist = MagicMock()
         app._set_play_btn_icon = MagicMock()
         app._play_puppy_change_animation = MagicMock()
+        app._finish_puppy_thinking = MagicMock(return_value=True)
         app._schedule_fast_track_refresh = MagicMock()
         app._pause_started_playlist_if_game_loud = MagicMock()
         app._finish_play_query = MagicMock()
@@ -1362,6 +1414,9 @@ class TestAppNewRegressions(unittest.TestCase):
             request_id=3,
         )
 
+        # The queued request owns the thinking loop now; this result must not
+        # complete it with a stale headset-swap clip.
+        app._finish_puppy_thinking.assert_not_called()
         app._play_puppy_change_animation.assert_not_called()
         app._finish_play_query.assert_called_once_with(3)
 
@@ -1441,8 +1496,34 @@ class TestAppNewRegressions(unittest.TestCase):
             app, {"uri": "newer", "name": "Newer", "artist": "Artist"}
         )
 
-        app._play_puppy_change_animation.assert_called_once()
+        # Ordinary track changes get the small head-turn reaction, never the
+        # headset-swap clip.  Thinking/skip animations are started by the
+        # explicit next/previous action instead.
+        app._play_puppy_change_animation.assert_not_called()
         self.assertGreater(app._puppy_reaction_until, 0.0)
+
+    def test_update_np_finishes_skip_thinking_when_new_track_arrives(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._last_np_key = ("old", "Old", "Artist")
+        app._last_track_info = {}
+        app._last_track_info_ts = 0.0
+        app._track_change_anim_quiet_until = 0.0
+        app._pending_play_request = None
+        app._playlist_switch_pause = False
+        app._puppy_reaction_until = 0.0
+        app._puppy_thinking_active = MagicMock(return_value=True)
+        app._finish_puppy_thinking = MagicMock(return_value=True)
+        app._play_puppy_change_animation = MagicMock()
+        app._fresh_playback_grace = MagicMock(return_value=False)
+
+        GameBeatsApp._update_np(
+            app, {"uri": "new", "name": "New", "artist": "Artist"}
+        )
+
+        app._finish_puppy_thinking.assert_called_once_with(play_change=True)
+        app._play_puppy_change_animation.assert_not_called()
 
     def test_fresh_playback_grace_holds_until_audio_or_timeout(self):
         from ui.app import FRESH_PLAYBACK_GRACE_SEC, GameBeatsApp

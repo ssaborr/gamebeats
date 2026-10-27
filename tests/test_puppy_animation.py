@@ -261,6 +261,33 @@ class TestRoomGifAsset(unittest.TestCase):
         self.assertEqual(frame_index_at(250, durations), 2)
         self.assertEqual(frame_index_at(360, durations), 0)
 
+    def test_thinking_gif_is_wired_into_both_mascots(self):
+        from ui.app import PUPPY_ROOM_STATE_GIFS
+        from ui.mascot_notifier import PUPPY_OVERLAY_STATE_GIFS
+        from ui.puppy_gif import PUPPY_THINKING_GIF, load_gif_frames
+
+        path = os.path.join(BASE_DIR, "assets", PUPPY_THINKING_GIF)
+        self.assertTrue(os.path.exists(path), path)
+        frames, durations = load_gif_frames(path)
+        self.assertEqual(len(frames), 9)
+        self.assertEqual(len(durations), 9)
+        self.assertIn(("thinking", PUPPY_THINKING_GIF), PUPPY_ROOM_STATE_GIFS)
+        self.assertIn(("thinking", PUPPY_THINKING_GIF), PUPPY_OVERLAY_STATE_GIFS)
+
+    def test_thinking_gif_plays_six_intro_frames_then_ping_pongs(self):
+        from ui.puppy_gif import thinking_frame_index
+
+        durations = (120,) * 9
+        self.assertEqual(thinking_frame_index(0, durations), 0)
+        self.assertEqual(thinking_frame_index(600, durations), 5)
+        self.assertEqual(thinking_frame_index(720, durations), 6)
+        self.assertEqual(thinking_frame_index(840, durations), 7)
+        self.assertEqual(thinking_frame_index(960, durations), 8)
+        self.assertEqual(thinking_frame_index(1080, durations), 7)
+        self.assertEqual(thinking_frame_index(1200, durations), 6)
+        # The tail keeps repeating; it never reaches a terminal frame.
+        self.assertEqual(thinking_frame_index(10320, durations), 6)
+
     def test_room_and_overlay_use_the_same_bobbing_mascot(self):
         from ui.app import PUPPY_ROOM_GIF
         from ui.mascot_notifier import PUPPY_OVERLAY_GIF
@@ -500,6 +527,10 @@ class TestRoomPuppyActions(unittest.TestCase):
             "idle": (("i0", "i1"), (120, 120)),
             "pause": (("p0", "p1"), (120, 120)),
             "change": (("c0", "c1"), (120, 120)),
+            "thinking": (
+                tuple(f"t{i}" for i in range(9)),
+                (120,) * 9,
+            ),
         }
         app._puppy_gif_frames = ("i0", "i1")
         app._puppy_gif_durations = (120, 120)
@@ -557,6 +588,66 @@ class TestRoomPuppyActions(unittest.TestCase):
         app._reduce_motion_enabled.return_value = True
         app._start_puppy_action("change", now=400.0)
         self.assertIsNone(app._puppy_action_state)
+
+    def test_thinking_loop_plays_intro_then_ping_pongs_until_stopped(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+
+        self.assertTrue(
+            app._start_puppy_thinking_animation(reason="track", now=100.0)
+        )
+        self.assertEqual(app._puppy_action_state, "thinking")
+        self.assertEqual(app._puppy_action_loops, 0)
+        self.assertEqual(app._puppy_frame_name(now=100.0), "action:thinking:0")
+        # Six intro frames at 120 ms each, then frame 7 (index 6).
+        self.assertEqual(app._puppy_frame_name(now=100.6), "action:thinking:5")
+        self.assertEqual(app._puppy_frame_name(now=100.72), "action:thinking:6")
+        self.assertEqual(app._puppy_frame_name(now=100.84), "action:thinking:7")
+        self.assertEqual(app._puppy_frame_name(now=100.96), "action:thinking:8")
+        self.assertEqual(app._puppy_frame_name(now=101.08), "action:thinking:7")
+        self.assertEqual(app._puppy_frame_name(now=101.2), "action:thinking:6")
+        # The loop is indefinite: it must not fall back to the bob.
+        self.assertTrue(
+            app._puppy_frame_name(now=160.0).startswith("action:thinking:")
+        )
+        self.assertTrue(app._puppy_thinking_active())
+        app._puppy_singing_overlay.play_thinking_animation.assert_called_once_with()
+
+    def test_finishing_thinking_plays_one_change_clip(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+        self.assertTrue(
+            app._start_puppy_thinking_animation(reason="playlist", now=100.0)
+        )
+
+        self.assertTrue(app._finish_puppy_thinking(play_change=True))
+
+        self.assertEqual(app._puppy_action_state, "change")
+        app._puppy_singing_overlay.play_change_animation.assert_called_once_with()
+        self.assertFalse(app._puppy_thinking_active())
+
+    def test_real_pause_stops_thinking_but_switch_pause_allows_it(self):
+        app = self._make_app()
+        app._puppy_singing_overlay = MagicMock()
+        app._intentional_pause_active.return_value = True
+        app._playlist_switch_pause = False
+
+        self.assertFalse(
+            app._start_puppy_thinking_animation(reason="track", now=100.0)
+        )
+        self.assertEqual(app._puppy_action_state, "pause")
+
+        app._playlist_switch_pause = True
+        self.assertTrue(
+            app._start_puppy_thinking_animation(reason="playlist", now=200.0)
+        )
+        self.assertEqual(app._puppy_action_state, "thinking")
+
+        # A real pause after thinking has started must win immediately.
+        app._playlist_switch_pause = False
+        app._react_to_playback_change(False)
+        self.assertEqual(app._puppy_action_state, "pause")
+        self.assertTrue(app._puppy_action_hold)
 
     def test_pause_first_does_not_stomp_the_change_animation(self):
         app = self._make_app()
@@ -794,6 +885,56 @@ class TestDesktopPuppyControls(unittest.TestCase):
         overlay._on_toggle_play_pause.assert_not_called()
         self.assertEqual(overlay._state, "change")
         self.assertTrue(overlay._long_fired is False)
+
+    @staticmethod
+    def _add_thinking_frames(overlay):
+        overlay._photos_by_state["thinking"] = [f"t{i}" for i in range(9)]
+        overlay._durations_by_state["thinking"] = (120,) * 9
+
+    def test_long_click_uses_the_thinking_loop_when_available(self):
+        overlay = self._make_overlay(playing=True)
+        self._add_thinking_frames(overlay)
+
+        overlay._on_press(self._event())
+        overlay._fire_long_click()
+        overlay._on_release(self._event())
+
+        overlay._on_try_another.assert_called_once_with()
+        overlay._on_toggle_play_pause.assert_not_called()
+        self.assertEqual(overlay._state, "thinking")
+        self.assertEqual(overlay._active_loops, 0)
+
+    def test_thinking_loops_until_a_real_pause_stops_it(self):
+        overlay = self._make_overlay(playing=True)
+        self._add_thinking_frames(overlay)
+
+        self.assertTrue(overlay.play_thinking_animation())
+        self.assertEqual(overlay._state, "thinking")
+        overlay._update_reaction_frame(overlay._state_started + 2.16)
+        self.assertEqual(overlay._state, "thinking")
+        self.assertEqual(overlay._idx, 6)
+
+        overlay.set_animation_locked(True)
+
+        self.assertEqual(overlay._state, "pause")
+        self.assertTrue(overlay._active_hold)
+        self.assertFalse(overlay._active_reverse)
+
+    def test_switch_unlock_can_start_thinking_then_finish_with_change(self):
+        overlay = self._make_overlay(playing=False)
+        self._add_thinking_frames(overlay)
+        overlay.set_animation_locked(True)
+
+        # A real pause still blocks it.
+        self.assertFalse(overlay.play_thinking_animation())
+
+        # The app clears the lock for the transient playlist-switch pause.
+        overlay.set_animation_locked(False)
+        self.assertTrue(overlay.play_thinking_animation())
+        self.assertEqual(overlay._state, "thinking")
+
+        self.assertTrue(overlay.play_change_animation())
+        self.assertEqual(overlay._state, "change")
 
     def test_ctrl_drag_moves_and_saves_without_toggling(self):
         overlay = self._make_overlay(playing=True)

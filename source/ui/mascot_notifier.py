@@ -34,10 +34,12 @@ from ui.puppy_gif import (
     PUPPY_BOB_GIF,
     PUPPY_CHANGE_GIF,
     PUPPY_PAUSE_GIF,
+    PUPPY_THINKING_GIF,
     fit_frame,
     frame_index_at,
     load_gif_frames,
     normalize_animation_states,
+    thinking_frame_index,
 )
 
 BG = T.BG
@@ -63,6 +65,7 @@ PUPPY_OVERLAY_STATE_GIFS = (
     ("idle", PUPPY_BOB_GIF),
     ("pause", PUPPY_PAUSE_GIF),
     ("change", PUPPY_CHANGE_GIF),
+    ("thinking", PUPPY_THINKING_GIF),
 )
 PUPPY_IDLE_FRAME = "idle_0"
 # The GIFs are authored at 120 ms per frame. Keep that cadence so the bob reads
@@ -499,6 +502,25 @@ class PuppySingingOverlay:
         self._set_state("change", loops=1)
         return True
 
+    def play_thinking_animation(self):
+        """Loop the thinking clip until the caller swaps or pauses.
+
+        A real pause lock keeps the drooped pose.  The app clears the lock
+        before calling this for the transient playlist-switch pause.
+        """
+        frames, _durations = self._state_frames("thinking")
+        if not frames or "thinking" not in getattr(self, "_photos_by_state", {}):
+            # Older asset bundles keep the previous one-shot change clip.
+            return self.play_change_animation()
+        if getattr(self, "_animation_locked", False):
+            return False
+        if not self._visible:
+            return False
+        if getattr(self, "_state", "idle") == "thinking":
+            return True
+        self._set_state("thinking", loops=0)
+        return True
+
     def set_playback_state(self, playing, *, animate=True):
         """Keep the overlay's pose in sync with app/audio pause changes."""
         playing = bool(playing)
@@ -682,7 +704,9 @@ class PuppySingingOverlay:
         ):
             return
         self._long_fired = True
-        self.play_change_animation()
+        # A long press starts loading a new playlist, not a completed swap.
+        # The app plays the headset-swap clip once the new audio starts.
+        self.play_thinking_animation()
         if callable(self._on_try_another):
             try:
                 self._on_try_another()
@@ -717,10 +741,13 @@ class PuppySingingOverlay:
                 return "hold"
             self._finish_reaction()
             return "finished"
-        offset = elapsed % total
-        idx = frame_index_at(offset, durations)
-        if getattr(self, "_active_reverse", False):
-            idx = len(frames) - 1 - idx
+        if getattr(self, "_state", "idle") == "thinking":
+            idx = thinking_frame_index(elapsed, durations)
+        else:
+            offset = elapsed % total
+            idx = frame_index_at(offset, durations)
+            if getattr(self, "_active_reverse", False):
+                idx = len(frames) - 1 - idx
         if idx != self._idx:
             self._idx = idx
             self._draw_current_frame()
