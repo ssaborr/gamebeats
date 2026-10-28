@@ -59,6 +59,8 @@ from ui.puppy_gif import (
     normalize_sprite_frames as _normalize_gif_frames,
 )
 from ui.runtime_overlay import RuntimeOverlay
+from ui.spotify_targeted_transport import install_targeted_transport
+from ui.spotify_window_guard import SpotifyWindowGuard
 from ui import theme as T
 
 def _data_dir() -> str:
@@ -291,6 +293,11 @@ SPOTIFY_UI_AUDIO_OFF_THRESHOLD = 0.0
 # meter.  It is the same threshold core uses for source selection, so a tiny
 # residual tail cannot make a pause look like a failure (or vice versa).
 SPOTIFY_SOURCE_AUDIBLE_THRESHOLD = 0.0015
+
+# Serialise pause/resume commands.  The audio monitor runs on its own thread;
+# without this, a user click and an auto-pause can both toggle Spotify and
+# leave the UI claiming the opposite of what is actually playing.
+_SPOTIFY_COMMAND_FALLBACK_LOCK = threading.RLock()
 # A newly-started playlist can take a few seconds to surface its first track
 # and audible meter data.  During that window the old mix is already silent,
 # so keep the freshly-started play state (and mascot) instead of treating the
@@ -1121,6 +1128,7 @@ class GameBeatsApp:
         self._user_toggle_ts = 0.0  # timestamp of last user play/pause click
         self._play_pause_busy = False
         self._play_pause_watchdog = None
+        self._spotify_command_lock = threading.RLock()
         self._manual_paused = False
         self._current_page = "main"
         self._current_playlist_uri = ""
@@ -1458,6 +1466,7 @@ class GameBeatsApp:
             hide_window=not bool(show_browser),
             cdp_url=cdp_url or None,
         )
+        self._ensure_spotify_window_guard()
         if cdp_url:
             self._log("CDP mode: will attach to your own Chrome (most normal for Spotify).")
         if hasattr(self, "desktop_mode_var"):
@@ -5305,6 +5314,7 @@ class GameBeatsApp:
 
     def _on_spotify_ready(self):
         """After player is ready: verify, load playlists, start watchers."""
+        self._ensure_spotify_window_guard()
         ok, msg = self.spotify.verify_access()
         if ok:
             if hasattr(self, "auth_lbl"):
@@ -5721,11 +5731,9 @@ class GameBeatsApp:
     def _launch_spotify_with_silent_track(self):
         """Restart Spotify desktop and play the silent track URI for detection."""
         try:
-            helper = None
-            if hasattr(self, 'spotify') and self.spotify:
-                if hasattr(self.spotify, '_desktop_helper'):
-                    helper = self.spotify._desktop_helper()
-                elif hasattr(self.spotify, 'launch_spotify'):
+            helper = self._spotify_desktop_controller()
+            if helper is None and hasattr(self, 'spotify') and self.spotify:
+                if hasattr(self.spotify, 'launch_spotify'):
                     helper = self.spotify
 
             if helper and hasattr(helper, 'play_track_uri'):
@@ -7957,11 +7965,28 @@ class GameBeatsApp:
         except Exception:
             return False
 
+    def _ensure_spotify_window_guard(self):
+        """Create the UI-side guard that keeps Spotify's window off-screen."""
+        guard = getattr(self, "_spotify_window_guard", None)
+        if guard is not None:
+            return guard
+        try:
+            guard = SpotifyWindowGuard(logger=self._log)
+        except Exception as ex:
+            try:
+                self._log(f"Could not start Spotify window guard: {ex}")
+            except Exception:
+                pass
+            return None
+        self._spotify_window_guard = guard
+        return guard
+
     def _spotify_desktop_controller(self):
         """Return Spotify's desktop controller if one is available."""
         controller = getattr(self, "spotify", None)
         if controller is None:
             return None
+        guard = self._ensure_spotify_window_guard()
         helper = getattr(controller, "_desktop_helper", None)
         if callable(helper):
             desktop = getattr(controller, "_desktop_player", None)
@@ -7970,7 +7995,26 @@ class GameBeatsApp:
                     desktop = helper()
                 except Exception:
                     desktop = None
+            if desktop is not None:
+                try:
+                    install_targeted_transport(desktop, logger=self._log)
+                except Exception as ex:
+                    try:
+                        self._log(f"Could not install targeted Spotify transport: {ex}")
+                    except Exception:
+                        pass
+                if guard is not None:
+                    guard.install(desktop)
             return desktop
+        try:
+            install_targeted_transport(controller, logger=self._log)
+        except Exception as ex:
+            try:
+                self._log(f"Could not install targeted Spotify transport: {ex}")
+            except Exception:
+                pass
+        if guard is not None:
+            guard.install(controller)
         return controller
 
     def _spotify_source_available(self, source: str) -> bool:
@@ -8123,18 +8167,32 @@ class GameBeatsApp:
 
     def _wait_for_spotify_playback(
         self, playing: bool, timeout: float = 1.6, source: str = None,
-        allow_unknown: bool = False,
+        allow_unknown: bool = False, stable_samples: int = 2,
     ) -> bool:
-        """Wait briefly for one Spotify source to match the requested state."""
+        """Wait until one Spotify source *stably* matches the requested state.
+
+        A single quiet WASAPI sample must not prove a pause: quiet passages and
+        track transitions can dip below the threshold while music is still
+        playing.  Requiring consecutive matching samples prevents a false
+        "paused" state, and the same gate avoids declaring a slow resume.
+        """
         target_source = source
         if target_source is None:
             target_source = self._spotify_active_source()
+        if not target_source:
+            return False
+        need = max(1, int(stable_samples))
+        matched_samples = 0
         deadline = time.time() + max(0.0, float(timeout))
         while True:
             if self._spotify_source_matches(
                 target_source, playing, allow_unknown=allow_unknown
             ):
-                return True
+                matched_samples += 1
+                if matched_samples >= need:
+                    return True
+            else:
+                matched_samples = 0
             if time.time() >= deadline:
                 return False
             time.sleep(0.12)
@@ -8176,95 +8234,113 @@ class GameBeatsApp:
             return bool(state)
         return bool(getattr(self, "_is_playing", False))
 
+    def _get_spotify_command_lock(self):
+        """Lock shared by user and audio-monitor pause/resume commands."""
+        lock = getattr(self, "_spotify_command_lock_obj", None)
+        if lock is None:
+            lock = getattr(self, "_spotify_command_lock", None)
+            if lock is None or not hasattr(lock, "__enter__"):
+                lock = _SPOTIFY_COMMAND_FALLBACK_LOCK
+            self._spotify_command_lock_obj = lock
+        return lock
+
     def _send_spotify_pause_command(
         self, paused_by_game: bool = False, was_playing: bool = None
     ) -> bool:
         if not self.spotify:
             return False
-        source = self._spotify_active_source()
-        monitor_live = bool(getattr(self, "_audio_monitor_running", False))
+        with self._get_spotify_command_lock():
+            source = self._spotify_active_source()
+            if not source:
+                # Nothing safe to control.  Never report "paused" without a
+                # source: this was the path that left the UI drooped while
+                # Spotify kept playing.
+                try:
+                    self._log("Spotify pause skipped: no safe Spotify source.")
+                except Exception:
+                    pass
+                return False
 
-        def _mark_paused():
-            self._remember_spotify_playback_state(False)
-            self._remember_spotify_pause_claim(bool(paused_by_game))
-            self._paused_spotify_source = source or ""
+            def _mark_paused():
+                self._remember_spotify_playback_state(False)
+                self._remember_spotify_pause_claim(bool(paused_by_game))
+                self._paused_spotify_source = source
 
-        if not source:
-            # Nothing safe to control. Do not guess with a global media command.
-            _mark_paused()
-            return True
-
-        ok = self._send_spotify_source_command(
-            source, "pause", paused_by_game=paused_by_game
-        )
-
-        if monitor_live:
-            if self._wait_for_spotify_playback(
-                False, timeout=1.6, source=source, allow_unknown=ok
-            ):
-                _mark_paused()
-                return True
-            # One bounded retry on the same safe source for slow Electron UIs.
-            retry_ok = self._send_spotify_source_command(
+            ok = self._send_spotify_source_command(
                 source, "pause", paused_by_game=paused_by_game
             )
-            if retry_ok and self._wait_for_spotify_playback(
-                False, timeout=1.4, source=source, allow_unknown=retry_ok
+            if not ok:
+                # A failed/partial command can still mean Spotify was already
+                # silent.  Silence is safe to observe, but never toggle again.
+                if self._wait_for_spotify_playback(
+                    False, timeout=0.45, source=source,
+                    allow_unknown=False, stable_samples=3,
+                ):
+                    _mark_paused()
+                    return True
+                return False
+
+            # Confirm with sustained silence on the same source.  A single
+            # quiet sample or a track transition must not count as a pause.
+            # Deliberately no retry: if the first toggle actually landed but
+            # the meter was late, a second toggle would resume the music while
+            # the UI claimed it was paused.
+            if self._wait_for_spotify_playback(
+                False, timeout=2.0, source=source,
+                allow_unknown=False, stable_samples=3,
             ):
                 _mark_paused()
                 return True
             return False
-        if ok:
-            _mark_paused()
-        return ok
 
     def _send_spotify_resume_command(self) -> bool:
         if not self.spotify:
             return False
-        source = str(getattr(self, "_paused_spotify_source", "") or "")
-        if source and not self._spotify_source_available(source):
-            source = ""
-        if not source:
-            source = self._spotify_active_source()
-        monitor_live = bool(getattr(self, "_audio_monitor_running", False))
-        try:
-            _clear_spotify_mixer_mute()
-        except Exception:
-            pass
+        with self._get_spotify_command_lock():
+            source = str(getattr(self, "_paused_spotify_source", "") or "")
+            if source and not self._spotify_source_available(source):
+                source = ""
+            if not source:
+                source = self._spotify_active_source()
+            try:
+                _clear_spotify_mixer_mute()
+            except Exception:
+                pass
 
-        def _mark_playing():
-            self._remember_spotify_playback_state(True)
-            self._remember_spotify_pause_claim(False)
-            self._paused_spotify_source = ""
+            def _mark_playing():
+                self._remember_spotify_playback_state(True)
+                self._remember_spotify_pause_claim(False)
+                self._paused_spotify_source = ""
 
-        if source and not monitor_live and not self._spotify_source_available(source):
-            return False
-        if source and self._spotify_source_matches(source, True):
-            _mark_playing()
-            return True
-        if not source:
-            return False
+            if not source:
+                return False
 
-        ok = self._send_spotify_source_command(source, "play")
+            # The targeted command itself is idempotent: both browser and
+            # desktop controllers check the real playback state before
+            # toggling.  Do not add a pre-command audio wait here; that would
+            # make every resume slower and could mistake decaying pause tail
+            # audio for an already-playing source.
+            ok = self._send_spotify_source_command(source, "play")
+            if not ok:
+                # The command can fail after the audio has already started.
+                # Accept only real audio; do not toggle again.
+                if self._wait_for_spotify_playback(
+                    True, timeout=0.6, source=source,
+                    allow_unknown=False, stable_samples=2,
+                ):
+                    _mark_playing()
+                    return True
+                return False
 
-        if monitor_live:
+            # Same rule as pause: no blind retry.  If Spotify started playing
+            # but the meter is slow, a retry would pause it again.
             if self._wait_for_spotify_playback(
-                True, timeout=1.8, source=source, allow_unknown=ok
-            ):
-                _mark_playing()
-                return True
-            # The cached state can be stale.  Retry once, still only on the
-            # source that was actually paused.
-            retry_ok = self._send_spotify_source_command(source, "play")
-            if retry_ok and self._wait_for_spotify_playback(
-                True, timeout=1.6, source=source, allow_unknown=retry_ok
+                True, timeout=2.2, source=source,
+                allow_unknown=False, stable_samples=3,
             ):
                 _mark_playing()
                 return True
             return False
-        if ok:
-            _mark_playing()
-        return ok
 
     def _remember_spotify_pause_claim(self, paused: bool):
         """Keep core's game-pause claim in sync with a targeted command."""
@@ -9660,6 +9736,12 @@ class GameBeatsApp:
         if getattr(self, "_closing", False):
             return
         self._closing = True
+        try:
+            guard = getattr(self, "_spotify_window_guard", None)
+            if guard is not None:
+                guard.shutdown()
+        except Exception:
+            pass
         try:
             if self.detector:
                 self.detector.stop()

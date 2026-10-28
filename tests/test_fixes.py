@@ -478,9 +478,11 @@ class TestAppIntentionalPause(unittest.TestCase):
         app._remember_spotify_playback_state = MagicMock()
         app._remember_spotify_pause_claim = MagicMock()
 
-        self.assertTrue(app._send_spotify_pause_command())
+        self.assertFalse(app._send_spotify_pause_command())
         app.spotify._pause_player.assert_not_called()
         app._send_targeted_spotify_command.assert_not_called()
+        app._remember_spotify_playback_state.assert_not_called()
+        app._remember_spotify_pause_claim.assert_not_called()
 
     def test_browser_pause_targets_the_spotify_page(self):
         from ui.app import GameBeatsApp
@@ -632,8 +634,10 @@ class TestAppIntentionalPause(unittest.TestCase):
         app.spotify = MagicMock()
         app._paused_spotify_source = "browser"
         app._spotify_source_available = MagicMock(return_value=True)
-        app._spotify_source_matches = MagicMock(return_value=False)
         app._send_spotify_source_command = MagicMock(return_value=True)
+        app._wait_for_spotify_playback = MagicMock(return_value=True)
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
         app._audio_monitor_running = False
         self._bind_app_method(app, "_send_spotify_resume_command")
 
@@ -642,6 +646,7 @@ class TestAppIntentionalPause(unittest.TestCase):
         app._send_targeted_spotify_command.assert_not_called()
         app.spotify.play_playlist.assert_not_called()
         self.assertEqual(app._paused_spotify_source, "")
+        app._remember_spotify_playback_state.assert_called_once_with(True)
 
     def test_resume_never_replays_playlist_when_source_command_fails(self):
         from ui.app import GameBeatsApp
@@ -649,34 +654,59 @@ class TestAppIntentionalPause(unittest.TestCase):
         app.spotify = MagicMock()
         app._paused_spotify_source = "desktop"
         app._spotify_source_available = MagicMock(return_value=True)
-        app._spotify_source_matches = MagicMock(return_value=False)
         app._send_spotify_source_command = MagicMock(return_value=False)
+        app._wait_for_spotify_playback = MagicMock(return_value=False)
         app._audio_monitor_running = False
         app._current_playlist_uri = "spotify:playlist:current_123"
         app.spotify.play_playlist.return_value = True
         self._bind_app_method(app, "_send_spotify_resume_command")
 
         self.assertFalse(app._send_spotify_resume_command())
+        app._send_spotify_source_command.assert_called_once_with("desktop", "play")
         app._send_targeted_spotify_command.assert_not_called()
         app.spotify.play_playlist.assert_not_called()
+        self.assertEqual(app._paused_spotify_source, "desktop")
 
-    def test_resume_retries_only_the_same_source(self):
+    def test_resume_does_not_retry_an_unconfirmed_toggle(self):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)
         app.spotify = MagicMock()
         app._paused_spotify_source = "desktop"
         app._spotify_source_available = MagicMock(return_value=True)
-        app._spotify_source_matches = MagicMock(return_value=False)
         app._send_spotify_source_command = MagicMock(return_value=True)
-        app._wait_for_spotify_playback = MagicMock(side_effect=[False, True])
+        app._wait_for_spotify_playback = MagicMock(return_value=False)
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
         app._audio_monitor_running = True
         self._bind_app_method(app, "_send_spotify_resume_command")
 
+        self.assertFalse(app._send_spotify_resume_command())
+        # One command and one confirmation.  No second toggle.
+        app._send_spotify_source_command.assert_called_once_with("desktop", "play")
+        app._remember_spotify_playback_state.assert_not_called()
+        self.assertEqual(app._paused_spotify_source, "desktop")
+
+    def test_resume_confirms_with_audio_even_when_monitor_is_off(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app._paused_spotify_source = "desktop"
+        app._spotify_source_available = MagicMock(return_value=True)
+        app._send_spotify_source_command = MagicMock(return_value=True)
+        app._wait_for_spotify_playback = MagicMock(return_value=True)
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
+        app._audio_monitor_running = False
+        self._bind_app_method(app, "_send_spotify_resume_command")
+
         self.assertTrue(app._send_spotify_resume_command())
-        self.assertEqual(app._send_spotify_source_command.call_count, 2)
-        for call_args in app._send_spotify_source_command.call_args_list:
-            self.assertEqual(call_args.args, ("desktop", "play"))
-        self.assertEqual(app._paused_spotify_source, "")
+        app._send_spotify_source_command.assert_called_once_with("desktop", "play")
+        app._wait_for_spotify_playback.assert_called_once()
+        last_call = app._wait_for_spotify_playback.call_args
+        self.assertTrue(last_call.args[0])
+        self.assertEqual(last_call.kwargs["source"], "desktop")
+        self.assertFalse(last_call.kwargs["allow_unknown"])
+        app._remember_spotify_playback_state.assert_called_once_with(True)
 
     def test_pause_never_claims_success_while_audio_remains(self):
         from ui.app import GameBeatsApp
@@ -691,11 +721,110 @@ class TestAppIntentionalPause(unittest.TestCase):
         self._bind_app_method(app, "_send_spotify_pause_command")
 
         self.assertFalse(app._send_spotify_pause_command())
-        self.assertEqual(app._send_spotify_source_command.call_count, 2)
-        for call_args in app._send_spotify_source_command.call_args_list:
-            self.assertEqual(call_args.args, ("desktop", "pause"))
-            self.assertEqual(call_args.kwargs, {"paused_by_game": False})
+        # No blind retry: a second toggle could resume music after a late meter
+        # reading made the first, successful pause look unconfirmed.
+        app._send_spotify_source_command.assert_called_once_with(
+            "desktop", "pause", paused_by_game=False
+        )
         app._remember_spotify_playback_state.assert_not_called()
+        app._remember_spotify_pause_claim.assert_not_called()
+
+    def test_pause_with_no_safe_source_never_claims_paused(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app._spotify_active_source = MagicMock(return_value="")
+        app._send_spotify_source_command = MagicMock(return_value=True)
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
+        app._log = MagicMock()
+        self._bind_app_method(app, "_send_spotify_pause_command")
+
+        self.assertFalse(app._send_spotify_pause_command())
+        app._send_spotify_source_command.assert_not_called()
+        app._remember_spotify_playback_state.assert_not_called()
+        app._remember_spotify_pause_claim.assert_not_called()
+        self.assertEqual(getattr(app, "_paused_spotify_source", ""), "")
+
+    def test_pause_confirms_with_audio_even_when_monitor_is_off(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app._spotify_active_source = MagicMock(return_value="desktop")
+        app._send_spotify_source_command = MagicMock(return_value=True)
+        app._wait_for_spotify_playback = MagicMock(return_value=True)
+        app._audio_monitor_running = False
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
+        self._bind_app_method(app, "_send_spotify_pause_command")
+
+        self.assertTrue(app._send_spotify_pause_command())
+        app._send_spotify_source_command.assert_called_once_with(
+            "desktop", "pause", paused_by_game=False
+        )
+        app._wait_for_spotify_playback.assert_called_once()
+        call = app._wait_for_spotify_playback.call_args
+        self.assertFalse(call.args[0])
+        self.assertEqual(call.kwargs["source"], "desktop")
+        self.assertFalse(call.kwargs["allow_unknown"])
+        app._remember_spotify_playback_state.assert_called_once_with(False)
+
+    def test_pause_accepts_observed_silence_after_a_failed_command(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app._spotify_active_source = MagicMock(return_value="desktop")
+        app._send_spotify_source_command = MagicMock(return_value=False)
+        app._wait_for_spotify_playback = MagicMock(return_value=True)
+        app._remember_spotify_playback_state = MagicMock()
+        app._remember_spotify_pause_claim = MagicMock()
+        self._bind_app_method(app, "_send_spotify_pause_command")
+
+        self.assertTrue(app._send_spotify_pause_command())
+        app._send_spotify_source_command.assert_called_once()
+        app._wait_for_spotify_playback.assert_called_once()
+        app._remember_spotify_playback_state.assert_called_once_with(False)
+
+    def test_wait_for_playback_rejects_a_single_quiet_sample(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app._spotify_source_matches = MagicMock(
+            side_effect=[True] + [False] * 10
+        )
+        self._bind_app_method(app, "_wait_for_spotify_playback")
+
+        self.assertFalse(
+            app._wait_for_spotify_playback(
+                False, timeout=0.15, source="desktop", stable_samples=2
+            )
+        )
+        self.assertGreaterEqual(app._spotify_source_matches.call_count, 2)
+
+    def test_wait_for_playback_requires_consecutive_matches(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app._spotify_source_matches = MagicMock(
+            side_effect=[True, False, True, True]
+        )
+        self._bind_app_method(app, "_wait_for_spotify_playback")
+
+        self.assertTrue(
+            app._wait_for_spotify_playback(
+                True, timeout=1.0, source="desktop", stable_samples=2
+            )
+        )
+        self.assertEqual(app._spotify_source_matches.call_count, 4)
+
+    def test_wait_for_playback_without_a_source_fails_closed(self):
+        from ui.app import GameBeatsApp
+        app = MagicMock(spec=GameBeatsApp)
+        app._spotify_source_matches = MagicMock(return_value=True)
+        self._bind_app_method(app, "_wait_for_spotify_playback")
+
+        self.assertFalse(
+            app._wait_for_spotify_playback(False, timeout=0.1, source="")
+        )
+        app._spotify_source_matches.assert_not_called()
 
     def test_audio_playing_now_does_not_fall_back_to_union_meter(self):
         from ui.app import GameBeatsApp
