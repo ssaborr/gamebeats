@@ -822,6 +822,7 @@ class TestDesktopPuppyControls(unittest.TestCase):
         overlay._animation_locked = False
         overlay._on_toggle_play_pause = MagicMock()
         overlay._on_try_another = MagicMock()
+        overlay._on_next = MagicMock()
         overlay._get_playing = MagicMock(return_value=playing)
         overlay._save_pos = MagicMock()
         return overlay
@@ -842,6 +843,7 @@ class TestDesktopPuppyControls(unittest.TestCase):
 
         overlay._on_press(event)
         overlay._on_release(event)
+        overlay._fire_single_click()
 
         overlay._on_toggle_play_pause.assert_called_once_with()
         self.assertTrue(overlay._base_paused)
@@ -850,12 +852,30 @@ class TestDesktopPuppyControls(unittest.TestCase):
         self.assertFalse(overlay._active_reverse)
         self.assertEqual(overlay._idx, 0)
 
+    def test_double_click_skips_without_touching_the_pose(self):
+        overlay = self._make_overlay(playing=True)
+        event = self._event()
+
+        overlay._on_press(event)
+        overlay._on_release(event)
+        overlay._on_press(event)
+
+        overlay._on_next.assert_called_once_with()
+        overlay._on_toggle_play_pause.assert_not_called()
+        self.assertEqual(overlay._state, "idle")
+
+        # The second release is swallowed; no deferred toggle sneaks through.
+        overlay._on_release(event)
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_next.assert_called_once_with()
+
     def test_refused_toggle_leaves_the_pose_alone(self):
         overlay = self._make_overlay(playing=True)
         overlay._on_toggle_play_pause.return_value = False
 
         overlay._on_press(self._event())
         overlay._on_release(self._event())
+        overlay._fire_single_click()
 
         overlay._on_toggle_play_pause.assert_called_once_with()
         self.assertEqual(overlay._state, "idle")
@@ -866,6 +886,7 @@ class TestDesktopPuppyControls(unittest.TestCase):
 
         overlay._on_press(self._event())
         overlay._on_release(self._event())
+        overlay._fire_single_click()
 
         overlay._on_toggle_play_pause.assert_called_once_with()
         self.assertFalse(overlay._base_paused)
@@ -1149,6 +1170,7 @@ class TestDesktopPuppyControls(unittest.TestCase):
         overlay = self._make_overlay(playing=False)
         overlay._on_press(self._event())
         overlay._on_release(self._event())
+        overlay._fire_single_click()
         self.assertTrue(overlay._active_reverse)
         started = overlay._state_started
 

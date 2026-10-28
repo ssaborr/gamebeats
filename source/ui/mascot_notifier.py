@@ -78,6 +78,23 @@ PUPPY_THINKING_ANIMATION_INTERVAL = 60
 # Short presses toggle playback; holding a little longer asks for another mix.
 PUPPY_LONG_CLICK_MS = 650
 PUPPY_CLICK_MOVE_TOLERANCE = 7
+
+
+def _system_double_click_ms():
+    """Match Windows' double-click window so a slow double still counts."""
+    if IS_WINDOWS:
+        try:
+            return max(200, min(1000, int(_user32.GetDoubleClickTime())))
+        except Exception:
+            pass
+    return 500
+
+
+PUPPY_DOUBLE_CLICK_MS = _system_double_click_ms()
+# A lone short click is committed just after the double-click window closes.
+# The small buffer guarantees a second press is seen while the first click is
+# still pending, so a double-click can cancel the play/pause toggle entirely.
+PUPPY_SINGLE_CLICK_DELAY_MS = PUPPY_DOUBLE_CLICK_MS + 60
 # Re-asserting topmost restacks the layered window; doing that on every audio
 # meter tick visibly hitched the animation.  Twice per second is plenty to stay
 # above a fullscreen game, so re-assert on a much slower cadence instead.
@@ -223,6 +240,7 @@ class PuppySingingOverlay:
         anchor_getter=None,
         on_toggle_play_pause=None,
         on_try_another=None,
+        on_next=None,
         get_playing=None,
     ):
         self._root = root
@@ -230,6 +248,7 @@ class PuppySingingOverlay:
         self._anchor_getter = anchor_getter
         self._on_toggle_play_pause = on_toggle_play_pause
         self._on_try_another = on_try_another
+        self._on_next = on_next
         self._get_playing = get_playing
         self._win = None
         self._label = None
@@ -273,6 +292,10 @@ class PuppySingingOverlay:
         self._long_job = None
         self._press_root = (0, 0)
         self._drag_origin = (0, 0)
+        # A short click is held briefly so a second press can turn it into a
+        # next-track double-click without also sending play/pause first.
+        self._click_job = None
+        self._click_pending_ts = 0.0
         root.after(0, self._build)
 
     def _load_pos(self):
@@ -648,7 +671,75 @@ class PuppySingingOverlay:
                 pass
         self._long_job = None
 
+    def _cancel_click_job(self):
+        job = getattr(self, "_click_job", None)
+        if job is not None and self._win is not None:
+            try:
+                self._win.after_cancel(job)
+            except Exception:
+                pass
+        self._click_job = None
+        self._click_pending_ts = 0.0
+
+    def _schedule_single_click(self):
+        """Defer play/pause briefly so a second press can become next-track."""
+        self._cancel_click_job()
+        self._click_pending_ts = time.monotonic()
+        if self._win is None:
+            self._fire_single_click()
+            return
+        try:
+            self._click_job = self._win.after(
+                PUPPY_SINGLE_CLICK_DELAY_MS, self._fire_single_click
+            )
+        except Exception:
+            self._click_job = None
+            self._fire_single_click()
+
+    def _fire_single_click(self):
+        self._click_job = None
+        self._click_pending_ts = 0.0
+        self._handle_click()
+
+    def _pending_click_is_double(self):
+        if getattr(self, "_click_job", None) is None:
+            return False
+        elapsed_ms = max(
+            0.0, time.monotonic() - getattr(self, "_click_pending_ts", 0.0)
+        ) * 1000.0
+        return elapsed_ms <= PUPPY_DOUBLE_CLICK_MS
+
+    def _consume_double_click(self):
+        """Second short press: run next-track and swallow the whole gesture."""
+        self._cancel_click_job()
+        self._cancel_long_job()
+        self._press_active = False
+        self._press_ctrl = False
+        self._press_moved = False
+        self._long_fired = False
+        if self._label is not None:
+            try:
+                self._label.configure(cursor="hand2")
+            except Exception:
+                pass
+        if callable(getattr(self, "_on_next", None)):
+            try:
+                self._on_next()
+            except Exception:
+                pass
+
     def _on_press(self, event):
+        # The second press of a short-click pair skips the track.  The prior
+        # click is still pending, so cancel it; otherwise the first click would
+        # pause the music before the skip.
+        if self._pending_click_is_double():
+            self._consume_double_click()
+            return
+        # A press that arrives after the double-click window is a new single
+        # click.  Commit the previous click now instead of dropping it.
+        if getattr(self, "_click_job", None) is not None:
+            self._cancel_click_job()
+            self._handle_click()
         self._cancel_long_job()
         self._press_active = True
         self._press_ctrl = bool(int(getattr(event, "state", 0) or 0) & 0x0004)
@@ -735,7 +826,7 @@ class PuppySingingOverlay:
             except Exception:
                 pass
         if not ctrl and not moved and not long_fired:
-            self._handle_click()
+            self._schedule_single_click()
 
     def _fire_long_click(self):
         self._long_job = None
@@ -951,6 +1042,7 @@ class PuppySingingOverlay:
         self._visible = False
         self._cancel_anim()
         self._cancel_long_job()
+        self._cancel_click_job()
         self._press_active = False
         if immediate or self._win is None:
             self._cancel_fade()

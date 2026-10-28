@@ -1232,6 +1232,7 @@ class GameBeatsApp:
             corner="bottom-left",
             on_toggle_play_pause=self._puppy_overlay_toggle,
             on_try_another=self._puppy_overlay_try_another,
+            on_next=self._puppy_overlay_next,
             get_playing=self._puppy_overlay_playing,
         )
         self._build_ui()
@@ -5282,6 +5283,18 @@ class GameBeatsApp:
         except OSError:
             pass
 
+        if threading.current_thread() is not threading.main_thread():
+            # Tk is not thread-safe.  Background workers call _log constantly;
+            # touching status_log_lbl here used to abort the worker with
+            # "main thread is not in main loop".
+            try:
+                self.root.after(0, lambda m=msg: self._update_status_log(m))
+            except Exception:
+                pass
+            return
+        self._update_status_log(msg)
+
+    def _update_status_log(self, msg):
         # Filter out technical noise and debug info from the UI label
         msg_s = str(msg)
         clean_msg = self._ui_log_message(msg_s)
@@ -8734,12 +8747,28 @@ class GameBeatsApp:
                 daemon=True,
             ).start()
 
+    def _spotify_media_target(self):
+        """Return the controller that owns the currently audible Spotify source.
+
+        The web controller can be silent while the desktop client is the only
+        source making sound.  Sending skip commands to the hidden browser in
+        that case updates a player nobody hears, while the puppy shows a skip
+        that never happened.  Fail closed instead of guessing.
+        """
+        source = self._spotify_active_source()
+        if source == "desktop":
+            return self._spotify_desktop_controller()
+        return getattr(self, "spotify", None)
+
     def _media_next(self, watch_playback=False, request_id=None):
         try:
-            if hasattr(self.spotify, "media_next"):
-                self.spotify.media_next()
-            elif hasattr(self.spotify, "next_track"):
-                self.spotify.next_track()
+            target = self._spotify_media_target()
+            if target is None:
+                return
+            if hasattr(target, "media_next"):
+                target.media_next()
+            elif hasattr(target, "next_track"):
+                target.next_track()
         except Exception as ex:
             self.root.after(0, lambda e=ex: self._log(f"Next track error: {e}"))
             return
@@ -8765,7 +8794,13 @@ class GameBeatsApp:
 
     def _media_prev(self, watch_playback=False, request_id=None):
         try:
-            self.spotify.media_prev()
+            target = self._spotify_media_target()
+            if target is None:
+                return
+            if hasattr(target, "media_prev"):
+                target.media_prev()
+            elif hasattr(target, "prev_track"):
+                target.prev_track()
         except Exception as ex:
             self.root.after(0, lambda e=ex: self._log(f"Previous track error: {e}"))
             return
@@ -8818,6 +8853,23 @@ class GameBeatsApp:
         if self.spotify:
             threading.Thread(target=self._fetch_track, daemon=True).start()
 
+    def _spotify_track_controller(self):
+        """Read metadata from the same source that is producing the audio."""
+        source = ""
+        try:
+            source = self._spotify_active_source()
+        except Exception:
+            pass
+        if not source and self.spotify is not None:
+            source = str(
+                getattr(self.spotify, "_last_audio_source", "") or ""
+            )
+        if source == "desktop":
+            desktop = self._spotify_desktop_controller()
+            if desktop is not None:
+                return desktop
+        return self.spotify
+
     def _fetch_track(self):
         if not self.spotify:
             return
@@ -8825,7 +8877,8 @@ class GameBeatsApp:
             return
         self._track_fetch_busy = True
         try:
-            track = self.spotify.get_current_track()
+            controller = self._spotify_track_controller() or self.spotify
+            track = controller.get_current_track()
             if track:
                 self.root.after(0, lambda: self._update_np(track))
             else:
@@ -9641,6 +9694,10 @@ class GameBeatsApp:
 
     def _puppy_overlay_try_another(self):
         self._try_another_playlist()
+
+    def _puppy_overlay_next(self):
+        """Double-click on the desktop puppy skips to the next track."""
+        self._next()
 
     # ── OVERLAY CONTROL CALLBACKS ─────────────────────────────────────────────
 

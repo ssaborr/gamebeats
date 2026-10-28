@@ -887,6 +887,10 @@ class TestAppIntentionalPause(unittest.TestCase):
         from ui.app import GameBeatsApp
         app = MagicMock(spec=GameBeatsApp)
         app._fetch_track = GameBeatsApp._fetch_track.__get__(app, GameBeatsApp)
+        app._spotify_track_controller = (
+            GameBeatsApp._spotify_track_controller.__get__(app, GameBeatsApp)
+        )
+        app._spotify_active_source = MagicMock(return_value="browser")
         app.spotify = MagicMock()
         app.spotify.get_current_track.return_value = None
         app._intentional_pause_active = MagicMock(return_value=True)
@@ -2620,6 +2624,267 @@ class TestOverlayToggle(unittest.TestCase):
         overlay._query_playing = MagicMock(return_value=False)
         overlay._toggle_play_pause()
         overlay._play.assert_called_once()
+
+
+class TestSpotifySourceSkip(unittest.TestCase):
+    def _app(self, source, desktop):
+        from ui.app import GameBeatsApp
+
+        app = MagicMock(spec=GameBeatsApp)
+        app.spotify = MagicMock()
+        app.root = MagicMock()
+        app._log = MagicMock()
+        app._confirm_skip_playback = MagicMock()
+        app._spotify_active_source = MagicMock(return_value=source)
+        app._spotify_desktop_controller = MagicMock(return_value=desktop)
+        app._spotify_media_target = GameBeatsApp._spotify_media_target.__get__(
+            app, GameBeatsApp
+        )
+        app._spotify_track_controller = (
+            GameBeatsApp._spotify_track_controller.__get__(app, GameBeatsApp)
+        )
+        app._media_next = GameBeatsApp._media_next.__get__(app, GameBeatsApp)
+        app._media_prev = GameBeatsApp._media_prev.__get__(app, GameBeatsApp)
+        app._fetch_track = GameBeatsApp._fetch_track.__get__(app, GameBeatsApp)
+        app._track_fetch_busy = False
+        app._update_np = MagicMock()
+        app._mark_music_missing = MagicMock()
+        app._intentional_pause_active = MagicMock(return_value=False)
+        return app
+
+    def test_next_targets_the_desktop_source_when_it_owns_the_audio(self):
+        desktop = MagicMock()
+        desktop.media_next = MagicMock(return_value=True)
+        app = self._app("desktop", desktop)
+
+        app._media_next(False, None)
+
+        desktop.media_next.assert_called_once_with()
+        app.spotify.media_next.assert_not_called()
+
+    def test_previous_targets_the_desktop_source_when_it_owns_the_audio(self):
+        desktop = MagicMock()
+        desktop.media_prev = MagicMock(return_value=True)
+        app = self._app("desktop", desktop)
+
+        app._media_prev(False, None)
+
+        desktop.media_prev.assert_called_once_with()
+        app.spotify.media_prev.assert_not_called()
+
+    def test_next_uses_the_browser_controller_for_browser_audio(self):
+        desktop = MagicMock()
+        app = self._app("browser", desktop)
+
+        app._media_next(False, None)
+
+        app.spotify.media_next.assert_called_once_with()
+        desktop.media_next.assert_not_called()
+
+    def test_next_fails_closed_when_desktop_source_has_no_controller(self):
+        app = self._app("desktop", None)
+
+        app._media_next(False, None)
+
+        app.spotify.media_next.assert_not_called()
+
+    def test_track_refresh_reads_desktop_when_it_owns_the_audio(self):
+        desktop = MagicMock()
+        desktop.get_current_track.return_value = {
+            "name": "Desktop Song",
+            "artist": "Desktop Artist",
+            "uri": "spotify:track:desktop",
+        }
+        app = self._app("desktop", desktop)
+
+        app._fetch_track()
+
+        desktop.get_current_track.assert_called_once_with()
+        app.spotify.get_current_track.assert_not_called()
+        callback = app.root.after.call_args.args[1]
+        callback()
+        app._update_np.assert_called_once_with(desktop.get_current_track.return_value)
+
+    def test_track_refresh_reads_browser_when_it_owns_the_audio(self):
+        desktop = MagicMock()
+        app = self._app("browser", desktop)
+
+        app._fetch_track()
+
+        app.spotify.get_current_track.assert_called_once_with()
+        desktop.get_current_track.assert_not_called()
+
+    def test_track_refresh_uses_the_last_source_when_the_meter_is_quiet(self):
+        desktop = MagicMock()
+        desktop.get_current_track.return_value = {"name": "Desktop Song"}
+        app = self._app("", desktop)
+        app.spotify._last_audio_source = "desktop"
+
+        app._fetch_track()
+
+        desktop.get_current_track.assert_called_once_with()
+        app.spotify.get_current_track.assert_not_called()
+
+
+class TestThreadSafeLogging(unittest.TestCase):
+    def test_worker_log_marshals_the_widget_update_to_the_main_thread(self):
+        import threading
+
+        from ui.app import GameBeatsApp
+
+        app = MagicMock(spec=GameBeatsApp)
+        app._log = GameBeatsApp._log.__get__(app, GameBeatsApp)
+        app._update_status_log = MagicMock()
+        app.root = MagicMock()
+
+        with patch("builtins.open", MagicMock()):
+            worker = threading.Thread(target=app._log, args=("worker message",))
+            worker.start()
+            worker.join(timeout=2.0)
+
+        app.root.after.assert_called_once()
+        delay, callback = app.root.after.call_args.args
+        self.assertEqual(delay, 0)
+        app._update_status_log.assert_not_called()
+        callback()
+        app._update_status_log.assert_called_once_with("worker message")
+
+    def test_main_thread_log_updates_directly(self):
+        from ui.app import GameBeatsApp
+
+        app = MagicMock(spec=GameBeatsApp)
+        app._log = GameBeatsApp._log.__get__(app, GameBeatsApp)
+        app._update_status_log = MagicMock()
+        app.root = MagicMock()
+
+        with patch("builtins.open", MagicMock()):
+            app._log("main message")
+
+        app._update_status_log.assert_called_once_with("main message")
+        app.root.after.assert_not_called()
+
+
+class TestPuppyOverlayGestures(unittest.TestCase):
+    def _overlay(self, *, playing=True):
+        from ui.mascot_notifier import PuppySingingOverlay
+
+        overlay = PuppySingingOverlay.__new__(PuppySingingOverlay)
+        overlay._win = MagicMock()
+        overlay._label = MagicMock()
+        overlay._visible = True
+        overlay._state = "idle"
+        overlay._base_paused = not playing
+        overlay._animation_locked = False
+        overlay._active_hold = False
+        overlay._active_reverse = False
+        overlay._on_toggle_play_pause = MagicMock(return_value=True)
+        overlay._on_try_another = MagicMock()
+        overlay._on_next = MagicMock()
+        overlay._get_playing = MagicMock(return_value=playing)
+        overlay._press_active = False
+        overlay._press_ctrl = False
+        overlay._press_moved = False
+        overlay._long_fired = False
+        overlay._long_job = None
+        overlay._click_job = None
+        overlay._click_pending_ts = 0.0
+        overlay._press_root = (0, 0)
+        overlay._drag_origin = (0, 0)
+        overlay._custom_pos = None
+        overlay._dragged = False
+        return overlay
+
+    def _press(self, overlay, *, x=100, y=100, state=0):
+        event = MagicMock()
+        event.x_root = x
+        event.y_root = y
+        event.x = 20
+        event.y = 20
+        event.state = state
+        overlay._on_press(event)
+
+    def _release(self, overlay):
+        overlay._on_release(MagicMock())
+
+    def test_single_click_waits_out_the_double_click_window(self):
+        overlay = self._overlay()
+
+        self._press(overlay)
+        self._release(overlay)
+
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_next.assert_not_called()
+        self.assertIsNotNone(overlay._click_job)
+
+        overlay._fire_single_click()
+        overlay._on_toggle_play_pause.assert_called_once_with()
+        overlay._on_next.assert_not_called()
+
+    def test_double_click_skips_without_a_play_pause_toggle(self):
+        overlay = self._overlay()
+
+        self._press(overlay)
+        self._release(overlay)
+        self._press(overlay)
+
+        overlay._on_next.assert_called_once_with()
+        overlay._on_toggle_play_pause.assert_not_called()
+        self.assertIsNone(overlay._click_job)
+        self.assertFalse(overlay._press_active)
+
+        # The second release belongs to the consumed double-click gesture.
+        self._release(overlay)
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_next.assert_called_once_with()
+
+    def test_slow_second_click_commits_the_first_click(self):
+        overlay = self._overlay()
+        self._press(overlay)
+        self._release(overlay)
+        overlay._click_pending_ts -= 1.0
+
+        self._press(overlay)
+
+        overlay._on_toggle_play_pause.assert_called_once_with()
+        overlay._on_next.assert_not_called()
+        self.assertTrue(overlay._press_active)
+
+    def test_long_press_asks_for_another_playlist_without_toggling(self):
+        overlay = self._overlay()
+
+        self._press(overlay)
+        overlay._fire_long_click()
+        self._release(overlay)
+
+        overlay._on_try_another.assert_called_once_with()
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_next.assert_not_called()
+        self.assertIsNone(overlay._click_job)
+
+    def test_ctrl_drag_does_not_toggle_or_skip(self):
+        overlay = self._overlay()
+        overlay._win.winfo_x.return_value = 10
+        overlay._win.winfo_y.return_value = 20
+
+        self._press(overlay, state=0x0004)
+        motion = MagicMock()
+        motion.x_root = 140
+        motion.y_root = 150
+        motion.state = 0x0004
+        overlay._on_motion(motion)
+        self._release(overlay)
+
+        overlay._on_toggle_play_pause.assert_not_called()
+        overlay._on_next.assert_not_called()
+        self.assertTrue(overlay._dragged)
+
+    def test_app_double_click_callback_uses_the_next_track_path(self):
+        from ui.app import GameBeatsApp
+
+        app = MagicMock(spec=GameBeatsApp)
+        app._next = MagicMock()
+        GameBeatsApp._puppy_overlay_next.__get__(app, GameBeatsApp)()
+        app._next.assert_called_once_with()
 
 
 class TestOtherAudioDetection(unittest.TestCase):
