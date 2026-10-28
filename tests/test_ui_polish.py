@@ -153,7 +153,7 @@ class TestToplineVisibility(unittest.TestCase):
             fill="x", before=app.content
         )
 
-    def test_nav_uses_den_visibility_rule(self):
+    def test_nav_keeps_the_breadcrumb_strip_mounted(self):
         app = GameBeatsApp.__new__(GameBeatsApp)
         app._page_main = MagicMock()
         app._page_playlists = None
@@ -171,66 +171,70 @@ class TestToplineVisibility(unittest.TestCase):
 
         GameBeatsApp._nav(app, "main")
 
-        app._set_topline_visible.assert_called_once_with(False)
+        # The content viewport must not change height between tabs, otherwise
+        # the whole page strip lays itself out again on every switch.
+        app._set_topline_visible.assert_called_once_with(True)
 
 
-class TestPageTransition(unittest.TestCase):
-    def _app(self, reduce_motion):
+class TestPageStrip(unittest.TestCase):
+    def _app(self):
         app = GameBeatsApp.__new__(GameBeatsApp)
         app.root = MagicMock()
         app.content = MagicMock()
         app.content.winfo_width.return_value = 1000
-        app._page_transition_job = None
-        app._reduce_motion_enabled = MagicMock(return_value=reduce_motion)
+        app.content.winfo_height.return_value = 700
+        app._page_strip = MagicMock()
+        app._page_strip_width = 1000
+        app._page_strip_height = 700
+        app._page_widgets = (MagicMock(), MagicMock(), MagicMock())
+        app._page_names = ("main", "games", "settings")
+        app._active_page_widget = app._page_widgets[0]
+        app._current_page = "main"
         return app
 
-    def test_reduce_motion_shows_the_page_immediately(self):
-        app = self._app(True)
-        target = MagicMock()
-        previous = MagicMock()
+    def test_pages_are_laid_out_side_by_side(self):
+        app = self._app()
+        app._page_strip_width = 0
 
-        GameBeatsApp._show_page(app, target, previous)
+        GameBeatsApp._layout_page_strip(app, force=True)
 
-        target.place.assert_called_once_with(
-            x=0, y=0, relwidth=1, relheight=1
+        app._page_strip.place.assert_called_once_with(
+            relx=0, y=0, relwidth=3, relheight=1.0
         )
-        previous.place_forget.assert_called_once_with()
-        app.root.after.assert_not_called()
-
-    def test_normal_switch_slides_the_new_page_in(self):
-        app = self._app(False)
-        target = MagicMock()
-        previous = MagicMock()
-        app.root.after.return_value = "transition-job"
-
-        GameBeatsApp._show_page(app, target, previous)
-
-        target.place.assert_called_once_with(
-            x=18, y=0, relwidth=1, relheight=1
+        expected = (
+            (0.0, 1.0 / 3.0),
+            (1.0 / 3.0, 1.0 / 3.0),
+            (2.0 / 3.0, 1.0 / 3.0),
         )
-        target.lift.assert_called_once_with()
-        app.root.after.assert_called_once()
-        self.assertEqual(app._page_transition_target, target)
-        self.assertEqual(app._page_transition_previous, previous)
+        for page, (relx, relwidth) in zip(app._page_widgets, expected):
+            kwargs = page.place.call_args.kwargs
+            self.assertAlmostEqual(kwargs["relx"], relx)
+            self.assertAlmostEqual(kwargs["relwidth"], relwidth)
+            self.assertEqual(kwargs["y"], 0)
+            self.assertEqual(kwargs["relheight"], 1.0)
 
-    def test_transition_finishes_at_rest_and_hides_the_old_page(self):
-        app = self._app(False)
-        target = MagicMock()
-        previous = MagicMock()
-        app._page_transition_target = target
-        app._page_transition_previous = previous
-        app._page_transition_offset = 18
-        app._page_transition_step = 5
-        app._page_transition_steps = 6
+    def test_show_page_moves_the_strip_without_unmapping_pages(self):
+        app = self._app()
+        target = app._page_widgets[2]
 
-        GameBeatsApp._step_page_transition(app)
+        GameBeatsApp._show_page(app, target)
 
-        target.place.assert_called_once_with(
-            x=0, y=0, relwidth=1, relheight=1
+        app._page_strip.place.assert_called_with(
+            relx=-2, y=0, relwidth=3, relheight=1.0
         )
-        previous.place_forget.assert_called_once_with()
-        self.assertIsNone(app._page_transition_target)
-        self.assertIsNone(app._page_transition_previous)
+        for page in app._page_widgets:
+            page.place_forget.assert_not_called()
+        app.root.update_idletasks.assert_called_once_with()
+        app.root.update.assert_called_once_with()
+
+    def test_nav_ignores_clicks_while_a_strip_move_is_in_progress(self):
+        app = self._app()
+        app._nav_busy = True
+        app._nav_impl = MagicMock()
+
+        GameBeatsApp._nav(app, "games")
+
+        app._nav_impl.assert_not_called()
 
 
 if __name__ == "__main__":

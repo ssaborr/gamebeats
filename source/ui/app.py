@@ -2445,20 +2445,24 @@ class GameBeatsApp:
         self._ui_scale = 1.0
 
     def _nav(self, page):
+        # A strip move deliberately drains the event loop to finish painting
+        # before it returns.  Ignore clicks that arrive during that short
+        # window instead of recursively switching pages.
+        if getattr(self, "_nav_busy", False):
+            return
+        self._nav_busy = True
+        try:
+            self._nav_impl(page)
+        finally:
+            self._nav_busy = False
+
+    def _nav_impl(self, page):
         if page == "overlay":
             self._show_control_overlay()
             return
 
         previous = getattr(self, "_active_page_widget", None)
         self._current_page = page
-        frames = [
-            getattr(self, "_page_main", None),
-            getattr(self, "_page_playlists", None),
-            getattr(self, "_page_games", None),
-            getattr(self, "_page_blocked", None),
-            getattr(self, "_page_settings", None),
-            getattr(self, "_page_faq", None),
-        ]
 
         page_map = {
             "main": getattr(self, "_page_main", None),
@@ -2473,18 +2477,10 @@ class GameBeatsApp:
         # The den uses the full height of the content area.  Every other page
         # keeps the breadcrumb / clock strip so the room label does not feel
         # disconnected from the rest of the app.
-        self._set_topline_visible(page != "main")
-
-        for frame in frames:
-            if frame is None or frame is target:
-                continue
-            try:
-                frame.place_forget()
-            except Exception:
-                try:
-                    frame.pack_forget()
-                except Exception:
-                    pass
+        # Keep the breadcrumb strip mounted so the content viewport has a
+        # fixed height.  Resizing it on every main-page visit would force the
+        # whole carousel to lay itself out again and defeat the point.
+        self._set_topline_visible(True)
 
         if target is not None:
             self._show_page(target, previous)
@@ -2522,99 +2518,29 @@ class GameBeatsApp:
         except Exception:
             pass
 
-    def _cancel_page_transition(self):
-        job = getattr(self, "_page_transition_job", None)
-        if job is not None:
-            try:
-                self.root.after_cancel(job)
-            except Exception:
-                pass
-        self._page_transition_job = None
-
     def _show_page(self, target, previous=None):
-        """Reveal a page with a short slide-in, or instantly if motion is off."""
-        self._cancel_page_transition()
+        """Move the page strip to the requested page.
+
+        The pages are kept mapped side by side so Tk never has to lay out or
+        paint a page for the first time while the user is looking at it.
+        """
         if target is None:
             return
-
-        if target is previous:
-            try:
-                target.place(x=0, y=0, relwidth=1, relheight=1)
-            except Exception:
-                pass
-            return
-
-        if previous is None or self._reduce_motion_enabled():
-            try:
-                target.place(x=0, y=0, relwidth=1, relheight=1)
-                target.lift()
-            except Exception:
-                pass
-            if previous is not None:
-                try:
-                    previous.place_forget()
-                except Exception:
-                    pass
-            return
-
+        self._layout_page_strip()
+        index = self._page_index_for_widget(target)
+        count = max(1, len(self._page_widgets))
         try:
-            self.content.update_idletasks()
-            width = max(1, int(self.content.winfo_width()))
-        except Exception:
-            width = WIN_W
-        offset = max(8, min(24, int(width * 0.018)))
-        self._page_transition_target = target
-        self._page_transition_previous = previous
-        self._page_transition_offset = offset
-        self._page_transition_step = 0
-        self._page_transition_steps = 6
-        try:
-            target.place(x=offset, y=0, relwidth=1, relheight=1)
-            target.lift()
-            self._page_transition_job = self.root.after(
-                14, self._step_page_transition
+            self._page_strip.place(
+                relx=-index, y=0,
+                relwidth=count, relheight=1.0,
             )
+            # Force the newly exposed strip slice to finish painting before
+            # we return to the event loop.  Otherwise Windows leaves pieces
+            # of the previous page behind while the strip slides across.
+            self.root.update_idletasks()
+            self.root.update()
         except Exception:
-            try:
-                target.place(x=0, y=0, relwidth=1, relheight=1)
-            except Exception:
-                pass
-
-    def _step_page_transition(self):
-        self._page_transition_job = None
-        target = getattr(self, "_page_transition_target", None)
-        if target is None:
-            return
-        step = int(getattr(self, "_page_transition_step", 0)) + 1
-        total = max(1, int(getattr(self, "_page_transition_steps", 6)))
-        self._page_transition_step = step
-        if step >= total:
-            try:
-                target.place(x=0, y=0, relwidth=1, relheight=1)
-            except Exception:
-                pass
-            previous = getattr(self, "_page_transition_previous", None)
-            if previous is not None and previous is not target:
-                try:
-                    previous.place_forget()
-                except Exception:
-                    pass
-            self._page_transition_target = None
-            self._page_transition_previous = None
-            return
-        remaining = (1.0 - (step / float(total))) ** 2
-        offset = int(getattr(self, "_page_transition_offset", 12) * remaining)
-        try:
-            target.place(x=max(0, offset), y=0, relwidth=1, relheight=1)
-            target.lift()
-            self._page_transition_job = self.root.after(
-                14, self._step_page_transition
-            )
-        except Exception:
-            try:
-                target.place(x=0, y=0, relwidth=1, relheight=1)
-            except Exception:
-                pass
+            pass
 
     def _make_footer_button_clickable(self, button):
         """Give every part of a footer button the hand cursor.
@@ -2686,7 +2612,10 @@ class GameBeatsApp:
             pass
 
     def _new_page(self):
-        page = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
+        page = ctk.CTkFrame(
+            getattr(self, "_page_strip", self.content),
+            fg_color=BG, corner_radius=0,
+        )
         if getattr(self, "_room_dim_photo", None) is not None:
             try:
                 bg = tk.Label(
@@ -2699,18 +2628,96 @@ class GameBeatsApp:
                 pass
         return page
 
+    def _page_index_for_widget(self, widget):
+        try:
+            return self._page_widgets.index(widget)
+        except (AttributeError, ValueError):
+            return 0
+
+    def _page_index_for_name(self, name):
+        try:
+            return self._page_names.index(name)
+        except (AttributeError, ValueError):
+            return 0
+
+    def _on_content_configure(self, _event=None):
+        self._layout_page_strip()
+
+    def _layout_page_strip(self, force=False):
+        """Lay every page out side by side inside the content viewport."""
+        strip = getattr(self, "_page_strip", None)
+        if strip is None:
+            return
+        try:
+            width = max(1, int(self.content.winfo_width()))
+            height = max(1, int(self.content.winfo_height()))
+        except Exception:
+            return
+        if not force and (width, height) == (
+            self._page_strip_width, self._page_strip_height
+        ):
+            return
+        self._page_strip_width = width
+        self._page_strip_height = height
+        pages = self._page_widgets
+        index = self._page_index_for_widget(
+            getattr(self, "_active_page_widget", None)
+        )
+        if getattr(self, "_active_page_widget", None) is None:
+            index = self._page_index_for_name(
+                getattr(self, "_current_page", "main")
+            )
+        try:
+            count = max(1, len(pages))
+            strip.place(
+                relx=-index, y=0,
+                relwidth=count, relheight=1.0,
+            )
+            for pos, page in enumerate(pages):
+                page.place(
+                    relx=pos / count, y=0,
+                    relwidth=1.0 / count, relheight=1.0,
+                )
+        except Exception:
+            pass
+
     def _make_page_body(self, page, padx=26, pady=(14, 8)):
         body = ctk.CTkFrame(page, fg_color=BG, corner_radius=0)
         body.pack(fill=tk.BOTH, expand=True, padx=padx, pady=pady)
         return body
 
     def _build_pages(self):
-        self._page_main = ctk.CTkFrame(self.content, fg_color=BG, corner_radius=0)
+        # Every page lives in one wide strip.  The strip is shifted sideways
+        # instead of unmapping/remapping pages; widgets therefore stay laid
+        # out and painted, and a tab switch is a single window move rather
+        # than a half-second of widgets appearing one at a time.
+        self._page_strip = ctk.CTkFrame(
+            self.content, fg_color=BG, corner_radius=0,
+        )
+        self._page_strip_width = 0
+        self._page_strip_height = 0
+        self._page_main = ctk.CTkFrame(
+            self._page_strip, fg_color=BG, corner_radius=0,
+        )
         self._page_playlists = self._new_page()
         self._page_games = self._new_page()
         self._page_blocked = self._new_page()
         self._page_settings = self._new_page()
         self._page_faq = self._new_page()
+        self._page_widgets = (
+            self._page_main,
+            self._page_playlists,
+            self._page_games,
+            self._page_blocked,
+            self._page_settings,
+            self._page_faq,
+        )
+        self._page_names = (
+            "main", "playlists", "games", "blocked", "settings", "faq",
+        )
+        self.content.bind(
+            "<Configure>", self._on_content_configure, add="+",
+        )
 
         for build in (
             self._build_main_page,
@@ -2729,11 +2736,7 @@ class GameBeatsApp:
                     pass
 
         self._active_page_widget = None
-        self._page_transition_job = None
-        self._page_transition_target = None
-        self._page_transition_previous = None
-        self._page_transition_step = 0
-        self._page_transition_steps = 6
+        self._layout_page_strip(force=True)
         self._nav("main")
 
     def _card(self, parent, pady=0):
@@ -4782,7 +4785,8 @@ class GameBeatsApp:
         self.pl_add_btn.pack(side=tk.RIGHT, padx=(6, 0))
 
         T.ghost_button(
-            btn_row, "\u21ba REFRESH", command=self._load_playlists,
+            btn_row, "\u21ba REFRESH",
+            command=lambda: self._load_playlists(force=True),
             width=108, height=34,
         ).pack(side=tk.RIGHT)
 
@@ -4798,6 +4802,8 @@ class GameBeatsApp:
             scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
         )
         self.pl_inner.pack(fill=tk.BOTH, expand=True)
+        self._playlists_loaded = False
+        self._playlists_loading = False
 
     # ── GAMES PAGE ───────────────────────────────────────────────────────
 
@@ -4820,7 +4826,8 @@ class GameBeatsApp:
             on_back=lambda: self._nav("main"),
         )
         T.ghost_button(
-            hdr, "\u21ba  REFRESH", command=self._refresh_blocked_page,
+            hdr, "\u21ba  REFRESH",
+            command=lambda: self._refresh_blocked_page(force=True),
             width=108, height=34,
         ).pack(side=tk.RIGHT, anchor="n", padx=(10, 0))
 
@@ -4836,10 +4843,15 @@ class GameBeatsApp:
             scrollbar_button_color=DECK, scrollbar_button_hover_color=WOOD,
         )
         self.blocked_inner.pack(fill=tk.BOTH, expand=True)
+        self._blocked_loaded = False
+        self._refresh_blocked_page()
 
-    def _refresh_blocked_page(self):
+    def _refresh_blocked_page(self, force=False):
         if not hasattr(self, "blocked_inner"):
             return
+        if not force and getattr(self, "_blocked_loaded", False):
+            return
+        self._blocked_loaded = True
         for w in self.blocked_inner.winfo_children():
             w.destroy()
 
@@ -4911,7 +4923,7 @@ class GameBeatsApp:
                 row, text="UNBLOCK",
                 command=lambda u=uri: (
                     self._unblock_playlist(u),
-                    self._refresh_blocked_page(),
+                    self._refresh_blocked_page(force=True),
                 ),
                 width=104, height=32,
             ).pack(side=tk.RIGHT, padx=(0, 12), pady=12)
@@ -5338,7 +5350,7 @@ class GameBeatsApp:
                 self.auth_lbl.configure(text=f"⚠ {msg[:80]}", text_color=AMBER)
             self._log(f"Spotify: {msg}")
         self._update_playlist_ui_mode()
-        self._load_playlists()
+        self._load_playlists(force=True)
         self._start_track_poll()
         self._start_background_detection()
         self._refresh_connection_ui()
@@ -7246,6 +7258,7 @@ class GameBeatsApp:
             if not ok:
                 self.root.after(0, lambda: self._log("Could not save block — check file permissions."))
                 return
+            self._blocked_loaded = False
 
             # ── Step 2: Sync desktop controller's internal state ─────────────
             # Keeps _last_uri consistent so block_current_playlist() on the
@@ -7334,7 +7347,8 @@ class GameBeatsApp:
         except Exception:
             ok = False
         if ok:
-            self._load_playlists()
+            self._blocked_loaded = False
+            self._load_playlists(force=True)
             self._log("Playlist unblocked.")
         else:
             self._log("Could not unblock playlist.")
@@ -7479,7 +7493,7 @@ class GameBeatsApp:
             if ok:
                 dlg.grab_release()
                 dlg.destroy()
-                self._load_playlists()
+                self._load_playlists(force=True)
                 self._log(f"Playlist added: {name}")
             else:
                 err_lbl.configure(
@@ -7508,11 +7522,18 @@ class GameBeatsApp:
         dlg.after(100, link_entry.focus_set)
         dlg.after(120, dlg.lift)
 
-    def _load_playlists(self):
+    def _load_playlists(self, force=False):
+        if not force and (
+            getattr(self, "_playlists_loaded", False)
+            or getattr(self, "_playlists_loading", False)
+        ):
+            return
         if not self.spotify:
+            self._playlists_loading = False
             self.pl_status_lbl.configure(
                 text="Enable playback in Settings.", text_color=TEXT_MUTED)
             return
+        self._playlists_loading = True
         if self._is_desktop_mode():
             self.pl_status_lbl.configure(
                 text="Your saved playlist links:", text_color=TEXT_SEC)
@@ -7524,6 +7545,8 @@ class GameBeatsApp:
         threading.Thread(target=_fetch, daemon=True).start()
 
     def _render_playlists(self, pls, err=""):
+        self._playlists_loading = False
+        self._playlists_loaded = True
         for w in self.pl_inner.winfo_children():
             w.destroy()
         blocked = self._blocked_playlists()
@@ -7668,17 +7691,14 @@ class GameBeatsApp:
 
             T.pixel_button(
                 row, text="UNBLOCK",
-                command=lambda u=uri: (
-                    self._unblock_playlist(u),
-                    self._load_playlists(),
-                ),
+                command=lambda u=uri: self._unblock_playlist(u),
                 width=96, height=30,
             ).pack(side=tk.RIGHT, padx=(0, 10), pady=10)
 
     def _remove_saved_pl(self, uri):
         if self._is_desktop_mode():
             self.spotify.remove_playlist_link(uri)
-            self._load_playlists()
+            self._load_playlists(force=True)
             self._log("Playlist removed.")
 
     def _play_pl(self, uri, name):
