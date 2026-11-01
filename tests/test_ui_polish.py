@@ -11,6 +11,7 @@ if SOURCE_DIR not in sys.path:
 
 from ui.app import (
     GameBeatsApp,
+    SplashScreen,
     compute_initial_window_size,
     format_clock,
 )
@@ -35,6 +36,18 @@ class TestWindowFit(unittest.TestCase):
         self.assertEqual(w, 1280)
         self.assertLessEqual(h, 768)
         self.assertGreaterEqual(h, 700)
+
+
+class TestSplashScreen(unittest.TestCase):
+    def test_center_uses_the_mapped_window_size(self):
+        splash = SplashScreen.__new__(SplashScreen)
+        splash.win = MagicMock()
+        splash.win.winfo_screenwidth.return_value = 2560
+        splash.win.winfo_screenheight.return_value = 1600
+        splash.win.winfo_width.return_value = 770
+        splash.win.winfo_height.return_value = 560
+        splash._center()
+        splash.win.geometry.assert_called_once_with("+895+520")
 
 
 class TestDeckProgress(unittest.TestCase):

@@ -45,7 +45,9 @@ class _Win32WindowApi:
     def _refresh_spotify_pids(self):
         now = time.time()
         with self._pids_lock:
-            if now - self._pids_ts < 2.0:
+            # A full process scan is expensive and used to hitch the whole UI.
+            # Window topology is stable enough that a slow refresh is plenty.
+            if now - self._pids_ts < 12.0:
                 return set(self._spotify_pids)
             pids = set()
             if psutil is not None:
@@ -179,7 +181,9 @@ class SpotifyWindowGuard:
         self._api.move(hwnd, OFFSCREEN_X, OFFSCREEN_Y, keep_size=True)
 
     def _watch(self):
-        while not self._stop.wait(0.04):
+        # 5 Hz is enough to keep Spotify off-screen; the old 25 Hz loop spent
+        # far too much time in Python window enumeration and starved Tk.
+        while not self._stop.wait(0.2):
             try:
                 # Enumerate outside the lock; process/window enumeration can
                 # take a few milliseconds and must not delay a hide.
@@ -187,7 +191,8 @@ class SpotifyWindowGuard:
                 with self._lock:
                     for hwnd in hwnds:
                         self._move_offscreen_if_needed(hwnd)
-                        self._api.hide(hwnd)
+                        if self._api.is_visible(hwnd):
+                            self._api.hide(hwnd)
             except Exception:
                 continue
 

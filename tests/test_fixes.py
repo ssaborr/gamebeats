@@ -116,6 +116,28 @@ class TestAudioMonitorSources(unittest.TestCase):
         self.assertAlmostEqual(value, 0.05)
         peak.assert_called_once_with([222])
 
+    def test_process_snapshot_is_reused_between_audio_polls(self):
+        from types import SimpleNamespace
+        from core import audio_monitor as am
+
+        scans = []
+        processes = [
+            SimpleNamespace(info={"pid": 123, "name": "Spotify.exe", "ppid": 1})
+        ]
+
+        def fake_process_iter(_attrs):
+            scans.append(True)
+            return iter(processes)
+
+        am._clear_audio_process_caches()
+        try:
+            with patch.object(am.psutil, "process_iter", side_effect=fake_process_iter):
+                self.assertEqual(am._desktop_spotify_pids(), [123])
+                self.assertEqual(am._desktop_spotify_pids(), [123])
+        finally:
+            am._clear_audio_process_caches()
+        self.assertEqual(len(scans), 1)
+
 
 class TestSpotifyWebSourceFallback(unittest.TestCase):
     def _make_web(self):

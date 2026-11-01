@@ -16,7 +16,7 @@ from io import BytesIO
 import subprocess
 
 try:
-    from PIL import Image, ImageTk, ImageOps
+    from PIL import Image, ImageTk, ImageOps, ImageEnhance
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -896,69 +896,238 @@ class PixelTooltip:
 # ── Splash screen ────────────────────────────────────────────────────────────
 
 class SplashScreen:
+    """A small slice of the den while the app warms up."""
+
     def __init__(self, root):
         self.root = root
+        self._closed = False
         self.win = ctk.CTkToplevel(root)
         self.win.overrideredirect(True)
-        w, h = 360, 240
-        sw = self.win.winfo_screenwidth()
-        sh = self.win.winfo_screenheight()
-        self.win.geometry(f"{w}x{h}+{(sw-w)//2}+{(sh-h)//2}")
-        self.win.configure(fg_color=SURFACE)
+        self.win.configure(fg_color=BG)
         self.win.attributes("-topmost", True)
-        
+        self.win.geometry("440x320")
+
+        self._build()
+        self._center()
+        # Tk only knows the real window size after it has been mapped, so
+        # settle the position once more after the event loop starts.
+        self.win.after(0, self._center)
+        self.win.after(60, self._center)
+
         if IS_WINDOWS:
             self.win.attributes("-alpha", 0.0)
             self._fade_in(0.0)
 
-        # Accent top bar
-        ctk.CTkFrame(self.win, fg_color=ACCENT, height=4, corner_radius=0).pack(fill=tk.X)
+    def _build(self):
+        self._add_backdrop()
 
-        # Logo area
-        logo_frame = ctk.CTkFrame(self.win, fg_color="transparent", corner_radius=0)
-        logo_frame.pack(pady=(36, 12))
-        self._logo_photo = _load_puppy_logo_photo((156, 104))
+        card = ctk.CTkFrame(
+            self.win,
+            fg_color=BG,
+            border_width=2,
+            border_color=DECK,
+            corner_radius=0,
+        )
+        card.pack(fill=tk.BOTH, expand=True, padx=22, pady=22)
+
+        header = ctk.CTkFrame(card, fg_color=SURFACE2, height=26, corner_radius=0)
+        header.pack(fill=tk.X)
+        header.pack_propagate(False)
+        ctk.CTkLabel(
+            header,
+            text="SIDE A",
+            fg_color="transparent",
+            text_color=GOLD,
+            font=T.pixel_font(8, "bold"),
+        ).pack(side=tk.LEFT, padx=12)
+        ctk.CTkLabel(
+            header,
+            text="PLAYER 1'S ROOM",
+            fg_color="transparent",
+            text_color=TEXT_MUTED,
+            font=T.pixel_font(8),
+        ).pack(side=tk.RIGHT, padx=12)
+        ctk.CTkFrame(card, fg_color=WOOD, height=2, corner_radius=0).pack(fill=tk.X)
+
+        body = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        body.pack(fill=tk.BOTH, expand=True, padx=18, pady=(4, 2))
+
+        scale = max(1.0, self.win.winfo_fpixels("1i") / 96.0)
+        logo_shell = ctk.CTkFrame(
+            body,
+            fg_color=SURFACE2,
+            border_width=2,
+            border_color=WOOD,
+            corner_radius=0,
+            width=108,
+            height=108,
+        )
+        logo_shell.pack(pady=(2, 4))
+        logo_shell.pack_propagate(False)
+        logo_inner = ctk.CTkFrame(
+            logo_shell,
+            fg_color=BG,
+            border_width=1,
+            border_color=GOLD,
+            corner_radius=0,
+            width=96,
+            height=96,
+        )
+        logo_inner.place(relx=0.5, rely=0.5, anchor="center")
+        logo_inner.pack_propagate(False)
+
+        self._logo_photo = _load_puppy_logo_photo(
+            (int(88 * scale), int(88 * scale))
+        )
         if self._logo_photo:
             tk.Label(
-                logo_frame,
+                logo_inner,
                 image=self._logo_photo,
-                bg=SURFACE,
+                bg=BG,
                 bd=0,
                 highlightthickness=0,
-            ).pack()
+            ).pack(expand=True)
         else:
-            lc = tk.Canvas(logo_frame, width=52, height=52, bg=SURFACE, highlightthickness=0)
-            lc.pack()
-            lc.create_oval(4, 4, 48, 48, fill=ACCENT_DIM, outline=ACCENT, width=1)
-            lc.create_text(26, 26, text="\u266a", fill=ACCENT2, font=(F_UI, -20, "bold"))
+            ctk.CTkLabel(
+                logo_inner,
+                text="\u266a",
+                fg_color="transparent",
+                text_color=GOLD,
+                font=T.pixel_font(28, "bold"),
+            ).pack(expand=True)
 
-        ctk.CTkLabel(self.win, text="GameBeats", fg_color="transparent", text_color=TEXT,
-                     font=ctk.CTkFont(family=F_UI, size=22, weight="bold")).pack()
-        ctk.CTkLabel(self.win, text="Starting up\u2026", fg_color="transparent", text_color=TEXT_MUTED,
-                     font=ctk.CTkFont(family=F_UI, size=11)).pack(pady=(8, 24))
+        ctk.CTkLabel(
+            body,
+            text="GAMEBEATS",
+            fg_color="transparent",
+            text_color=TEXT,
+            font=T.pixel_font(20, "bold"),
+        ).pack(pady=(2, 0))
+        ctk.CTkLabel(
+            body,
+            text="Warming up the den\u2026",
+            fg_color="transparent",
+            text_color=TEXT_SEC,
+            font=T.retro_font(17),
+        ).pack(pady=(0, 6))
 
-        # Progress bar
-        self.progress = ctk.CTkProgressBar(self.win, width=260, height=5,
-                                           fg_color=BORDER, progress_color=ACCENT,
-                                           corner_radius=3)
-        self.progress.pack(fill=tk.X, padx=44)
-        self.progress.set(0.0)
+        self._progress_cells = []
+        progress_row = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
+        progress_row.pack(pady=(0, 5))
+        for i in range(22):
+            cell = ctk.CTkFrame(
+                progress_row,
+                fg_color=DECK,
+                width=8,
+                height=7,
+                corner_radius=0,
+            )
+            cell.pack(side=tk.LEFT, padx=(0 if i == 0 else 2, 0))
+            self._progress_cells.append(cell)
         self._animate(0.0)
 
+        ctk.CTkLabel(
+            body,
+            text="PULLING A RECORD FROM THE CRATE",
+            fg_color="transparent",
+            text_color=TEXT_MUTED,
+            font=T.pixel_font(8),
+        ).pack()
+
+        footer = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        footer.pack(fill=tk.X, padx=14, pady=(0, 7))
+        ctk.CTkFrame(footer, fg_color=DECK, height=1, corner_radius=0).pack(
+            fill=tk.X, pady=(0, 5)
+        )
+        ctk.CTkLabel(
+            footer,
+            text="MADE FOR YOUR SIDE QUESTS  \u00b7  V.01",
+            fg_color="transparent",
+            text_color=TEXT_MUTED,
+            font=T.pixel_font(7),
+        ).pack()
+
+    def _add_backdrop(self):
+        """Put the loading card over a dimmed corner of the den."""
+        if not HAS_PIL:
+            return
+        room = _load_design_room("den_room_dim.png")
+        if room is None:
+            return
+        try:
+            self.win.update_idletasks()
+            width = max(1, self.win.winfo_width())
+            height = max(1, self.win.winfo_height())
+            scale = max(width / room.width, height / room.height)
+            resized = room.resize(
+                (max(width, int(room.width * scale) + 1),
+                 max(height, int(room.height * scale) + 1)),
+                Image.LANCZOS,
+            )
+            left = max(0, (resized.width - width) // 2)
+            top = max(0, (resized.height - height) // 2)
+            crop = resized.crop((left, top, left + width, top + height))
+            crop = ImageEnhance.Brightness(crop).enhance(0.52)
+            plum = Image.new("RGB", (width, height), BG)
+            crop = Image.blend(crop, plum, 0.28)
+            self._backdrop_photo = ImageTk.PhotoImage(crop)
+            backdrop = tk.Label(
+                self.win,
+                image=self._backdrop_photo,
+                bg=BG,
+                bd=0,
+                highlightthickness=0,
+            )
+            backdrop.place(x=0, y=0, relwidth=1, relheight=1)
+            backdrop.lower()
+        except Exception:
+            pass
+
+    def _center(self):
+        try:
+            self.win.update_idletasks()
+            sw = self.win.winfo_screenwidth()
+            sh = self.win.winfo_screenheight()
+            w = max(1, self.win.winfo_width())
+            h = max(1, self.win.winfo_height())
+            self.win.geometry(f"+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 2)}")
+        except Exception:
+            pass
+
     def _fade_in(self, alpha):
-        if alpha < 0.95 and self.win.winfo_exists():
-            alpha += 0.08
-            self.win.attributes("-alpha", alpha)
-            self.win.after(15, self._fade_in, alpha)
+        if self._closed:
+            return
+        try:
+            if alpha < 0.95 and self.win.winfo_exists():
+                alpha += 0.08
+                self.win.attributes("-alpha", alpha)
+                self.win.after(15, self._fade_in, alpha)
+        except Exception:
+            pass
 
     def _animate(self, progress_val):
-        if progress_val > 1.0:
+        if self._closed:
             return
-        if self.win.winfo_exists():
-            self.progress.set(progress_val)
-            self.win.after(50, self._animate, progress_val + 0.03)
+        value = min(1.0, progress_val)
+        try:
+            if not self.win.winfo_exists():
+                return
+            filled = int(round(value * len(self._progress_cells)))
+            for i, cell in enumerate(self._progress_cells):
+                if i < filled:
+                    color = ACCENT
+                elif i == filled:
+                    color = ACCENT2
+                else:
+                    color = DECK
+                cell.configure(fg_color=color)
+            if progress_val < 1.0:
+                self.win.after(45, self._animate, progress_val + 0.025)
+        except Exception:
+            pass
 
     def close(self):
+        self._closed = True
         try:
             self.win.destroy()
         except Exception:
@@ -1204,11 +1373,12 @@ class GameBeatsApp:
         self.resume_delay_var = tk.IntVar(value=self._resume_delay_seconds())
 
         splash = SplashScreen(self.root)
-        self.root.after(1800, lambda: (splash.close(), self.root.deiconify(), self._post_splash()))
-
-        # Get the main window's HWND after it's been created and deiconified
-        if IS_WINDOWS:
-            self.root.after(2000, lambda: self._set_gamebeats_hwnd())
+        splash_started = time.monotonic()
+        try:
+            splash.win.update_idletasks()
+            splash._center()
+        except Exception:
+            pass
 
         # Initialize control overlay (manual play/pause/prev/next)
         self._control_overlay = RuntimeOverlay(
@@ -1239,6 +1409,20 @@ class GameBeatsApp:
         self._install_shortcuts()
         # Make layout responsive to window resizes
         self.root.bind("<Configure>", lambda e: self._on_root_resize())
+
+        # Keep the splash up for a beat even when the UI build already used
+        # most of the original 1.8 s window.  This also lets the progress
+        # cells animate once the event loop starts.
+        elapsed_ms = (time.monotonic() - splash_started) * 1000.0
+        splash_delay = max(600, int(1800 - elapsed_ms))
+        self.root.after(
+            splash_delay,
+            lambda: (splash.close(), self.root.deiconify(), self._post_splash()),
+        )
+        if IS_WINDOWS:
+            # Taskbar styling re-maps the root window; doing that while the
+            # splash is up would expose the main UI behind it.
+            self.root.after(splash_delay + 150, self._set_gamebeats_hwnd)
 
     def _install_shortcuts(self):
         """Global media/navigation keys, suppressed inside text fields."""

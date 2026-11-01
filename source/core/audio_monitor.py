@@ -289,15 +289,91 @@ _registered_music_pids: list = []
 _registered_music_pid_lock = threading.Lock()
 _browser_audio_only = False
 
+# Process and process-tree lookups are the expensive part of the audio poll.
+# psutil rebuilds its parent map for every scan, so doing that several times a
+# second starves Tk's event loop and makes the whole den visibly hitch.  Keep a
+# short-lived snapshot instead; process topology rarely changes inside a couple
+# of seconds, and a restart is picked up on the next refresh.
+_PROCESS_SNAPSHOT_TTL = 3.0
+_process_snapshot_lock = threading.Lock()
+_process_snapshot_cache: tuple = ()
+_process_snapshot_stamp = 0.0
+
+_EXCLUSION_CACHE_TTL = 6.0
+_exclusion_cache_lock = threading.Lock()
+_exclusion_cache: set | None = None
+_exclusion_cache_stamp = 0.0
+
+_GAME_PIDS_CACHE_TTL = 2.0
+_game_pids_cache_lock = threading.Lock()
+_game_pids_cache: dict = {}
+
+_TREE_CACHE_TTL = 5.0
+_tree_cache_lock = threading.Lock()
+_tree_cache: dict = {}
+
+
+def _process_snapshot(force: bool = False) -> tuple:
+    """Return a cached ``((pid, lower_name, ppid), ...)`` process snapshot."""
+    global _process_snapshot_cache, _process_snapshot_stamp
+    if not HAS_PSUTIL:
+        return ()
+    now = time.time()
+    with _process_snapshot_lock:
+        if (
+            not force
+            and _process_snapshot_cache
+            and now - _process_snapshot_stamp < _PROCESS_SNAPSHOT_TTL
+        ):
+            return _process_snapshot_cache
+    rows = []
+    try:
+        for proc in psutil.process_iter(["pid", "name", "ppid"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                rows.append((
+                    int(proc.info["pid"]),
+                    name,
+                    int(proc.info.get("ppid") or 0),
+                ))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            except Exception:
+                continue
+    except Exception:
+        rows = []
+    snapshot = tuple(rows)
+    with _process_snapshot_lock:
+        _process_snapshot_cache = snapshot
+        _process_snapshot_stamp = now
+    return snapshot
+
+
+def _clear_audio_process_caches() -> None:
+    """Invalidate cached process data after a known topology change."""
+    global _process_snapshot_cache, _process_snapshot_stamp
+    global _exclusion_cache, _exclusion_cache_stamp
+    with _process_snapshot_lock:
+        _process_snapshot_cache = ()
+        _process_snapshot_stamp = 0.0
+    with _exclusion_cache_lock:
+        _exclusion_cache = None
+        _exclusion_cache_stamp = 0.0
+    with _game_pids_cache_lock:
+        _game_pids_cache.clear()
+    with _tree_cache_lock:
+        _tree_cache.clear()
+
 
 def set_browser_audio_only(enabled: bool):
     """When True, loopback uses only registered browser PIDs (not spotify.exe)."""
     global _browser_audio_only, _spotify_loopback_pid
     _browser_audio_only = bool(enabled)
+    _clear_audio_process_caches()
     close_spotify_loopback()
 
 
-def _expand_process_tree(pids) -> list:
+def _expand_process_tree(pids, force: bool = False) -> list:
     """Include child processes so Chrome renderer audio is captured too.
 
     Chrome's browser process is the one carrying --user-data-dir, but audio is
@@ -308,6 +384,12 @@ def _expand_process_tree(pids) -> list:
     roots = sorted({int(p) for p in (pids or []) if int(p) > 0})
     if not HAS_PSUTIL:
         return roots
+    key = tuple(roots)
+    now = time.time()
+    with _tree_cache_lock:
+        cached = _tree_cache.get(key)
+        if not force and cached and now - cached[0] < _TREE_CACHE_TTL:
+            return list(cached[1])
     expanded = set()
     stack = list(roots)
     while stack:
@@ -323,17 +405,25 @@ def _expand_process_tree(pids) -> list:
             continue
         except Exception:
             continue
-    return sorted(expanded)
+    result = sorted(expanded)
+    with _tree_cache_lock:
+        _tree_cache[key] = (now, tuple(result))
+        # Keep this tiny; a game session only ever has a couple of root sets.
+        if len(_tree_cache) > 16:
+            oldest = min(_tree_cache, key=lambda item: _tree_cache[item][0])
+            _tree_cache.pop(oldest, None)
+    return result
 
 
 def register_music_player_pids(pids: list):
     """Register browser (or other) PIDs used for Spotify Web Player audio loopback."""
     global _spotify_loopback_pid
-    cleaned = _expand_process_tree(pids)
+    cleaned = _expand_process_tree(pids, force=True)
     with _registered_music_pid_lock:
         old = list(_registered_music_pids)
         _registered_music_pids[:] = cleaned
     if old != cleaned:
+        _clear_audio_process_caches()
         close_spotify_loopback()
 
 
@@ -364,21 +454,9 @@ def close_spotify_loopback():
 
 def _desktop_spotify_pids() -> list:
     """All spotify.exe process IDs (desktop app / silent sidecar)."""
-    if not HAS_PSUTIL:
-        return []
-    try:
-        spotify_pids = []
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                name = (proc.info.get("name") or "").lower()
-                if name == "spotify.exe":
-                    spotify_pids.append(proc.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        return sorted(spotify_pids)
-    except Exception:
-        pass
-    return []
+    return sorted(
+        pid for pid, name, _ppid in _process_snapshot() if name == "spotify.exe"
+    )
 
 
 def get_all_spotify_pids() -> list:
@@ -414,28 +492,10 @@ def _session_peak_for_pids(pids) -> float:
     targets = set(_expand_process_tree(pids))
     if not targets:
         return 0.0
-    try:
-        _ensure_com_initialized()
-    except Exception:
-        pass
     max_peak = 0.0
-    with _other_audio_lock:
-        try:
-            for session in AudioUtilities.GetAllSessions():
-                proc = session.Process
-                if proc is None:
-                    continue
-                try:
-                    if int(proc.pid) not in targets:
-                        continue
-                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                    peak = float(meter.GetPeakValue())
-                except Exception:
-                    continue
-                if peak > max_peak:
-                    max_peak = peak
-        except Exception:
-            return 0.0
+    for pid, _name, peak in _session_peaks_snapshot():
+        if pid in targets and peak > max_peak:
+            max_peak = peak
     return max_peak
 
 
@@ -458,22 +518,9 @@ def get_desktop_spotify_peak() -> tuple:
 
 def get_spotify_pid() -> int:
     """Find the main running Spotify process ID (finds all and returns the smallest PID)."""
-    if not HAS_PSUTIL:
-        return 0
-    try:
-        spotify_pids = []
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                name = (proc.info.get("name") or "").lower()
-                if name == "spotify.exe":
-                    spotify_pids.append(proc.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-        # Return the smallest PID (likely the parent/main process)
-        return min(spotify_pids) if spotify_pids else 0
-    except Exception:
-        pass
-    return 0
+    spotify_pids = _desktop_spotify_pids()
+    # Return the smallest PID (likely the parent/main process)
+    return min(spotify_pids) if spotify_pids else 0
 
 
 def get_spotify_loopback_peak() -> tuple:
@@ -630,6 +677,16 @@ def get_spotify_loopback_peak() -> tuple:
 _other_audio_lock = threading.Lock()
 _com_initialized = threading.local()
 
+# WASAPI session enumeration is also costly.  Several callers ask for the same
+# peaks during one audio poll, so keep a very short snapshot and let them share
+# one enumeration.  The key includes the current GetAllSessions callable so a
+# test or a monkey-patched provider never receives stale rows.
+_SESSION_SNAPSHOT_TTL = 0.7
+_session_snapshot_cache: tuple = ()
+_session_snapshot_stamp = 0.0
+_session_snapshot_fn_id = None
+_session_snapshot_error = ""
+
 
 def _ensure_com_initialized() -> None:
     if not HAS_PYCAW or getattr(_com_initialized, "done", False):
@@ -642,8 +699,63 @@ def _ensure_com_initialized() -> None:
     _com_initialized.done = True
 
 
+def _session_peaks_snapshot(force: bool = False) -> tuple:
+    """Return cached ``((pid, lower_name, peak), ...)`` session rows."""
+    global _session_snapshot_cache, _session_snapshot_stamp
+    global _session_snapshot_fn_id, _session_snapshot_error
+    if not HAS_PYCAW:
+        return ()
+    getter = getattr(AudioUtilities, "GetAllSessions", None)
+    if getter is None:
+        return ()
+    getter_id = id(getter)
+    now = time.time()
+    with _other_audio_lock:
+        if (
+            not force
+            and _session_snapshot_cache
+            and _session_snapshot_fn_id == getter_id
+            and now - _session_snapshot_stamp < _SESSION_SNAPSHOT_TTL
+        ):
+            return _session_snapshot_cache
+        rows = []
+        error = ""
+        try:
+            _ensure_com_initialized()
+            for session in AudioUtilities.GetAllSessions():
+                proc = session.Process
+                if proc is None:
+                    continue
+                try:
+                    pid = int(proc.pid)
+                    name = (proc.name() or "").lower()
+                except Exception:
+                    continue
+                try:
+                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
+                    peak = float(meter.GetPeakValue())
+                except Exception:
+                    continue
+                rows.append((pid, name, peak))
+        except Exception as ex:
+            error = f"error: {ex}"
+        _session_snapshot_cache = tuple(rows)
+        _session_snapshot_stamp = now
+        _session_snapshot_fn_id = getter_id
+        _session_snapshot_error = error
+        return _session_snapshot_cache
+
+
 def _spotify_exclusion_pids() -> set:
     """PIDs whose audio belongs to GameBeats' own music, never 'other' audio."""
+    global _exclusion_cache, _exclusion_cache_stamp
+    now = time.time()
+    with _exclusion_cache_lock:
+        if (
+            _exclusion_cache is not None
+            and now - _exclusion_cache_stamp < _EXCLUSION_CACHE_TTL
+        ):
+            return set(_exclusion_cache)
     excluded = set()
     try:
         # In web mode this is the automated browser's process tree; in
@@ -653,22 +765,18 @@ def _spotify_exclusion_pids() -> set:
                 excluded.add(int(pid))
     except Exception:
         pass
-    if HAS_PSUTIL:
-        try:
-            for proc in psutil.process_iter(["pid", "name"]):
-                try:
-                    if (proc.info.get("name") or "").lower() == "spotify.exe":
-                        excluded.add(int(proc.info["pid"]))
-                except (psutil.NoSuchProcess, psutil.AccessDenied):
-                    pass
-        except Exception:
-            pass
+    for pid, name, _ppid in _process_snapshot():
+        if name == "spotify.exe":
+            excluded.add(int(pid))
     try:
         import os
         excluded.add(int(os.getpid()))
     except Exception:
         pass
-    return excluded
+    with _exclusion_cache_lock:
+        _exclusion_cache = set(excluded)
+        _exclusion_cache_stamp = now
+    return set(excluded)
 
 
 def get_other_audio_peak() -> tuple:
@@ -691,63 +799,52 @@ def get_other_audio_peak() -> tuple:
             desktop_peak, desktop_status = get_desktop_spotify_peak()
             if not (desktop_status == "ok" and desktop_peak >= 0.0015):
                 return 0.0, "no-music-pids"
-    _ensure_com_initialized()
+    rows = _session_peaks_snapshot()
+    if _session_snapshot_error:
+        return 0.0, _session_snapshot_error
     excluded = _spotify_exclusion_pids()
     max_peak = 0.0
-    with _other_audio_lock:
-        try:
-            for session in AudioUtilities.GetAllSessions():
-                proc = session.Process
-                if proc is None:
-                    continue
-                try:
-                    pid = int(proc.pid)
-                    name = (proc.name() or "").lower()
-                except Exception:
-                    continue
-                if pid in excluded or name in (
-                    "spotify.exe", "gamebeats.exe", "audiodg.exe"
-                ):
-                    continue
-                try:
-                    meter = session._ctl.QueryInterface(IAudioMeterInformation)
-                    peak = float(meter.GetPeakValue())
-                except Exception:
-                    continue
-                if peak > max_peak:
-                    max_peak = peak
-            return max_peak, "ok"
-        except Exception as ex:
-            return 0.0, f"error: {ex}"
+    for pid, name, peak in rows:
+        if pid in excluded or name in (
+            "spotify.exe", "gamebeats.exe", "audiodg.exe"
+        ):
+            continue
+        if peak > max_peak:
+            max_peak = peak
+    return max_peak, "ok"
 
 
 def _pids_for_game(pid: int = 0, proc_name: str = "") -> set:
+    target = (proc_name or "").lower().strip()
+    key = (int(pid or 0), target)
+    now = time.time()
+    with _game_pids_cache_lock:
+        cached = _game_pids_cache.get(key)
+        if cached and now - cached[0] < _GAME_PIDS_CACHE_TTL:
+            return set(cached[1])
+
     pids = set()
     if pid:
         pids.add(int(pid))
         if HAS_PSUTIL:
             try:
-                root = psutil.Process(pid)
-                for child in root.children(recursive=True):
-                    try:
-                        pids.add(child.pid)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pids.update(_expand_process_tree([int(pid)]))
+            except Exception:
                 pass
 
-    target = (proc_name or "").lower().strip()
     if target and HAS_PSUTIL:
-        for proc in psutil.process_iter(["pid", "name"]):
-            try:
-                name = (proc.info.get("name") or "").lower().strip()
-                if name == target:
-                    pids.add(proc.info["pid"])
-                elif target.replace(".exe", "") and target.replace(".exe", "") in name:
-                    pids.add(proc.info["pid"])
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
-    return pids
+        stem = target.replace(".exe", "")
+        for proc_pid, name, _ppid in _process_snapshot():
+            if name == target or (stem and stem in name):
+                pids.add(int(proc_pid))
+    with _game_pids_cache_lock:
+        _game_pids_cache[key] = (now, set(pids))
+        if len(_game_pids_cache) > 32:
+            oldest = min(
+                _game_pids_cache, key=lambda item: _game_pids_cache[item][0]
+            )
+            _game_pids_cache.pop(oldest, None)
+    return set(pids)
 
 
 def _game_is_foreground(game_pids: set) -> bool:
@@ -765,14 +862,19 @@ def _game_is_foreground(game_pids: set) -> bool:
         if fp in game_pids:
             return True
         if HAS_PSUTIL:
-            try:
-                proc = psutil.Process(fp)
-                while proc:
-                    if proc.pid in game_pids:
-                        return True
-                    proc = proc.parent()
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
-                pass
+            # Walk the cached parent map instead of calling Process.parent()
+            # for every poll; psutil rebuilds its whole parent map for that.
+            parents = {
+                proc_pid: ppid
+                for proc_pid, _name, ppid in _process_snapshot()
+            }
+            current = fp
+            seen = set()
+            while current and current not in seen:
+                seen.add(current)
+                current = parents.get(current, 0)
+                if current in game_pids:
+                    return True
     except Exception:
         pass
     return False
