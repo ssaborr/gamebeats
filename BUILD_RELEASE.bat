@@ -35,7 +35,7 @@ if exist "%~dp0build_release" rmdir /s /q "%~dp0build_release"
 rem Art backups are local safety copies only. Stage a clean assets tree so
 rem assets\_backup never enters the Nuitka payload or the installer.
 if exist "%~dp0build_assets" rmdir /s /q "%~dp0build_assets"
-robocopy "%~dp0assets" "%~dp0build_assets" /E /XD "%~dp0assets\_backup" /NFL /NDL /NJH /NJS /NP >nul
+robocopy "%~dp0assets" "%~dp0build_assets" /E /XD "%~dp0assets\_backup" /XF "Chibi Puppy with Headphones.png" /NFL /NDL /NJH /NJS /NP >nul
 if errorlevel 8 (
     echo ERROR: could not stage clean assets.
     exit /b 1

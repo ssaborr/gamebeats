@@ -1,5 +1,6 @@
 #define MyAppName "GameBeats"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "2.0.0"
+#define MyAppVerName "GameBeats 2.0 Beta"
 #define MyAppPublisher "GameBeats"
 #define MyAppExeName "GameBeats.exe"
 
@@ -7,6 +8,7 @@
 AppId={{4A8B0D37-3A70-40D5-B61C-F4A99D5F3A88}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
+AppVerName={#MyAppVerName}
 AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\{#MyAppName}
 DefaultGroupName={#MyAppName}
@@ -21,6 +23,10 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
+VersionInfoVersion=2.0.0.0
+VersionInfoProductVersion=2.0.0.0
+VersionInfoProductName={#MyAppName}
+VersionInfoDescription={#MyAppVerName} Setup
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"

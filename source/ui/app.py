@@ -1041,7 +1041,7 @@ class SplashScreen:
         )
         ctk.CTkLabel(
             footer,
-            text="MADE FOR YOUR SIDE QUESTS  \u00b7  V.01",
+            text="MADE FOR YOUR SIDE QUESTS  \u00b7  V.2.0 BETA",
             fg_color="transparent",
             text_color=TEXT_MUTED,
             font=T.pixel_font(7),
@@ -1215,7 +1215,7 @@ class GameBeatsApp:
 
         self.root.withdraw()
         self.root.overrideredirect(True)
-        self.root.title("GameBeats")
+        self.root.title("GameBeats 2.0 Beta")
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
 
@@ -2420,7 +2420,7 @@ class GameBeatsApp:
         tools.pack(side=tk.RIGHT, padx=(0, 26), fill=tk.Y)
 
         self._footer_version_lbl = ctk.CTkLabel(
-            tools, text="V.01  \u25aa  MADE FOR YOUR SIDE QUESTS", fg_color="transparent",
+            tools, text="V.2.0 BETA  \u25aa  MADE FOR YOUR SIDE QUESTS", fg_color="transparent",
             text_color=WOOD, font=T.pixel_font(8),
         )
         self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))

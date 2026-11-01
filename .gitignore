@@ -16,6 +16,7 @@ venv.bak/
 # Build and distribution directories
 build/
 build_tmp/
+build_assets/
 dist/
 dist_release/
 installer_output/
@@ -56,6 +57,9 @@ source.zip
 *.zip
 *.tar.gz
 *.rar
+
+# Local design source, not part of the app/release
+assets/Chibi Puppy with Headphones.png
 
 # C / C++ object files
 *.o
