@@ -96,6 +96,53 @@ class TestSpotifyWeb(unittest.TestCase):
         sw.ensure_paused(paused_by_game=True)
         mock_desktop.ensure_paused.assert_called_with(paused_by_game=True)
 
+    def test_browser_only_skips_desktop_sidecar(self):
+        from core.spotify_web import SpotifyWebController
+
+        sw = MagicMock(spec=SpotifyWebController)
+        sw._use_simplified_dual_flow = MagicMock(return_value=True)
+        sw._also_launch_desktop = False
+        sw._desktop_sidecar_active = True
+        sw._desktop_helper = MagicMock()
+        sw._wait_before_controller = MagicMock()
+        sw._browser_call = MagicMock(return_value=True)
+        sw._refresh_audio_pids = MagicMock()
+        sw._log = MagicMock()
+        sw._last_error = ""
+
+        with patch("core.spotify_web._spotify_running", return_value=False):
+            ok = SpotifyWebController._open_playlist_dual_chrome(
+                sw,
+                "spotify:playlist:abc",
+                "https://open.spotify.com/playlist/abc",
+            )
+
+        self.assertTrue(ok)
+        sw._desktop_helper.assert_not_called()
+        self.assertFalse(sw._desktop_sidecar_active)
+        self.assertTrue(
+            any("Browser-only mode" in str(c) for c in sw._log.call_args_list)
+        )
+
+    def test_browser_only_close_does_not_close_desktop(self):
+        from core.spotify_web import SpotifyWebController
+
+        sw = MagicMock(spec=SpotifyWebController)
+        sw._uses_desktop_player = MagicMock(return_value=False)
+        sw._also_launch_desktop = False
+        sw._desktop_player = MagicMock()
+        sw._desktop_helper = MagicMock()
+        sw._browser_call = MagicMock(return_value=True)
+        sw._desktop_sidecar_active = True
+        sw._log = MagicMock()
+
+        with patch("core.spotify_web._spotify_running", return_value=True):
+            ok = SpotifyWebController.close_spotify(sw)
+
+        self.assertTrue(ok)
+        sw._desktop_helper.assert_not_called()
+        self.assertTrue(sw._desktop_sidecar_active)
+
 
 class TestAudioMonitorSources(unittest.TestCase):
     def test_all_spotify_pids_include_browser_and_desktop(self):
@@ -1356,6 +1403,20 @@ class TestAudioMonitorRouting(unittest.TestCase):
 
 
 class TestAppNewRegressions(unittest.TestCase):
+    def test_browser_only_skips_silent_desktop_track(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.root = MagicMock()
+        app._log = MagicMock()
+        app._spotify_desktop_controller = MagicMock()
+        app.spotify = MagicMock()
+        app.spotify._also_launch_desktop = False
+
+        self.assertFalse(app._launch_spotify_with_silent_track())
+        app._spotify_desktop_controller.assert_not_called()
+        app.root.after.assert_called_once()
+
     def test_begin_playlist_switch_pause_updates_state_immediately(self):
         from ui.app import GameBeatsApp
 

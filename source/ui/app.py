@@ -1659,7 +1659,7 @@ class GameBeatsApp:
 
         self._spotify_reset_done = True
         self._log(
-            "Web player mode — Spotify desktop + one automated Chrome (no extra Player Chrome). "
+            "Web player mode — browser-only Spotify playback (one automated Chrome). "
             "Log in once in spotify_web_profile."
         )
         if self._spotify_web_login_ready():
@@ -1791,7 +1791,7 @@ class GameBeatsApp:
             card,
             text=(
                 "GameBeats needs you to log in once in the browser window it opens.\n"
-                "Use the same Spotify account that is active on your Spotify desktop app.\n"
+                "Use the Spotify account you want GameBeats to play from.\n"
                 "Your login is saved on this PC — you won't need to do this again."
             ),
             fg_color="transparent", text_color=TEXT_SEC, font=ctk.CTkFont(family=F_UI, size=11),
@@ -5645,7 +5645,7 @@ class GameBeatsApp:
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
-            c1, text="GameBeats is a companion tool designed to seamlessly integrate with your existing setup. It is not a standalone player; you must have the official Spotify client installed and running to use this application.",
+            c1, text="GameBeats is a companion tool designed to seamlessly integrate with your existing setup. It plays Spotify through its own helper browser, so the Spotify desktop client is not required.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
@@ -5656,7 +5656,7 @@ class GameBeatsApp:
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
-            c1, text="Supporting free Spotify accounts required overcoming significant technical limitations, but we made it happen. Please note that on first start, the free-tier desktop client might be a bit clunky to connect to. We apologize for any inconvenience, but it should work smoothly most of the time.",
+            c1, text="Supporting free Spotify accounts required overcoming significant technical limitations, but we made it happen. On first start you only need to log in to Spotify once in the GameBeats helper window; after that, playback and game detection are automatic.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
@@ -5670,7 +5670,7 @@ class GameBeatsApp:
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
-            c_web, text="On your first run, a secondary Spotify window will open. You MUST log in to Spotify here to establish the connection. Crucially, make sure you log in using the exact same Spotify account that is currently active on your main Spotify Desktop app.",
+            c_web, text="On your first run, a Spotify login window will open. Log in once with the Spotify account you want GameBeats to control. The login is saved on this PC for future sessions.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
@@ -5687,12 +5687,12 @@ class GameBeatsApp:
         ).pack(fill=tk.X, pady=(0, 6))
 
         ctk.CTkLabel(
-            c_web, text="3. Desktop App Required", fg_color="transparent", text_color=TEXT,
+            c_web, text="3. Desktop App Optional", fg_color="transparent", text_color=TEXT,
             font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
-            c_web, text="Even with the helper window open, you must always have the official Spotify Desktop application running on your PC for the app to route audio and detect playback correctly.",
+            c_web, text="GameBeats plays through its own browser, so you do not need the Spotify desktop app. If you already use Spotify Desktop, you can leave it open or closed; GameBeats will not control it.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X)
@@ -5701,23 +5701,23 @@ class GameBeatsApp:
         c2 = self._card(inner)
         
         ctk.CTkLabel(
-            c2, text="1. Official Spotify Client Only", fg_color="transparent", text_color=TEXT,
+            c2, text="1. Use the Browser Login", fg_color="transparent", text_color=TEXT,
             font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
-            c2, text="Please ensure you are using the Spotify Desktop client downloaded directly from the official Spotify website (.exe). GameBeats does not support the Microsoft Store version.",
+            c2, text="Log in through the GameBeats helper window using the Spotify account you want to hear. No developer app or desktop installation is required.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
         
         ctk.CTkLabel(
-            c2, text="2. Dedicated Playback Device", fg_color="transparent", text_color=TEXT,
+            c2, text="2. One Playback Source", fg_color="transparent", text_color=TEXT,
             font=T.pixel_font(11, "bold"), anchor="w"
         ).pack(fill=tk.X, pady=(0, 4))
         
         ctk.CTkLabel(
-            c2, text="For the best experience, ensure your Spotify account is actively playing only on your local desktop client. Remote playback from other devices may interrupt the application's tracking.",
+            c2, text="Avoid starting Spotify on your phone or another device while gaming; that can move playback away from GameBeats. Keep the helper window open during a session.",
             fg_color="transparent", text_color=TEXT_MUTED, font=T.retro_font(16),
             wraplength=820, justify=tk.LEFT, anchor="w"
         ).pack(fill=tk.X, pady=(0, 6))
@@ -5939,6 +5939,10 @@ class GameBeatsApp:
 
     def _launch_spotify_with_silent_track(self):
         """Restart Spotify desktop and play the silent track URI for detection."""
+        if not self._spotify_desktop_enabled():
+            self.root.after(0, lambda: self._log(
+                "Browser-only mode: skipping Spotify desktop silent track."))
+            return False
         try:
             helper = self._spotify_desktop_controller()
             if helper is None and hasattr(self, 'spotify') and self.spotify:
@@ -8182,8 +8186,17 @@ class GameBeatsApp:
         except Exception:
             return False
 
+    def _spotify_desktop_enabled(self) -> bool:
+        """True only when the active Spotify controller uses the desktop app."""
+        controller = getattr(self, "spotify", None)
+        if controller is None:
+            return False
+        return bool(getattr(controller, "_also_launch_desktop", True))
+
     def _ensure_spotify_window_guard(self):
         """Create the UI-side guard that keeps Spotify's window off-screen."""
+        if not self._spotify_desktop_enabled():
+            return None
         guard = getattr(self, "_spotify_window_guard", None)
         if guard is not None:
             return guard
@@ -8200,6 +8213,8 @@ class GameBeatsApp:
 
     def _spotify_desktop_controller(self):
         """Return Spotify's desktop controller if one is available."""
+        if not self._spotify_desktop_enabled():
+            return None
         controller = getattr(self, "spotify", None)
         if controller is None:
             return None

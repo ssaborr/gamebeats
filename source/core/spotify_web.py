@@ -1,10 +1,12 @@
 """
 spotify_web.py — Spotify Web Player control without Web API (free accounts).
 
-Dual mode (default):
-  1. Spotify desktop app opens the playlist.
-  2. One automated Google Chrome window plays the same playlist (no Player Chrome, no Connect).
+Browser-only mode (default):
+  1. One automated Google Chrome window opens the playlist.
+  2. The browser itself produces the audio (no Player Chrome, no Connect).
+  3. Spotify desktop is not required or launched.
 
+Set spotify_also_launch_desktop=true to restore the optional desktop sidecar.
 Set spotify_use_connect=true to restore the old multi-window Connect flow.
 Legacy playwright mode: one automated browser opens the playlist directly.
 """
@@ -254,7 +256,7 @@ class SpotifyWebController:
             self._dual_player = "desktop"
         else:
             self._dual_player = "chromium"
-        self._also_launch_desktop = bool(cfg.get("spotify_also_launch_desktop", True))
+        self._also_launch_desktop = bool(cfg.get("spotify_also_launch_desktop", False))
         self._use_spotify_connect = bool(cfg.get("spotify_use_connect", False))
         self._connect_device_name = (cfg.get("spotify_connect_device_name") or "").strip()
         try:
@@ -378,7 +380,7 @@ class SpotifyWebController:
         )
 
     def _use_simplified_dual_flow(self) -> bool:
-        """Spotify desktop + one automated browser; play playlist (no Connect)."""
+        """One automated browser plays the playlist; desktop is optional."""
         return self._dual_chrome and not self._use_spotify_connect
 
     def _desktop_helper(self) -> SpotifyDesktopController:
@@ -1555,6 +1557,7 @@ class SpotifyWebController:
 
     def _bypass_spotify_loaded_ui(self, page) -> None:
         """After controller loads: wait, optional sidebar click, browser back."""
+        previous_error = self._last_error
         if self._bypass_wait_sec > 0:
             time.sleep(self._bypass_wait_sec)
 
@@ -1578,6 +1581,10 @@ class SpotifyWebController:
 
         if self._bypass_before_connect_sec > 0:
             time.sleep(self._bypass_before_connect_sec)
+
+        # The sidebar click is an optional bypass helper. Its timeout is not a
+        # playback failure, so it must not leave a stale error on the session.
+        self._last_error = previous_error
 
     def _click_connect_device_via_js(self, page) -> bool:
         """
@@ -1768,7 +1775,12 @@ class SpotifyWebController:
             # pre-launch. No need to open the playlist in the hidden desktop
             # client — only the automated Chrome browser handles playback.
             # Just mark desktop as active for pause/resume routing.
-            if _spotify_running():
+            if not self._also_launch_desktop:
+                self._log(
+                    "Browser-only mode: Spotify desktop sidecar disabled; "
+                    "the automated browser is the audio source."
+                )
+            elif _spotify_running():
                 self._desktop_sidecar_active = True
                 self._log("Spotify desktop running (silent track) — browser will handle playlist.")
             else:
@@ -2448,9 +2460,16 @@ class SpotifyWebController:
 
         if self._dual_chrome:
             if self._use_simplified_dual_flow():
-                self._log(
-                    "Dual mode: Spotify desktop + one automated Chrome (playlist play, no Connect)."
-                )
+                if self._also_launch_desktop:
+                    self._log(
+                        "Dual mode: Spotify desktop + one automated Chrome "
+                        "(playlist play, no Connect)."
+                    )
+                else:
+                    self._log(
+                        "Browser-only mode: one automated Chrome plays the playlist "
+                        "(desktop sidecar disabled)."
+                    )
             else:
                 self._log("Dual mode (Connect): desktop/player Chrome + controller browser.")
             ok = self._open_playlist_dual_chrome(playlist_uri, url)
@@ -2526,9 +2545,14 @@ class SpotifyWebController:
             return False, "Install Playwright: pip install playwright && playwright install chromium"
         if self._dual_chrome:
             if self._use_simplified_dual_flow():
+                if self._also_launch_desktop:
+                    return True, (
+                        "Spotify desktop + one automated Chrome. Log in once in "
+                        "spotify_web_profile (no separate Player Chrome window)."
+                    )
                 return True, (
-                    "Spotify desktop + one automated Chrome. Log in once in "
-                    "spotify_web_profile (no separate Player Chrome window)."
+                    "Browser-only Spotify ready — one automated Chrome. Log in once in "
+                    "spotify_web_profile (no desktop app required)."
                 )
             return True, (
                 "Legacy dual mode with Spotify Connect — multiple browser windows."
@@ -2540,6 +2564,8 @@ class SpotifyWebController:
 
     def launch_spotify(self):
         if self._use_simplified_dual_flow():
+            if not self._also_launch_desktop:
+                return self._ensure_browser(check_login=False)
             if self._desktop_helper()._find_spotify_exe():
                 return True
             self._last_error = "Spotify desktop app not found"
@@ -2549,7 +2575,11 @@ class SpotifyWebController:
     def close_spotify(self, timeout=4.0) -> bool:
         desktop_ok = True
         try:
-            if self._desktop_player is not None or _spotify_running():
+            should_close_desktop = self._uses_desktop_player() or (
+                self._also_launch_desktop
+                and (self._desktop_player is not None or _spotify_running())
+            )
+            if should_close_desktop:
                 desktop_ok = bool(self._desktop_helper().close_spotify(timeout=timeout))
                 self._desktop_sidecar_active = False
         except Exception as ex:
@@ -2649,13 +2679,18 @@ class SpotifyWebController:
                 if not HAS_PLAYWRIGHT:
                     self._last_error = "Playwright not installed"
                     return False
-                if not self._desktop_helper()._find_spotify_exe():
+                if self._also_launch_desktop and not self._desktop_helper()._find_spotify_exe():
                     self._log("Warning: Spotify desktop not found.")
                 if self._use_system_chrome and not self._find_chrome_exe():
                     self._log("Warning: Google Chrome not found for automated browser.")
-                self._log(
-                    "Ready: Spotify desktop + one automated Chrome when a playlist plays."
-                )
+                if self._also_launch_desktop:
+                    self._log(
+                        "Ready: Spotify desktop + one automated Chrome when a playlist plays."
+                    )
+                else:
+                    self._log(
+                        "Ready: browser-only Spotify (one automated Chrome)."
+                    )
                 return True
             if self._uses_desktop_player():
                 if self._desktop_helper()._find_spotify_exe():

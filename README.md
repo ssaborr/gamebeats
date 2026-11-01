@@ -63,7 +63,7 @@ Get the standalone Windows installer:
 
 - **Operating System**: Windows 10 or Windows 11 (64-bit)
 - **Python**: Version 3.9 or higher
-- **Spotify Account**: Free or Premium account with Spotify Developer App credentials (for Web API mode) or the Spotify desktop client installed
+- **Spotify Account**: Free or Premium account. GameBeats plays through its own Spotify web-player browser; the desktop client is optional.
 - **C++ Compiler (Optional)**: MinGW-w64 (`g++`) if recompiling the native focus guard binary
 
 ---
@@ -91,17 +91,16 @@ cd source
 pip install -r requirements.txt
 ```
 
-### 4. Configure Spotify Credentials
+### 4. Sign in to Spotify
 
-GameBeats uses standard Spotify OAuth for API communication:
+GameBeats plays Spotify through a helper Chrome window, so no developer app or desktop client is required:
 
-1. Visit the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard) and create an application.
-2. Set the **Redirect URI** to:
-   ```
-   http://127.0.0.1:8888/callback
-   ```
-   *(Note: Use `127.0.0.1`, not `localhost`)*
-3. Launch GameBeats to enter your `Client ID` and `Client Secret` during initial setup. Settings are saved locally to `data/config.json`.
+1. Launch GameBeats.
+2. On first run, a Spotify login window opens.
+3. Sign in with the Spotify account you want GameBeats to control.
+4. The login is saved locally and reused on future launches.
+
+The helper browser is the audio source; Spotify Desktop is optional and is not controlled by GameBeats.
 
 ---
 
