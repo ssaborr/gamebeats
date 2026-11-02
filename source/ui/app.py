@@ -58,7 +58,6 @@ from ui.puppy_gif import (
     normalize_animation_states as _normalize_animation_states,
     normalize_sprite_frames as _normalize_gif_frames,
 )
-from ui.runtime_overlay import RuntimeOverlay
 from ui.spotify_targeted_transport import install_targeted_transport
 from ui.spotify_window_guard import SpotifyWindowGuard
 from ui import theme as T
@@ -105,6 +104,27 @@ def _puppy_logo_path() -> str:
             os.path.join(exe_dir, "puppies", "puppy logo.png"),
             os.path.join(exe_dir, "assets", "puppy", "puppy logo.png"),
             os.path.join(exe_dir, "assets", "puppy", "puppy_logo.png"),
+        ])
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return ""
+
+
+def _puppy_icon_path() -> str:
+    """Find the puppy .ico used for the window and taskbar icon."""
+    root = _repo_root_dir()
+    candidates = [
+        os.path.join(root, "assets", "icon.ico"),
+        os.path.join(root, "icon.ico"),
+        os.path.join(os.getcwd(), "assets", "icon.ico"),
+    ]
+    if getattr(sys, "frozen", False):
+        exe_dir = os.path.dirname(sys.executable)
+        bundle_dir = getattr(sys, "_MEIPASS", "")
+        candidates.extend([
+            os.path.join(bundle_dir, "assets", "icon.ico"),
+            os.path.join(exe_dir, "assets", "icon.ico"),
         ])
     for path in candidates:
         if path and os.path.exists(path):
@@ -1237,6 +1257,7 @@ class GameBeatsApp:
         
         self.root.configure(fg_color=BG)
         self._window_icon_photo = _load_puppy_window_icon()
+        self._puppy_icon_path = _puppy_icon_path()
         if self._window_icon_photo:
             try:
                 # Set icon and schedule to stick on Windows/CustomTkinter window mappings
@@ -1244,7 +1265,13 @@ class GameBeatsApp:
                 self.root.after(200, lambda: self.root.iconphoto(True, self._window_icon_photo))
             except Exception:
                 pass
-        elif IS_WINDOWS:
+        if IS_WINDOWS and self._puppy_icon_path:
+            try:
+                # Tk's taskbar icon comes from the .ico, not just iconphoto.
+                self.root.iconbitmap(default=self._puppy_icon_path)
+            except Exception:
+                pass
+        elif IS_WINDOWS and not self._window_icon_photo:
             self.root.iconbitmap(default="")
 
                 # Pulse control variables
@@ -1277,6 +1304,15 @@ class GameBeatsApp:
         self._seamless_music_value = bool(
             self.configure.get("seamless_music", False)
         )
+        self.puppy_overlay_var = tk.BooleanVar(
+            value=bool(self.configure.get("puppy_overlay", True))
+        )
+        self._puppy_overlay_value = bool(
+            self.configure.get("puppy_overlay", True)
+        )
+        self.shuffle_var = tk.BooleanVar(value=False)
+        self._shuffle_value = False
+        self._shuffle_busy = False
         self.startup_var = tk.BooleanVar(value=False)
         self.reduce_motion_var = tk.BooleanVar(
             value=bool(self.configure.get("reduce_motion", False))
@@ -1380,23 +1416,9 @@ class GameBeatsApp:
         except Exception:
             pass
 
-        # Initialize control overlay (manual play/pause/prev/next)
-        self._control_overlay = RuntimeOverlay(
-            self.root,
-            on_play=self._overlay_play,
-            on_pause=self._overlay_pause,
-            on_prev=self._overlay_prev,
-            on_next=self._overlay_next,
-            on_block=self._overlay_block,
-            on_try_another=self._overlay_try_another,
-            get_playing=lambda: (
-                (not self._intentional_pause_active())
-                and (
-                    self._spotify_sound_detected_recently(3.0)
-                    or bool(getattr(self, "_is_playing", False))
-                )
-            ),
-        )
+        # The large runtime control overlay is retired.  The desktop puppy is
+        # the only overlay; controls live in the main player deck.
+        self._control_overlay = None
         self._puppy_singing_overlay = PuppySingingOverlay(
             self.root,
             corner="bottom-left",
@@ -1989,12 +2011,52 @@ class GameBeatsApp:
         except Exception:
             pass
 
+    def _apply_puppy_taskbar_icon(self, hwnd):
+        """Attach the puppy .ico to the real top-level window (taskbar)."""
+        if not IS_WINDOWS or not hwnd:
+            return
+        icon_path = getattr(self, "_puppy_icon_path", "") or _puppy_icon_path()
+        if not icon_path:
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            user32.LoadImageW.restype = wintypes.HANDLE
+            user32.LoadImageW.argtypes = [
+                wintypes.HINSTANCE, wintypes.LPCWSTR, wintypes.UINT,
+                ctypes.c_int, ctypes.c_int, wintypes.UINT,
+            ]
+            user32.SendMessageW.restype = wintypes.LPARAM
+            user32.SendMessageW.argtypes = [
+                wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM,
+            ]
+            image_icon = 1
+            load_from_file = 0x0010
+            defaults_size = 0x0040
+            wm_seticon = 0x0080
+            big = user32.LoadImageW(
+                None, icon_path, image_icon, 0, 0,
+                load_from_file | defaults_size,
+            )
+            small = user32.LoadImageW(
+                None, icon_path, image_icon, 16, 16, load_from_file,
+            )
+            if big:
+                user32.SendMessageW(hwnd, wm_seticon, 1, big)
+            if small:
+                user32.SendMessageW(hwnd, wm_seticon, 0, small)
+        except Exception:
+            pass
+
     def _set_gamebeats_hwnd(self):
         if IS_WINDOWS:
             try:
                 import ctypes
                 self._gamebeats_hwnd = self.root.winfo_id()
                 hwnd = self._mainwindow_hwnd() or self._gamebeats_hwnd
+                self._apply_puppy_taskbar_icon(hwnd)
                 
                 # Style modification:
                 # GWL_EXSTYLE = -20
@@ -2011,6 +2073,7 @@ class GameBeatsApp:
                 # Re-map the window so Windows taskbar notices the status change
                 self.root.withdraw()
                 self.root.deiconify()
+                self._apply_puppy_taskbar_icon(hwnd)
                 
                 self._log(f"GameBeats main window HWND: {self._gamebeats_hwnd:#x} (Forced taskbar style)")
             except Exception as e:
@@ -2119,6 +2182,84 @@ class GameBeatsApp:
                 target=self._resume_spotify_after_game_quiet,
                 daemon=True,
             ).start()
+
+    def _save_puppy_overlay_setting(self, *_):
+        try:
+            enabled = bool(self.puppy_overlay_var.get())
+        except Exception:
+            enabled = bool(self.configure.get("puppy_overlay", True))
+        self._puppy_overlay_value = enabled
+        self.configure["puppy_overlay"] = enabled
+        self._save_config()
+        self._log("Desktop puppy overlay " + ("on" if enabled else "off"))
+        overlay = getattr(self, "_puppy_singing_overlay", None)
+        if overlay is None:
+            return
+        if not enabled:
+            try:
+                overlay.hide(immediate=True)
+            except Exception:
+                pass
+            return
+        self._set_puppy_singing_visible(
+            bool(getattr(self, "_is_playing", False))
+            or self._spotify_sound_detected_recently(2.0)
+        )
+
+    def _apply_shuffle_state(self, enabled, *, log=False):
+        enabled = bool(enabled)
+        self._shuffle_value = enabled
+        try:
+            self.shuffle_var.set(enabled)
+        except Exception:
+            pass
+        button = getattr(self, "shuffle_btn", None)
+        if button is not None:
+            try:
+                button.set_active(enabled)
+            except Exception:
+                pass
+        if log:
+            self._log("Shuffle " + ("on" if enabled else "off"))
+
+    def _toggle_shuffle(self):
+        spotify = getattr(self, "spotify", None)
+        if spotify is None or not hasattr(spotify, "set_shuffle"):
+            self._log("Shuffle is available when Spotify is connected.")
+            return
+        if getattr(self, "_shuffle_busy", False):
+            return
+        target = not bool(getattr(self, "_shuffle_value", False))
+        self._shuffle_busy = True
+        self._apply_shuffle_state(target)
+
+        def _work():
+            ok = False
+            actual = None
+            try:
+                ok = bool(spotify.set_shuffle(target))
+            except Exception as ex:
+                try:
+                    self._log(f"Shuffle failed: {ex}")
+                except Exception:
+                    pass
+            try:
+                actual = spotify.get_shuffle_state()
+            except Exception:
+                actual = None
+            if actual is None:
+                actual = target if ok else (not target)
+
+            def _done():
+                self._shuffle_busy = False
+                self._apply_shuffle_state(actual, log=True)
+
+            try:
+                self.root.after(0, _done)
+            except Exception:
+                self._shuffle_busy = False
+
+        threading.Thread(target=_work, daemon=True).start()
 
     def _save_motion_setting(self, *_):
         try:
@@ -2425,12 +2566,22 @@ class GameBeatsApp:
         )
         self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))
 
-        overlay_btn = T.FooterButton(
-            tools, text="OVERLAY", icon=T.ui_icon("overlay"),
-            command=self._show_control_overlay, width=98, height=34,
+        puppy_toggle_box = ctk.CTkFrame(tools, fg_color="transparent", corner_radius=0)
+        puppy_toggle_box.pack(side=tk.RIGHT, padx=(2, 0), pady=14)
+        ctk.CTkLabel(
+            puppy_toggle_box, text="PUPPY", fg_color="transparent",
+            text_color=TEXT_MUTED, font=T.pixel_font(9),
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        self._footer_puppy_toggle = PixelToggle(
+            puppy_toggle_box, variable=self.puppy_overlay_var,
+            command=self._save_puppy_overlay_setting, bg=NIGHT,
+            width=44, height=20,
         )
-        overlay_btn.pack(side=tk.RIGHT, padx=2, pady=14)
-        self._footer_tools["overlay"] = overlay_btn
+        self._footer_puppy_toggle.pack(side=tk.LEFT)
+        self._tooltips.attach(
+            self._footer_puppy_toggle,
+            "Show or hide the desktop puppy overlay",
+        )
 
         faq_btn = T.FooterButton(
             tools, text="FAQ", icon=T.ui_icon("faq"),
@@ -2456,7 +2607,6 @@ class GameBeatsApp:
             add_focus_ring(button, base_border=None, width=1)
             self._tooltips.attach(button, nav_hints.get(page, page.title()))
         for key, hint in (
-            ("overlay", "Open the desktop puppy controller"),
             ("faq", "Field notes and help"),
             ("blocked", "Manage blocked playlists"),
         ):
@@ -2641,10 +2791,6 @@ class GameBeatsApp:
             self._nav_busy = False
 
     def _nav_impl(self, page):
-        if page == "overlay":
-            self._show_control_overlay()
-            return
-
         previous = getattr(self, "_active_page_widget", None)
         self._current_page = page
 
@@ -2766,16 +2912,6 @@ class GameBeatsApp:
                     btn.configure(fg_color=SURFACE2, text_color=ACCENT)
                 else:
                     btn.configure(fg_color=NIGHT, text_color=TEXT_MUTED)
-            except Exception:
-                pass
-
-    def _show_control_overlay(self):
-        try:
-            if getattr(self, "_control_overlay", None):
-                self._control_overlay.show()
-        except Exception as e:
-            try:
-                self._log(f"Could not open overlay: {e}")
             except Exception:
                 pass
 
@@ -3166,6 +3302,12 @@ class GameBeatsApp:
         self._vu_canvas.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 10))
         self._vu_canvas.bind("<Configure>", lambda e: self._draw_vu())
 
+        self.shuffle_btn = CircleBtn(
+            ctrl, T.media_icon("shuffle"), command=self._toggle_shuffle, size=32,
+            font_size=17, bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT, icon=True,
+        )
+        self.shuffle_btn.pack(side=tk.LEFT, padx=3)
+
         self.prev_btn = CircleBtn(
             ctrl, T.media_icon("prev"), command=self._prev, size=32,
             font_size=17, bg=SURFACE2, fg=TEXT, canvas_bg=NIGHT, icon=True,
@@ -3239,6 +3381,7 @@ class GameBeatsApp:
         # Pixel tooltips: one reusable window, attached to the controls that
         # benefit from a keyboard hint.
         for widget, text in (
+            (self.shuffle_btn, "Shuffle"),
             (self.prev_btn, "Previous track  [\u2190]"),
             (self.play_btn, "Play / pause  [Space]"),
             (self.next_btn, "Next track  [\u2192]"),
@@ -5277,7 +5420,7 @@ class GameBeatsApp:
         self._motion_toggle.pack(side=tk.RIGHT, padx=(14, 2))
 
         T.section_header(
-            content, "02 / DESKTOP PUPPY + CONTROL PANEL", pady=(14, 6)
+            content, "02 / DESKTOP PUPPY", pady=(14, 6)
         )
         ov = self._card(content)
 
@@ -5309,10 +5452,17 @@ class GameBeatsApp:
             font=T.retro_font(17), anchor="w", justify=tk.LEFT, wraplength=680,
         ).pack(fill=tk.X, pady=(4, 10))
 
-        T.primary_button(
-            ov_copy, "\u25a3  OPEN CONTROL PANEL", command=self._show_control_overlay,
-            width=204, height=34,
-        ).pack(anchor="w")
+        ov_toggle_row = ctk.CTkFrame(ov_copy, fg_color="transparent", corner_radius=0)
+        ov_toggle_row.pack(fill=tk.X, pady=(2, 0))
+        ctk.CTkLabel(
+            ov_toggle_row, text="Show the desktop puppy overlay", fg_color="transparent",
+            text_color=TEXT, font=T.retro_font(17), anchor="w",
+        ).pack(side=tk.LEFT)
+        PixelToggle(
+            ov_toggle_row, variable=self.puppy_overlay_var,
+            command=self._save_puppy_overlay_setting, bg=SURFACE,
+            width=44, height=20,
+        ).pack(side=tk.RIGHT, padx=(14, 0))
 
         gestures = ctk.CTkFrame(
             ov, fg_color=NIGHT, corner_radius=0,
@@ -5337,8 +5487,8 @@ class GameBeatsApp:
             ).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ctk.CTkLabel(
             gestures,
-            text="Need manual skip, block, and playlist controls? The larger "
-                 "control panel opens with the button above.",
+            text="The puppy appears while GameBeats is playing music. Turn it "
+                 "off here or from the PUPPY toggle in the footer.",
             fg_color="transparent", text_color=TEXT_SEC,
             font=T.retro_font(16), anchor="w", justify=tk.LEFT, wraplength=720,
         ).pack(fill=tk.X, padx=12, pady=(6, 10))
@@ -6887,6 +7037,14 @@ class GameBeatsApp:
             # dip made the canvas flicker around the puppy.
 
             if overlay is None:
+                return
+
+            if not bool(getattr(self, "_puppy_overlay_value", True)):
+                try:
+                    if overlay.is_visible():
+                        overlay.hide(immediate=True)
+                except Exception:
+                    pass
                 return
 
             if not started_by_us and not notifier_up:
@@ -9126,6 +9284,12 @@ class GameBeatsApp:
     def _update_np(self, t):
         self._last_track_info = t
         self._last_track_info_ts = time.time()
+        if (
+            isinstance(t, dict)
+            and t.get("shuffle") is not None
+            and not getattr(self, "_shuffle_busy", False)
+        ):
+            self._apply_shuffle_state(t.get("shuffle"))
         previous_np_key = getattr(self, "_last_np_key", None)
         fresh_start = self._fresh_playback_grace()
         track_changed = False

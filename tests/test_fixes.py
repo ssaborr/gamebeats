@@ -143,6 +143,83 @@ class TestSpotifyWeb(unittest.TestCase):
         sw._desktop_helper.assert_not_called()
         self.assertTrue(sw._desktop_sidecar_active)
 
+    def test_shuffle_state_reads_spotify_aria_label(self):
+        from core.spotify_web import SpotifyWebController
+
+        locator = MagicMock()
+        locator.get_attribute.side_effect = lambda name: {
+            "aria-label": "Disable shuffle",
+        }.get(name)
+
+        self.assertTrue(
+            SpotifyWebController._shuffle_state_from_locator(locator)
+        )
+
+        locator.get_attribute.side_effect = lambda name: {
+            "aria-label": "Enable shuffle",
+        }.get(name)
+        self.assertFalse(
+            SpotifyWebController._shuffle_state_from_locator(locator)
+        )
+
+        locator.get_attribute.side_effect = lambda name: {
+            "aria-label": "Enable Smart Shuffle",
+        }.get(name)
+        self.assertTrue(
+            SpotifyWebController._shuffle_state_from_locator(locator)
+        )
+
+    def test_set_shuffle_clicks_browser_button_when_needed(self):
+        from core.spotify_web import SpotifyWebController
+
+        sw = MagicMock(spec=SpotifyWebController)
+        page = MagicMock()
+        locator = MagicMock()
+        sw._run_on_page = lambda work: work(page)
+        sw._shuffle_locator = MagicMock(return_value=locator)
+        sw._shuffle_state_from_locator = MagicMock(side_effect=[False])
+        sw._select_shuffle_menu_row = MagicMock(return_value=False)
+        sw._wait_for_shuffle_state = MagicMock(return_value=True)
+        sw._last_error = ""
+        sw._log = MagicMock()
+
+        self.assertTrue(SpotifyWebController.set_shuffle(sw, True))
+        locator.click.assert_called_once()
+        self.assertEqual(sw._last_error, "")
+
+    def test_set_shuffle_uses_split_menu_when_present(self):
+        from core.spotify_web import SpotifyWebController
+
+        sw = MagicMock(spec=SpotifyWebController)
+        page = MagicMock()
+        locator = MagicMock()
+        sw._run_on_page = lambda work: work(page)
+        sw._shuffle_locator = MagicMock(return_value=locator)
+        sw._shuffle_state_from_locator = MagicMock(side_effect=[False])
+        sw._select_shuffle_menu_row = MagicMock(return_value=True)
+        sw._wait_for_shuffle_state = MagicMock(return_value=True)
+        sw._last_error = ""
+        sw._log = MagicMock()
+
+        self.assertTrue(SpotifyWebController.set_shuffle(sw, True))
+        locator.click.assert_called_once()
+        sw._select_shuffle_menu_row.assert_called_once_with(page, True)
+
+    def test_set_shuffle_is_a_noop_when_already_matching(self):
+        from core.spotify_web import SpotifyWebController
+
+        sw = MagicMock(spec=SpotifyWebController)
+        page = MagicMock()
+        locator = MagicMock()
+        sw._run_on_page = lambda work: work(page)
+        sw._shuffle_locator = MagicMock(return_value=locator)
+        sw._shuffle_state_from_locator = MagicMock(return_value=True)
+        sw._last_error = ""
+        sw._log = MagicMock()
+
+        self.assertTrue(SpotifyWebController.set_shuffle(sw, True))
+        locator.click.assert_not_called()
+
 
 class TestAudioMonitorSources(unittest.TestCase):
     def test_all_spotify_pids_include_browser_and_desktop(self):
@@ -1416,6 +1493,56 @@ class TestAppNewRegressions(unittest.TestCase):
         self.assertFalse(app._launch_spotify_with_silent_track())
         app._spotify_desktop_controller.assert_not_called()
         app.root.after.assert_called_once()
+
+    def test_disabled_puppy_overlay_hides_desktop_mascot(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app._puppy_singing_overlay = MagicMock()
+        app._puppy_overlay_value = False
+        app._puppy_audio_active = False
+        app._intentional_pause_active = MagicMock(return_value=False)
+        app._puppy_thinking_active = MagicMock(return_value=False)
+        app._mascot_notifier = None
+        app._manual_paused = False
+        app._user_paused_flag = False
+        app._paused_by_game_flag = False
+        app._spotify_started_by_us = True
+        app._playlist_switch_pause = False
+
+        app._set_puppy_singing_visible(True)
+
+        app._puppy_singing_overlay.hide.assert_called_once_with(immediate=True)
+
+    def test_apply_shuffle_state_updates_button_and_variable(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.shuffle_var = MagicMock()
+        app.shuffle_btn = MagicMock()
+        app._log = MagicMock()
+
+        GameBeatsApp._apply_shuffle_state(app, True, log=True)
+
+        app.shuffle_var.set.assert_called_once_with(True)
+        app.shuffle_btn.set_active.assert_called_once_with(True)
+
+    def test_puppy_overlay_toggle_persists_and_hides_overlay(self):
+        from ui.app import GameBeatsApp
+
+        app = GameBeatsApp.__new__(GameBeatsApp)
+        app.puppy_overlay_var = MagicMock()
+        app.puppy_overlay_var.get.return_value = False
+        app.configure = {"puppy_overlay": True}
+        app._puppy_singing_overlay = MagicMock()
+        app._save_config = MagicMock()
+        app._log = MagicMock()
+
+        GameBeatsApp._save_puppy_overlay_setting(app)
+
+        self.assertFalse(app.configure["puppy_overlay"])
+        app._save_config.assert_called_once()
+        app._puppy_singing_overlay.hide.assert_called_once_with(immediate=True)
 
     def test_begin_playlist_switch_pause_updates_state_immediately(self):
         from ui.app import GameBeatsApp

@@ -276,6 +276,7 @@ def media_icon(name):
         "pause": ICON_PAUSE if fluent else "\u23f8",
         "prev": ICON_PREV if fluent else "\u23ee",
         "next": ICON_NEXT if fluent else "\u23ed",
+        "shuffle": "\u21c4",
         "try_again": ICON_TRY_AGAIN if fluent else "\u21ba",
         "block": ICON_BLOCK if fluent else "\u2298",
     }.get(str(name), "")

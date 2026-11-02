@@ -109,6 +109,12 @@ PLAYLIST_PLAY_SPAN_XPATH = (
     '//*[@id="main-view"]/div/div[2]/div[1]/div/main/section/div[2]/div[2]/div[1]/div/div/div[1]/button/span'
 )
 PLAYER_PLAYPAUSE_SELECTOR = '[data-testid="control-button-playpause"]'
+SHUFFLE_SELECTORS = (
+    '[data-testid="control-button-shuffle"]',
+    'button[data-testid="control-button-shuffle"]',
+    'button[aria-label*="Shuffle" i]',
+    '[role="button"][aria-label*="Shuffle" i]',
+)
 PLAYLIST_PLAY_FALLBACKS = (
     '[data-testid="play-button"]',
     'button[aria-label*="Play"]',
@@ -3012,6 +3018,155 @@ class SpotifyWebController:
             return self._click_locator(page, '[data-testid="control-button-skip-back"]')
         return bool(self._run_on_page(_work))
 
+    @staticmethod
+    def _shuffle_state_from_locator(locator):
+        """Read Spotify's shuffle state from its player button.
+
+        Spotify's button label changes with both regular shuffle and Smart
+        Shuffle.  Smart Shuffle is only available while regular shuffle is on,
+        so any Smart Shuffle label means shuffle itself is enabled.
+        """
+        try:
+            label = (locator.get_attribute("aria-label") or "").strip().lower()
+        except Exception:
+            label = ""
+        if "shuffle" in label:
+            if "smart shuffle" in label:
+                return True
+            if "disable" in label or "turn off" in label:
+                return True
+            if "enable" in label or "turn on" in label:
+                return False
+        for attr in ("aria-checked", "aria-pressed", "data-active", "data-shuffle"):
+            try:
+                raw = locator.get_attribute(attr)
+            except Exception:
+                continue
+            if raw is None:
+                continue
+            value = str(raw).strip().lower()
+            if value in ("true", "1", "on", "yes", "active"):
+                return True
+            if value in ("false", "0", "off", "no", "inactive"):
+                return False
+        return None
+
+    @classmethod
+    def _wait_for_shuffle_state(cls, locator, target: bool, timeout: float = 1.4):
+        deadline = time.time() + timeout
+        state = cls._shuffle_state_from_locator(locator)
+        while state is not target and time.time() < deadline:
+            time.sleep(0.12)
+            state = cls._shuffle_state_from_locator(locator)
+        return state
+
+    @staticmethod
+    def _select_shuffle_menu_row(page, enabled: bool) -> bool:
+        """Handle Spotify's split shuffle menu when this UI variant shows it."""
+        try:
+            rows = page.locator('[role="menuitemradio"]')
+            for index in range(rows.count()):
+                row = rows.nth(index)
+                try:
+                    text = (row.inner_text() or "").strip().lower()
+                except Exception:
+                    continue
+                if text != "shuffle":
+                    continue
+                checked = (
+                    (row.get_attribute("aria-checked") or "").strip().lower()
+                    == "true"
+                )
+                if checked is not enabled:
+                    row.click(timeout=2000)
+                    time.sleep(0.25)
+                try:
+                    page.keyboard.press("Escape")
+                except Exception:
+                    pass
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _shuffle_locator(self, page):
+        for selector in SHUFFLE_SELECTORS:
+            try:
+                locator = page.locator(selector)
+                count = locator.count()
+            except Exception:
+                continue
+            for index in range(count):
+                candidate = locator.nth(index)
+                try:
+                    if candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+            if count:
+                return locator.first
+        return None
+
+    def get_shuffle_state(self):
+        """Return the web player's shuffle state, or None when unavailable."""
+        def _work(page):
+            locator = self._shuffle_locator(page)
+            if locator is None:
+                return None
+            return self._shuffle_state_from_locator(locator)
+
+        return self._run_on_page(_work)
+
+    def set_shuffle(self, enabled: bool) -> bool:
+        """Match the Spotify web player's shuffle button to *enabled*."""
+        target = bool(enabled)
+
+        def _work(page):
+            locator = self._shuffle_locator(page)
+            if locator is None:
+                self._last_error = "Shuffle button not found in the Spotify web player"
+                return False
+            state = self._shuffle_state_from_locator(locator)
+            if state is target:
+                return True
+            try:
+                # OneTrust's cookie banner can sit above the player controls.
+                page.evaluate(
+                    "() => { for (const s of ['#onetrust-consent-sdk', "
+                    "'#onetrust-banner-sdk', '.onetrust-pc-dark-filter']) { "
+                    "const el = document.querySelector(s); if (el) el.remove(); } }"
+                )
+            except Exception:
+                pass
+            # Spotify has two shuffle UI variants.  Some builds toggle directly;
+            # others open a Shuffle / Smart Shuffle menu.  Click at most twice so
+            # turning ordinary shuffle off never leaves Smart Shuffle enabled.
+            for _ in range(2):
+                if state is target:
+                    return True
+                try:
+                    locator.click(timeout=2500)
+                except Exception as ex:
+                    self._last_error = f"Could not click Spotify shuffle: {ex}"
+                    return False
+                time.sleep(0.3)
+                self._select_shuffle_menu_row(page, target)
+                state = self._wait_for_shuffle_state(locator, target)
+                if state is target:
+                    return True
+            state = self._wait_for_shuffle_state(locator, target)
+            if state is None:
+                # Unknown state after a trusted click: treat the click itself as
+                # the best available confirmation.
+                return True
+            self._last_error = "Spotify did not change shuffle state"
+            return state is target
+
+        ok = bool(self._run_on_page(_work))
+        if ok:
+            self._log("Shuffle " + ("on" if target else "off"))
+        return ok
+
     @property
     def paused_by_game(self) -> bool:
         return self._paused_by_game
@@ -3078,8 +3233,15 @@ class SpotifyWebController:
             playing = self._player_is_playing(page)
             if playing is None:
                 playing = self._is_playing
+            shuffle = None
+            try:
+                shuffle_locator = self._shuffle_locator(page)
+                if shuffle_locator is not None:
+                    shuffle = self._shuffle_state_from_locator(shuffle_locator)
+            except Exception:
+                shuffle = None
             if title or playing:
-                return {
+                track = {
                     "name": title or "Spotify",
                     "artist": artist or self._last_query[:40] or "Web player",
                     "album_art": album_art,
@@ -3090,6 +3252,9 @@ class SpotifyWebController:
                     "playlist_uri": self._last_uri,
                     "context_uri": self._last_uri,
                 }
+                if shuffle is not None:
+                    track["shuffle"] = bool(shuffle)
+                return track
             return None
 
         data = self._run_on_page(_work)
