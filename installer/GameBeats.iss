@@ -1,6 +1,6 @@
 #define MyAppName "GameBeats"
-#define MyAppVersion "2.0.0"
-#define MyAppVerName "GameBeats 2.0 Beta"
+#define MyAppVersion "2.0.1"
+#define MyAppVerName "GameBeats 2.0.1"
 #define MyAppPublisher "GameBeats"
 #define MyAppExeName "GameBeats.exe"
 
@@ -23,8 +23,8 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 UninstallDisplayIcon={app}\{#MyAppExeName}
-VersionInfoVersion=2.0.0.0
-VersionInfoProductVersion=2.0.0.0
+VersionInfoVersion=2.0.1.0
+VersionInfoProductVersion=2.0.1.0
 VersionInfoProductName={#MyAppName}
 VersionInfoDescription={#MyAppVerName} Setup
 

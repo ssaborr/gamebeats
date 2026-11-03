@@ -414,6 +414,12 @@ class AddGameDialog(ctk.CTkToplevel):
              if str(t).startswith("_custom_query:")),
             "",
         )
+        # Track whether the search box was written by the user.  The Steam
+        # lookup auto-fills it for display, but an untouched auto-query must
+        # not be saved as a custom query: the mood is applied later by the
+        # music picker instead.
+        self._query_user_edited = bool(self._prefill_query)
+        self._setting_query = False
 
         w = 900
         # Query the Windows workarea (screen minus taskbar) via ctypes
@@ -552,6 +558,7 @@ class AddGameDialog(ctk.CTkToplevel):
             font=T.retro_font(14), anchor="w",
         ).pack(anchor=tk.W, pady=(2, 4))
         self._query_var = tk.StringVar()
+        self._query_var.trace_add("write", self._on_query_changed)
         ctk.CTkEntry(pad, textvariable=self._query_var,
                      fg_color=SURF2, border_color=WOOD, text_color=TEXT,
                      corner_radius=0, font=T.retro_font(17), height=42).pack(
@@ -582,12 +589,14 @@ class AddGameDialog(ctk.CTkToplevel):
                      text_color=GOLD, font=T.pixel_font(11, "bold")).pack(
             anchor=tk.W, pady=(0, 2))
         ctk.CTkLabel(
-            pad, text="Pick the feeling. You can change it any time.",
+            pad, text="Pick the feeling. Leave it blank to keep it Custom.",
             fg_color="transparent", text_color=TEXT_MUTED,
             font=T.retro_font(14), anchor="w",
         ).pack(anchor=tk.W, pady=(0, 6))
 
-        self._mood_var  = tk.StringVar(value=MOODS[0])
+        # Start with no mood selected.  A mood is only used when the user
+        # explicitly clicks one; otherwise the cart is saved as Custom.
+        self._mood_var  = tk.StringVar(value="")
         self._mood_btns = {}
         grid = ctk.CTkFrame(pad, fg_color=BG, corner_radius=0)
         grid.pack(fill=tk.X)
@@ -605,15 +614,32 @@ class AddGameDialog(ctk.CTkToplevel):
             grid.columnconfigure(c, weight=1)
             self._mood_btns[mood] = btn
 
-        fi = MOOD_TO_PLAYLIST[MOODS[0]]
-        self._mood_btns[MOODS[0]].configure(
-            fg_color=_mood_tint(fi["color"]), text_color=fi["color"])
+        # Custom is always available so a mood can be cleared again.
+        custom_info = MOOD_TO_PLAYLIST["custom"]
+        custom_r, custom_c = divmod(len(MOODS), cols)
+        custom_btn = ctk.CTkButton(
+            grid, text=custom_info["name"],
+            fg_color=SURF3, text_color=TEXT,
+            hover_color=SURF4, corner_radius=6,
+            font=T.retro_font(15), height=40,
+            command=lambda: self._clear_mood(),
+        )
+        custom_btn.grid(row=custom_r, column=custom_c, padx=3, pady=3, sticky="ew")
+        grid.columnconfigure(custom_c, weight=1)
+        self._mood_btns["custom"] = custom_btn
+
+        self._mood_hint_lbl = ctk.CTkLabel(
+            pad, text="No mood picked \u2014 this game will use Custom.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(14), anchor="w",
+        )
+        self._mood_hint_lbl.pack(anchor=tk.W, pady=(4, 0))
 
         existing_uri = self._existing.get("spotify_playlist_uri") or ""
         if existing_uri:
             self._playlist_url_var.set(existing_uri)
         if self._prefill_query:
-            self._query_var.set(self._prefill_query)
+            self._set_query_text(self._prefill_query)
 
         if self._prefill_mood in self._mood_btns:
             self._mood_var.set(self._prefill_mood)
@@ -624,6 +650,21 @@ class AddGameDialog(ctk.CTkToplevel):
                 fg_color=_mood_tint(mood_info["color"]),
                 text_color=mood_info["color"],
             )
+            self._mood_hint_lbl.configure(
+                text=f"Music mood: {mood_info['name']}",
+                text_color=mood_info["color"],
+            )
+
+    def _set_query_text(self, text):
+        self._setting_query = True
+        try:
+            self._query_var.set(text)
+        finally:
+            self._setting_query = False
+
+    def _on_query_changed(self, *_args):
+        if not getattr(self, "_setting_query", False):
+            self._query_user_edited = True
 
     def _sel_mood(self, mood, color):
         self._user_changed_mood = True
@@ -631,6 +672,31 @@ class AddGameDialog(ctk.CTkToplevel):
         for m, ob in self._mood_btns.items():
             ob.configure(fg_color=SURF3, text_color=TEXT)
         self._mood_btns[mood].configure(fg_color=_mood_tint(color), text_color=color)
+        try:
+            self._mood_hint_lbl.configure(
+                text=f"Music mood: {MOOD_TO_PLAYLIST[mood]['name']}",
+                text_color=color,
+            )
+        except Exception:
+            pass
+
+    def _clear_mood(self):
+        self._user_changed_mood = True
+        self._mood_var.set("")
+        for _m, ob in self._mood_btns.items():
+            ob.configure(fg_color=SURF3, text_color=TEXT)
+        custom_info = MOOD_TO_PLAYLIST["custom"]
+        self._mood_btns["custom"].configure(
+            fg_color=_mood_tint(custom_info["color"]),
+            text_color=custom_info["color"],
+        )
+        try:
+            self._mood_hint_lbl.configure(
+                text="No mood picked \u2014 this game will use Custom.",
+                text_color=TEXT_MUTED,
+            )
+        except Exception:
+            pass
 
     def _fetch_tags_worker(self, game_name: str):
         try:
@@ -653,9 +719,6 @@ class AddGameDialog(ctk.CTkToplevel):
         self._fetched_tags  = info.get("tags", [])
         self._fetched_query = info.get("query", "")
         self._fetched_app_id = info.get("app_id", "")
-        mood = info.get("mood", MOODS[0])
-        if self._prefill_mood and not self._user_changed_mood:
-            mood = self._prefill_mood
 
         tag_names = [t for t in self._fetched_tags if not t.startswith("_custom_query:")]
         if tag_names:
@@ -664,24 +727,16 @@ class AddGameDialog(ctk.CTkToplevel):
                 text_color=ACCENT)
         elif from_steam:
             self._tags_lbl.configure(
-                text="ℹ Not on Steam — mood from game name", text_color=TEXT2)
+                text="ℹ Not on Steam — search built from the game name", text_color=TEXT2)
         elif self._tag_fetching:
             self._tags_lbl.configure(
                 text="🔍 Looking up Steam tags…", text_color=AMBER)
         else:
             self._tags_lbl.configure(
-                text="ℹ Mood suggested from game name", text_color=TEXT2)
+                text="ℹ Search built from the game name", text_color=TEXT2)
 
-        if self._fetched_query and not self._prefill_query:
-            self._query_var.set(self._fetched_query)
-
-        if mood in self._mood_btns:
-            self._mood_var.set(mood)
-            for ob in self._mood_btns.values():
-                ob.configure(fg_color=SURF3, text_color=TEXT)
-            info2 = MOOD_TO_PLAYLIST[mood]
-            c = info2["color"]
-            self._mood_btns[mood].configure(fg_color=_mood_tint(c), text_color=c)
+        if self._fetched_query and not self._prefill_query and not self._query_user_edited:
+            self._set_query_text(self._fetched_query)
 
     def _validate_playlist_url(self, *_args):
         """Real-time validation of the Spotify playlist URL field."""
@@ -715,15 +770,18 @@ class AddGameDialog(ctk.CTkToplevel):
 
     def _save(self):
         name = self._name_var.get().strip() or self._proc
-        mood = self._mood_var.get()
+        # No mood picked == Custom.  A real mood is used by the music picker.
+        mood = (self._mood_var.get() or "").strip() or "custom"
         tags = list(self._fetched_tags)
-        cq   = self._query_var.get().strip()
+        # Only save the search box when the user actually wrote in it.  The
+        # auto-filled Steam query is rebuilt from tags + mood at play time, so
+        # changing the mood later is not blocked by a stale query.
+        cq   = self._query_var.get().strip() if self._query_user_edited else ""
         if cq:
             tags = [t for t in tags if not t.startswith("_custom_query:")]
             tags.append(f"_custom_query:{cq}")
-        elif self._fetched_query:
+        else:
             tags = [t for t in tags if not t.startswith("_custom_query:")]
-            tags.append(f"_custom_query:{self._fetched_query}")
         playlist_uri = self._extract_playlist_uri(
             self._playlist_url_var.get().strip())
         if self.on_save:
@@ -785,11 +843,16 @@ class GamesPage(ctk.CTkFrame):
 
     def _on_saved(self, proc_name, display_name, mood, exe_path, tags,
                   spotify_playlist_uri="", app_id=""):
+        was_saved = str(proc_name).lower() in load_games()
         add_game(proc_name, display_name, mood, exe_path, tags,
                  spotify_playlist_uri=spotify_playlist_uri, app_id=app_id)
         self._refresh_saved()
         if self.on_games_changed:
-            self.on_games_changed()
+            try:
+                self.on_games_changed(proc_name, was_saved)
+            except TypeError:
+                # Older callbacks take no arguments.
+                self.on_games_changed()
 
     def _refresh_saved(self):
         for w in self._saved_inner.winfo_children():

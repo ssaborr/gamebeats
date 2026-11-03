@@ -66,9 +66,13 @@ MOOD_TO_PLAYLIST = {
     "nordic":        {"name": "🪓 Nordic Folk",        "query": "nordic folk viking atmospheric",     "color": "#546E7A"},
     "tense":         {"name": "😰 Tense Thriller",     "query": "tense thriller suspense dark",       "color": "#D32F2F"},
     "hiphop":        {"name": "🎤 Hip Hop",            "query": "hip hop beats rap trap",             "color": "#FF6F00"},
+    # Used when the user does not pick a mood.  It is deliberately *not* in
+    # MOODS, so it can never be chosen as a mood button.
+    "custom":        {"name": "✏️  Custom",           "query": "",                                    "color": "#8E8E93"},
 }
 
-MOODS = list(MOOD_TO_PLAYLIST.keys())
+MOODS = [m for m in MOOD_TO_PLAYLIST if m != "custom"]
+CUSTOM_MOOD = "custom"
 
 # ── Built-in fallback DB ──────────────────────────────────────────────────────
 BUILTIN_DB = {

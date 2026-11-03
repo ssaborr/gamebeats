@@ -116,7 +116,11 @@ def build_search_query(game_name: str = "", tags: list = None, query_hint: str =
                 continue
             parts.append(word)
 
-    if len(parts) < 3 and query_hint:
+    # The mood hint must actually influence the search.  Previously it was
+    # only used when the game name + tags produced fewer than three words,
+    # which meant a user-picked mood was silently ignored for almost every
+    # Steam game (they always have tags).
+    if query_hint:
         for word in _mood_extra_words(query_hint, max_words=3):
             if word.lower() not in {p.lower() for p in parts}:
                 parts.append(word)

@@ -33,7 +33,9 @@ else:
     HAS_WINREG = False
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from core.detector import GameDetector, MOOD_TO_PLAYLIST, get_pid_for_proc
+from core.detector import (
+    GameDetector, MOOD_TO_PLAYLIST, get_pid_for_proc, load_games,
+)
 from core.spotify import SpotifyAuth, SpotifyController
 from core.spotify_web import SpotifyWebController
 from core.audio_monitor import (
@@ -2561,7 +2563,7 @@ class GameBeatsApp:
         tools.pack(side=tk.RIGHT, padx=(0, 26), fill=tk.Y)
 
         self._footer_version_lbl = ctk.CTkLabel(
-            tools, text="V.2.0 BETA  \u25aa  MADE FOR YOUR SIDE QUESTS", fg_color="transparent",
+            tools, text="V.2.0.1  \u25aa  MADE FOR YOUR SIDE QUESTS", fg_color="transparent",
             text_color=WOOD, font=T.pixel_font(8),
         )
         self._footer_version_lbl.pack(side=tk.RIGHT, padx=(14, 0))
@@ -5138,9 +5140,82 @@ class GameBeatsApp:
         p = self._make_page_body(self._page_games)
         GamesPage(
             p,
-            on_games_changed=lambda: self._log("Game list updated."),
+            on_games_changed=self._on_games_updated,
             on_back=lambda: self._nav("main"),
         ).pack(fill=tk.BOTH, expand=True)
+
+    def _on_games_updated(self, proc_name=None, was_edit=False):
+        """Refresh UI after a game is added/edited.
+
+        If the currently running game was edited, its music setup changed
+        (mood, search query, or assigned playlist).  Re-run the music picker
+        so the new settings take effect instead of keeping the old playlist.
+        """
+        self._log("Game list updated.")
+        if not was_edit or not proc_name:
+            return
+        game = getattr(self, "current_game", None)
+        if not game:
+            return
+        if str(game.get("proc", "")).lower() != str(proc_name).lower():
+            return
+        saved = load_games().get(str(proc_name).lower())
+        if not saved:
+            return
+
+        # Merge the freshly saved settings with the live process info so the
+        # player keeps pointing at the same running game.
+        info = dict(saved)
+        info["proc"] = game.get("proc") or proc_name
+        info["pid"] = game.get("pid")
+        info["source"] = game.get("source", "user")
+        self.current_game = info
+
+        mood = info.get("mood") or "custom"
+        mood_info = MOOD_TO_PLAYLIST.get(mood, {})
+        color = mood_info.get("color", ACCENT)
+        self.game_banner.configure(
+            text=str(info.get("name", proc_name)).upper(), text_color=color)
+        self.mood_lbl.configure(
+            text=f"Mood: {mood_info.get('name', mood)}  \u00b7  "
+                 "loud game audio pauses music\u2026")
+        self._set_status(str(info.get("name", proc_name)), color)
+        self._set_game_icon(info)
+        self._redraw_room()
+        self._log("Game settings changed \u2014 picking music again\u2026")
+        self.root.after(50, lambda i=info: self._reapply_music_for_game(i))
+
+    def _reapply_music_for_game(self, info):
+        """Run the music-picking pipeline again for an edited game."""
+        if not info or not getattr(self, "spotify", None):
+            return
+        # Invalidate any controller request that is still finishing, and drop
+        # a queued switch so the new settings are the only request in flight.
+        self._pending_play_request = None
+        self._play_request_seq = int(getattr(self, "_play_request_seq", 0)) + 1
+        self._active_play_request_id = 0
+        self._play_in_progress = False
+
+        custom_uri = info.get("spotify_playlist_uri", "")
+        if custom_uri:
+            self._begin_playlist_switch_pause("Applying updated playlist")
+
+            def _run_custom():
+                self._automation_in_progress = True
+                try:
+                    self._play_custom_playlist_for_game(info, custom_uri)
+                finally:
+                    self._automation_in_progress = False
+
+            threading.Thread(target=_run_custom, daemon=True).start()
+            return
+
+        self._play_query_for_game(
+            info,
+            force_new=True,
+            reason="Applying updated music",
+            pause_first=True,
+        )
 
     # ── BLOCKED PAGE ──────────────────────────────────────────────────────────
 
@@ -5980,12 +6055,13 @@ class GameBeatsApp:
         # user pressed Play first), other-app audio was never watched and
         # music no longer paused. This is the core auto-pause regression.
         self.root.after(0, lambda g=info: self._ensure_audio_monitor(g))
-        mood_info = MOOD_TO_PLAYLIST.get(info["mood"], {})
+        game_mood = info.get("mood") or "custom"
+        mood_info = MOOD_TO_PLAYLIST.get(game_mood, {})
         color = mood_info.get("color", ACCENT)
         self.root.after(0, lambda: (
             self.game_banner.configure(text=str(info["name"]).upper(), text_color=color),
             self.mood_lbl.configure(
-                text=f"Mood: {mood_info.get('name', info['mood'])}  \u00b7  loud game audio pauses music\u2026"),
+                text=f"Mood: {mood_info.get('name', game_mood)}  \u00b7  loud game audio pauses music\u2026"),
             self._set_status(info["name"], color),
             self._log(f"Game running: {info['name']}"),
             self._set_game_icon(info),
@@ -6450,16 +6526,15 @@ class GameBeatsApp:
         skip_uris = self._skip_playlist_uris(requested_excludes)
         current_blocked = bool(self._current_playlist_uri and self._current_playlist_uri in self._blocked_playlist_uris())
         tags = info.get("tags", [])
-        mood = info.get("mood", "chill")
+        mood = info.get("mood") or "custom"
         game_name = info.get("name", "")
         mood_info = MOOD_TO_PLAYLIST.get(mood, {})
-        # Search uses game name + saved tags; mood words only if tags are sparse
+        # A picked mood must actually shape the search.  "custom" means the
+        # user did not pick one, so only the game name/tags/custom query are
+        # used.
+        mood_hint = "" if mood == "custom" else mood_info.get("query", "")
         from core.playlist_search import build_search_query
-        search_q = build_search_query(
-            game_name,
-            tags,
-            mood_info.get("query", "") if len([t for t in tags if not str(t).startswith("_")]) < 2 else "",
-        )
+        search_q = build_search_query(game_name, tags, mood_hint)
         self._play_in_progress = True
         cached = (
             self._is_desktop_mode()
@@ -6501,7 +6576,7 @@ class GameBeatsApp:
                 if self._is_web_mode() or self._is_desktop_mode():
                     result = self.spotify.play_random_for_mood(
                         mood=mood,
-                        query_hint="",
+                        query_hint=mood_hint,
                         game_name=game_name,
                         tags=tags,
                         force_new=force_new or bool(requested_excludes) or current_blocked,
