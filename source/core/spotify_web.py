@@ -604,6 +604,10 @@ class SpotifyWebController:
             # makes Spotify's web player report "Unsupported keySystem" and
             # play silently. Removing it lets Chrome load Widevine.
             ignore_default_args=["--enable-automation", "--disable-component-update"],
+            # Playwright disables Chrome's sandbox by default, which makes
+            # Spotify/Chrome show the "unsupported command-line flag" banner.
+            # Keep the sandbox on so the login page behaves like normal Chrome.
+            chromium_sandbox=True,
             user_agent=(
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -807,6 +811,7 @@ class SpotifyWebController:
             # makes Spotify's web player report "Unsupported keySystem" and
             # play silently. Removing it lets Chrome load Widevine.
             ignore_default_args=["--enable-automation", "--disable-component-update"],
+                chromium_sandbox=True,
                 no_viewport=not self._headless,
             )
             try:

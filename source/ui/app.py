@@ -1759,57 +1759,88 @@ class GameBeatsApp:
         self._spotify_login_prompt = win
         win.title("Spotify Login")
         win.configure(fg_color=BG)
-        win.resizable(True, True)
-        win.minsize(450, 350)
+        # Frameless like the main window so the login prompt matches the den
+        # instead of showing Windows' native title bar.
+        win.overrideredirect(True)
+        win.resizable(False, False)
         win.transient(self.root)
-        win.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        try:
-            w, h = 580, 420
+        def _close_prompt():
             try:
-                scale = win.tk.call('tk', 'scaling')
-                if scale > 1.35:
-                    mult = scale / 1.333333
-                    w = int(w * mult)
-                    h = int(h * mult)
+                win.grab_release()
             except Exception:
                 pass
-            x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - w) // 2)
-            y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - h) // 2)
-            win.geometry(f"{w}x{h}+{x}+{y}")
-        except Exception:
-            pass
+            try:
+                win.destroy()
+            except Exception:
+                pass
+            self._spotify_login_prompt = None
+            self._spotify_login_status_lbl = None
 
-        # Apply app icon to the login popup window
+        win.protocol("WM_DELETE_WINDOW", _close_prompt)
+
+        outer = ctk.CTkFrame(
+            win, fg_color=BG, corner_radius=14,
+            border_width=2, border_color=SURFACE3,
+        )
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        titlebar = ctk.CTkFrame(
+            outer, fg_color=SURFACE2, height=44, corner_radius=10,
+        )
+        titlebar.pack(fill=tk.X, padx=8, pady=(8, 0))
+        titlebar.pack_propagate(False)
+
         try:
-            if hasattr(self, '_window_icon_photo') and self._window_icon_photo:
-                win.iconphoto(False, self._window_icon_photo)
+            if getattr(self, "_window_icon_photo", None):
+                ctk.CTkLabel(
+                    titlebar, image=self._window_icon_photo, text="",
+                    fg_color="transparent", width=26, height=26,
+                ).pack(side=tk.LEFT, padx=(12, 8))
         except Exception:
             pass
 
-        card = ctk.CTkFrame(win, fg_color=SURFACE, corner_radius=12)
-        card.pack(fill=tk.BOTH, expand=True, padx=24, pady=24)
+        title_lbl = ctk.CTkLabel(
+            titlebar, text="SPOTIFY LOGIN", fg_color="transparent",
+            text_color=GOLD, font=T.pixel_font(10, "bold"),
+        )
+        title_lbl.pack(side=tk.LEFT)
 
-        # Header row: logo + title
-        header_row = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-        header_row.pack(anchor="w", fill=tk.X, padx=16, pady=(16, 4))
-        try:
-            if hasattr(self, '_window_icon_photo') and self._window_icon_photo:
-                logo_lbl = ctk.CTkLabel(
-                    header_row, image=self._window_icon_photo, text="",
-                    fg_color="transparent", width=28, height=28
-                )
-                logo_lbl.pack(side=tk.LEFT, padx=(0, 8))
-        except Exception:
-            pass
+        ctk.CTkButton(
+            titlebar, text="✕", width=30, height=28,
+            fg_color="transparent", hover_color=SURFACE3,
+            text_color=TEXT_MUTED, font=T.ctk_font(14),
+            corner_radius=6, command=_close_prompt,
+        ).pack(side=tk.RIGHT, padx=8, pady=8)
+
+        # Let the user drag the frameless prompt by its title bar.
+        def _start_move(e):
+            win._drag_off = (
+                e.x_root - win.winfo_rootx(),
+                e.y_root - win.winfo_rooty(),
+            )
+
+        def _do_move(e):
+            dx, dy = getattr(win, "_drag_off", (0, 0))
+            win.geometry(f"+{e.x_root - dx}+{e.y_root - dy}")
+
+        for _grab in (titlebar, title_lbl):
+            _grab.bind("<ButtonPress-1>", _start_move)
+            _grab.bind("<B1-Motion>", _do_move)
+
+        card = ctk.CTkFrame(outer, fg_color=SURFACE, corner_radius=10)
+        card.pack(fill=tk.BOTH, expand=True, padx=8, pady=(6, 8))
+
         ctk.CTkLabel(
-            header_row, text="Login to Spotify", fg_color="transparent", text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=18, weight="bold")
-        ).pack(side=tk.LEFT)
+            card, text="Login to Spotify", fg_color="transparent",
+            text_color=TEXT, font=T.serif_font(24, "bold"), anchor="w",
+        ).pack(anchor="w", fill=tk.X, padx=18, pady=(14, 0))
+        ctk.CTkLabel(
+            card, text="ONE-TIME SPOTIFY SIGN-IN", fg_color="transparent",
+            text_color=GOLD, font=T.pixel_font(9, "bold"), anchor="w",
+        ).pack(anchor="w", fill=tk.X, padx=18, pady=(0, 8))
 
-        # Use a safe hardcoded wraplength so text wraps on first paint.
-        # A deferred call also recalculates it once the window is actually rendered.
-        _WRAP = 460
+        _WRAP = 430
 
         lbl_info = ctk.CTkLabel(
             card,
@@ -1818,10 +1849,10 @@ class GameBeatsApp:
                 "Use the Spotify account you want GameBeats to play from.\n"
                 "Your login is saved on this PC — you won't need to do this again."
             ),
-            fg_color="transparent", text_color=TEXT_SEC, font=ctk.CTkFont(family=F_UI, size=11),
+            fg_color="transparent", text_color=TEXT_SEC, font=T.ctk_font(11),
             justify=tk.LEFT, wraplength=_WRAP, anchor="w",
         )
-        lbl_info.pack(anchor="w", fill=tk.X, padx=16, pady=(0, 14))
+        lbl_info.pack(anchor="w", fill=tk.X, padx=18, pady=(0, 10))
 
         lbl_warn = ctk.CTkLabel(
             card,
@@ -1829,47 +1860,21 @@ class GameBeatsApp:
                 "⚠  If you use Google or another provider to log in to Spotify, choose that option here.\n"
                 "Avoid typing your email/password directly unless that's how your account normally signs in."
             ),
-            fg_color="transparent", text_color=AMBER, font=ctk.CTkFont(family=F_UI, size=11),
+            fg_color="transparent", text_color=AMBER, font=T.ctk_font(11),
             justify=tk.LEFT, wraplength=_WRAP, anchor="w",
         )
-        lbl_warn.pack(anchor="w", fill=tk.X, padx=16, pady=(0, 10))
+        lbl_warn.pack(anchor="w", fill=tk.X, padx=18, pady=(0, 8))
 
         self._spotify_login_status_lbl = ctk.CTkLabel(
             card,
             text="Open the login window, sign in to Spotify, then come back here.",
-            fg_color="transparent", text_color=TEXT_MUTED, font=ctk.CTkFont(family=F_UI, size=11),
-            justify=tk.LEFT, wraplength=_WRAP,
+            fg_color="transparent", text_color=TEXT_MUTED, font=T.ctk_font(11),
+            justify=tk.LEFT, wraplength=_WRAP, anchor="w",
         )
-        self._spotify_login_status_lbl.pack(anchor="w", fill=tk.X, padx=16, pady=(0, 14))
-
-        def _apply_wrap(wrap):
-            """Apply wraplength to all text labels in the dialog."""
-            try:
-                lbl_info.configure(wraplength=wrap)
-                lbl_warn.configure(wraplength=wrap)
-                if self._spotify_login_status_lbl:
-                    self._spotify_login_status_lbl.configure(wraplength=wrap)
-            except Exception:
-                pass
-
-        def _on_card_resize(e):
-            _apply_wrap(max(200, e.width - 60))
-
-        card.bind("<Configure>", _on_card_resize)
-
-        # Re-apply wraplength after window is fully drawn so it's pixel-accurate
-        def _deferred_wrap():
-            try:
-                cw = card.winfo_width()
-                if cw > 100:
-                    _apply_wrap(max(200, cw - 60))
-            except Exception:
-                pass
-        win.after(50, _deferred_wrap)
-        win.after(250, _deferred_wrap)
+        self._spotify_login_status_lbl.pack(anchor="w", fill=tk.X, padx=18, pady=(0, 10))
 
         row = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
-        row.pack(fill=tk.X, padx=16, pady=(4, 0))
+        row.pack(fill=tk.X, padx=18, pady=(4, 14))
 
         def _set_status(text, color=TEXT_MUTED):
             if self._spotify_login_status_lbl:
@@ -1894,6 +1899,10 @@ class GameBeatsApp:
             _set_status("Checking Spotify login...", ACCENT)
 
             def _complete():
+                try:
+                    win.grab_release()
+                except Exception:
+                    pass
                 try:
                     win.destroy()
                 except Exception:
@@ -1935,23 +1944,78 @@ class GameBeatsApp:
         ctk.CTkButton(
             row, text="Open Spotify Login", command=_open_login,
             fg_color=ACCENT, hover_color=ACCENT2, text_color="#000",
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"),
-            corner_radius=8
+            font=T.ctk_font(10, "bold"), corner_radius=8,
         ).pack(side=tk.LEFT)
-        
+
         ctk.CTkButton(
             row, text="I am logged in", command=_verify_login,
             fg_color=SURFACE3, hover_color=SURFACE4, text_color=TEXT,
-            font=ctk.CTkFont(family=F_UI, size=10, weight="bold"),
-            corner_radius=8
+            font=T.ctk_font(10, "bold"), corner_radius=8,
         ).pack(side=tk.LEFT, padx=(12, 0))
-        
+
         ctk.CTkButton(
             row, text="Exit", command=self._on_close,
-            fg_color="transparent", hover_color=SURFACE2, text_color=TEXT_MUTED,
-            font=ctk.CTkFont(family=F_UI, size=10),
-            corner_radius=8
+            fg_color="transparent", hover_color=SURFACE2,
+            text_color=TEXT_MUTED, font=T.ctk_font(10), corner_radius=8,
         ).pack(side=tk.RIGHT)
+
+        def _center_popup():
+            """Center the auto-sized prompt on the main window in physical px."""
+            try:
+                win.update_idletasks()
+                pw, ph = win.winfo_width(), win.winfo_height()
+                if pw < 80 or ph < 80:
+                    win.after(80, _center_popup)
+                    return
+                import ctypes
+                from ctypes import wintypes
+
+                root_hwnd = (
+                    ctypes.windll.user32.GetParent(self.root.winfo_id())
+                    or self.root.winfo_id()
+                )
+                rc = wintypes.RECT()
+                ctypes.windll.user32.GetWindowRect(
+                    root_hwnd, ctypes.byref(rc),
+                )
+                rw = max(1, rc.right - rc.left)
+                rh = max(1, rc.bottom - rc.top)
+                x = rc.left + max(0, (rw - pw) // 2)
+                y = rc.top + max(0, (rh - ph) // 2)
+                wa_x, wa_y, wa_w, wa_h = self._physical_workarea()
+                x = max(wa_x, min(x, wa_x + wa_w - pw))
+                y = max(wa_y, min(y, wa_y + wa_h - ph))
+                popup_hwnd = (
+                    ctypes.windll.user32.GetParent(win.winfo_id())
+                    or win.winfo_id()
+                )
+                # Position only: let Tk keep the auto-sized width/height.
+                ctypes.windll.user32.SetWindowPos(
+                    popup_hwnd, 0, int(x), int(y), 0, 0,
+                    0x0001 | 0x0004 | 0x0010,
+                )
+            except Exception:
+                pass
+
+        win.after(10, _center_popup)
+        win.after(160, _center_popup)
+        win.after(400, _center_popup)
+
+        def _activate_prompt():
+            """Make sure the first click lands on the prompt, not the den."""
+            try:
+                win.lift()
+                win.focus_force()
+                win.grab_set()
+            except Exception:
+                pass
+
+        # The window is mapped/asized slightly after creation, so focus it
+        # again once it is stable. Without this, the first click can be eaten
+        # by window activation and the login button appears to do nothing.
+        win.after(120, _activate_prompt)
+        win.after(450, _activate_prompt)
+        win.bind("<Button-1>", lambda _e: _activate_prompt(), add="+")
 
         try:
             win.parent = self.root
@@ -2626,6 +2690,47 @@ class GameBeatsApp:
         self._tick_clock()
         self._refresh_connection_ui()
 
+    def _physical_workarea(self):
+        """Screen work area in physical pixels: (x, y, width, height)."""
+        x, y = 0, 0
+        w, h = 1920, 1080
+        try:
+            w = self.root.winfo_screenwidth()
+            h = self.root.winfo_screenheight()
+        except Exception:
+            pass
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            rect = wintypes.RECT()
+            # SPI_GETWORKAREA = 0x0030
+            if ctypes.windll.user32.SystemParametersInfoW(
+                0x0030, 0, ctypes.byref(rect), 0,
+            ):
+                x = int(rect.left)
+                y = int(rect.top)
+                w = max(1, int(rect.right - rect.left))
+                h = max(1, int(rect.bottom - rect.top))
+        except Exception:
+            pass
+        return x, y, max(1, int(w)), max(1, int(h))
+
+    def _set_physical_window_bounds(self, x, y, w, h):
+        """Resize the frameless window in physical pixels (DPI-proof)."""
+        try:
+            import ctypes
+
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                hwnd = self.root.winfo_id()
+            # SWP_NOZORDER | SWP_NOACTIVATE
+            return bool(ctypes.windll.user32.SetWindowPos(
+                hwnd, 0, int(x), int(y), int(w), int(h), 0x0004 | 0x0010,
+            ))
+        except Exception:
+            return False
+
     def _toggle_maximize_window(self):
         """Maximize/restore the frameless window without relying on WM chrome."""
         try:
@@ -2633,12 +2738,29 @@ class GameBeatsApp:
                 if self._restore_geometry:
                     self.root.geometry(self._restore_geometry)
                 self._is_maximized = False
-            else:
-                self._restore_geometry = self.root.geometry()
-                sw = self.root.winfo_screenwidth()
-                sh = self.root.winfo_screenheight()
-                self.root.geometry(f"{sw}x{sh}+0+0")
+                return
+
+            self._restore_geometry = self.root.geometry()
+
+            # SetWindowPos works in physical pixels, so it bypasses
+            # CustomTkinter's DPI scaling entirely. This is what keeps a
+            # 2560x1440 display from turning into a 4480x2520 window at 175%.
+            wa_x, wa_y, wa_w, wa_h = self._physical_workarea()
+            if self._set_physical_window_bounds(wa_x, wa_y, wa_w, wa_h):
                 self._is_maximized = True
+                return
+
+            # Non-Windows / blocked fallback: convert physical pixels to the
+            # geometry units CustomTkinter expects.
+            try:
+                ui_scale = max(
+                    1.0, float(getattr(self, "_ui_scale", 1.0) or 1.0))
+            except Exception:
+                ui_scale = 1.0
+            win_w = max(1, int(round(wa_w / ui_scale)))
+            win_h = max(1, int(round(wa_h / ui_scale)))
+            self.root.geometry(f"{win_w}x{win_h}+{wa_x}+{wa_y}")
+            self._is_maximized = True
         except Exception:
             pass
 
@@ -5273,7 +5395,7 @@ class GameBeatsApp:
             ).pack(pady=(22, 4))
             ctk.CTkLabel(
                 empty, text="Nothing blocked. Yet.", fg_color="transparent",
-                text_color=TEXT, font=T.serif_font(24, "italic"),
+                text_color=TEXT, font=T.serif_font(24, slant="italic"),
             ).pack()
             ctk.CTkLabel(
                 empty,

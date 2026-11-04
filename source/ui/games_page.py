@@ -980,6 +980,15 @@ class GamesPage(ctk.CTkFrame):
             top, text=f"0{index + 1} / CART", fg_color="transparent",
             text_color=label_text, font=T.pixel_font(8, "bold"), anchor="w",
         ).pack(side=tk.LEFT)
+        # Delete icon sits on the cart label itself so a game can be removed
+        # without opening the editor first.
+        delete_btn = ctk.CTkButton(
+            top, text="\u2715", command=lambda p=proc_name: self._delete(p),
+            width=22, height=22, corner_radius=0,
+            fg_color="transparent", hover_color=RED,
+            text_color=label_text, font=T.pixel_font(10, "bold"),
+        )
+        delete_btn.pack(side=tk.RIGHT, padx=(4, 0))
         ctk.CTkLabel(
             top, text="GB", fg_color="transparent",
             text_color=label_text, font=T.pixel_font(8, "bold"), anchor="e",
@@ -1118,7 +1127,14 @@ class GamesPage(ctk.CTkFrame):
                 self._edit_game(proc_name, info)
                 return "break"
 
+            delete_path = str(delete_btn)
+
             def _bind_cart_click(widget):
+                # Do not turn the delete button (or its inner canvas/label)
+                # into an "open editor" target.
+                widget_path = str(widget)
+                if widget_path == delete_path or widget_path.startswith(delete_path + "."):
+                    return
                 try:
                     widget.configure(cursor="hand2")
                 except Exception:
