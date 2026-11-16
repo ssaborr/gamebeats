@@ -21,6 +21,13 @@ try:
 except ImportError:
     HAS_PIL = False
 
+try:
+    import pystray
+    HAS_PYSTRAY = True
+except Exception:
+    pystray = None
+    HAS_PYSTRAY = False
+
 # Windows-specific imports
 IS_WINDOWS = sys.platform == "win32"
 if IS_WINDOWS:
@@ -197,6 +204,7 @@ PUPPY_ROOM_STATE_GIFS = (
 )
 PUPPY_OVERLAY_GESTURES = (
     ("CLICK", "Pause or resume the music"),
+    ("DOUBLE CLICK", "Skip to the next track"),
     ("LONG CLICK", "Try another playlist"),
     ("CTRL + DRAG", "Move the puppy anywhere on screen"),
 )
@@ -772,14 +780,14 @@ class PixelToast(tk.Frame):
         )
         self._eyebrow = tk.Label(
             self, text="", bg=NIGHT, fg=GOLD, anchor="w",
-            font=T.pixel_font(9, "bold"),
+            font=T.pixel_font(11, "bold"),
         )
-        self._eyebrow.pack(anchor="w", padx=12, pady=(7, 0))
+        self._eyebrow.pack(anchor="w", padx=16, pady=(9, 0))
         self._body = tk.Label(
             self, text="", bg=NIGHT, fg=CREAM, anchor="w", justify=tk.LEFT,
-            font=T.retro_font(15),
+            font=T.retro_font(19),
         )
-        self._body.pack(anchor="w", padx=12, pady=(1, 8))
+        self._body.pack(anchor="w", padx=16, pady=(2, 11))
         self._job = None
         self._parent = parent
         self._visible = False
@@ -789,11 +797,11 @@ class PixelToast(tk.Frame):
             self._eyebrow.configure(text=str(eyebrow).upper())
             self._body.configure(text=str(body))
             try:
-                width = max(320, int(self._parent.winfo_width() * 0.52))
+                width = max(460, int(self._parent.winfo_width() * 0.60))
             except Exception:
-                width = 420
+                width = 560
             self._body.configure(wraplength=width)
-            self.place(relx=0.5, y=12, anchor="n")
+            self.place(relx=0.5, y=14, anchor="n")
             self.lift()
         except Exception:
             return
@@ -1281,6 +1289,15 @@ class GameBeatsApp:
         self._pulse_active = False
 
         self._load_config()
+        # Windows startup launches with --minimized-tray so GameBeats lives in
+        # the notification area until the user opens it.  First-run setup and
+        # login still force the window visible.
+        self._start_minimized_tray = (
+            ("--minimized-tray" in sys.argv or "--minimized" in sys.argv)
+            and bool(self.configure.get("setup_done", True))
+        )
+        self._tray_icon = None
+        self._hidden_to_tray = False
         self.auth = None
         self.spotify = None
         self._closing = False
@@ -1316,6 +1333,12 @@ class GameBeatsApp:
         self._shuffle_value = False
         self._shuffle_busy = False
         self.startup_var = tk.BooleanVar(value=False)
+        self.hide_to_tray_var = tk.BooleanVar(
+            value=bool(self.configure.get("hide_to_tray", False))
+        )
+        self._hide_to_tray_value = bool(
+            self.configure.get("hide_to_tray", False)
+        )
         self.reduce_motion_var = tk.BooleanVar(
             value=bool(self.configure.get("reduce_motion", False))
         )
@@ -1352,6 +1375,8 @@ class GameBeatsApp:
         self._last_game_loud_ts = 0.0
         self._last_spotify_loud_ts = 0.0  # Track when Spotify was last loud
         self._spotify_audio_active = False
+        # Set only by a real audio-meter loud tick, never by a play command.
+        self._puppy_audio_confirmed_ts = 0.0
         self._last_spotify_peak = 0.0
         self._audio_monitor_started_ts = 0.0
         self._playlist_end_prompt_not_before = 0.0
@@ -1410,13 +1435,15 @@ class GameBeatsApp:
         self.end_behavior_var = tk.StringVar(value=self._end_behavior_label())
         self.resume_delay_var = tk.IntVar(value=self._resume_delay_seconds())
 
-        splash = SplashScreen(self.root)
+        start_minimized = bool(getattr(self, "_start_minimized_tray", False))
+        splash = None if start_minimized else SplashScreen(self.root)
         splash_started = time.monotonic()
-        try:
-            splash.win.update_idletasks()
-            splash._center()
-        except Exception:
-            pass
+        if splash is not None:
+            try:
+                splash.win.update_idletasks()
+                splash._center()
+            except Exception:
+                pass
 
         # The large runtime control overlay is retired.  The desktop puppy is
         # the only overlay; controls live in the main player deck.
@@ -1437,16 +1464,28 @@ class GameBeatsApp:
         # Keep the splash up for a beat even when the UI build already used
         # most of the original 1.8 s window.  This also lets the progress
         # cells animate once the event loop starts.
-        elapsed_ms = (time.monotonic() - splash_started) * 1000.0
-        splash_delay = max(600, int(1800 - elapsed_ms))
-        self.root.after(
-            splash_delay,
-            lambda: (splash.close(), self.root.deiconify(), self._post_splash()),
-        )
-        if IS_WINDOWS:
-            # Taskbar styling re-maps the root window; doing that while the
-            # splash is up would expose the main UI behind it.
-            self.root.after(splash_delay + 150, self._set_gamebeats_hwnd)
+        if start_minimized:
+            # Windows started us hidden: build the UI offscreen, put the tray
+            # icon up, and leave the main window withdrawn.
+            def _finish_minimized_start():
+                self._hidden_to_tray = True
+                self._ensure_tray_icon()
+                self._post_splash()
+
+            self.root.after(250, _finish_minimized_start)
+            if IS_WINDOWS:
+                self.root.after(400, self._set_gamebeats_hwnd)
+        else:
+            elapsed_ms = (time.monotonic() - splash_started) * 1000.0
+            splash_delay = max(600, int(1800 - elapsed_ms))
+            self.root.after(
+                splash_delay,
+                lambda: (splash.close(), self.root.deiconify(), self._post_splash()),
+            )
+            if IS_WINDOWS:
+                # Taskbar styling re-maps the root window; doing that while the
+                # splash is up would expose the main UI behind it.
+                self.root.after(splash_delay + 150, self._set_gamebeats_hwnd)
 
     def _install_shortcuts(self):
         """Global media/navigation keys, suppressed inside text fields."""
@@ -1634,7 +1673,12 @@ class GameBeatsApp:
 
     def _post_splash(self):
         if HAS_WINREG:
-            self.startup_var.set(self._check_startup())
+            startup_enabled = self._check_startup()
+            self.startup_var.set(startup_enabled)
+            if startup_enabled:
+                # Older builds stored a bare exe path.  Rewrite it so Windows
+                # startup always lands in the hidden icons tray.
+                self._toggle_startup(quiet=True)
         # Free mode: Spotify Web Player in browser (no Web API) unless user chose API
         mode = self.configure.get("playback_mode", "desktop")
         if mode in ("desktop", "web", ""):
@@ -1748,6 +1792,14 @@ class GameBeatsApp:
         return bool(self.configure.get("spotify_web_login_done")) or self._spotify_web_profile_has_saved_state()
 
     def _show_spotify_browser_login_prompt(self):
+        # If GameBeats is running hidden in the tray (Windows startup or the
+        # minimize-to-tray option) and Spotify needs a login, bring the window
+        # back so the sign-in prompt has a visible parent.
+        if getattr(self, "_hidden_to_tray", False):
+            try:
+                self._show_main_window_from_tray()
+            except Exception:
+                pass
         if self._spotify_login_prompt is not None:
             try:
                 self._spotify_login_prompt.lift()
@@ -1853,17 +1905,6 @@ class GameBeatsApp:
             justify=tk.LEFT, wraplength=_WRAP, anchor="w",
         )
         lbl_info.pack(anchor="w", fill=tk.X, padx=18, pady=(0, 10))
-
-        lbl_warn = ctk.CTkLabel(
-            card,
-            text=(
-                "⚠  If you use Google or another provider to log in to Spotify, choose that option here.\n"
-                "Avoid typing your email/password directly unless that's how your account normally signs in."
-            ),
-            fg_color="transparent", text_color=AMBER, font=T.ctk_font(11),
-            justify=tk.LEFT, wraplength=_WRAP, anchor="w",
-        )
-        lbl_warn.pack(anchor="w", fill=tk.X, padx=18, pady=(0, 8))
 
         self._spotify_login_status_lbl = ctk.CTkLabel(
             card,
@@ -1994,6 +2035,20 @@ class GameBeatsApp:
                     popup_hwnd, 0, int(x), int(y), 0, 0,
                     0x0001 | 0x0004 | 0x0010,
                 )
+                # Clip the real OS window to the same rounded shape as the
+                # frame.  Without this the square Toplevel background shows
+                # behind the rounded corners as four 90-degree edges.
+                try:
+                    radius = 16
+                    hrgn = ctypes.windll.gdi32.CreateRoundRectRgn(
+                        0, 0, pw + 1, ph + 1, radius * 2, radius * 2,
+                    )
+                    if hrgn:
+                        ctypes.windll.user32.SetWindowRgn(
+                            popup_hwnd, hrgn, True,
+                        )
+                except Exception:
+                    pass
             except Exception:
                 pass
 
@@ -2016,6 +2071,39 @@ class GameBeatsApp:
         win.after(120, _activate_prompt)
         win.after(450, _activate_prompt)
         win.bind("<Button-1>", lambda _e: _activate_prompt(), add="+")
+
+        def _keep_prompt_front():
+            """Keep the login card above GameBeats when the app is focused.
+
+            Deliberately does not force it above other apps: while the user is
+            signing in, the Chrome login window must remain usable.
+            """
+            if self._spotify_login_prompt is not win:
+                return
+            try:
+                if not win.winfo_exists():
+                    return
+                import ctypes as _ctypes
+
+                fg = _ctypes.windll.user32.GetForegroundWindow()
+                if fg:
+                    fg_pid = _ctypes.c_ulong()
+                    _ctypes.windll.user32.GetWindowThreadProcessId(
+                        fg, _ctypes.byref(fg_pid),
+                    )
+                    # Any window from this GameBeats process counts — the
+                    # frameless main window's real foreground HWND is not
+                    # always the handle returned by _mainwindow_hwnd().
+                    if int(fg_pid.value) == os.getpid():
+                        win.lift()
+            except Exception:
+                pass
+            try:
+                win.after(350, _keep_prompt_front)
+            except Exception:
+                pass
+
+        win.after(350, _keep_prompt_front)
 
         try:
             win.parent = self.root
@@ -2063,6 +2151,16 @@ class GameBeatsApp:
 
     def _minimize_window(self):
         """Minimize frameless window — iconify() does not work with overrideredirect."""
+        # If the user asked to hide to the notification area, keep the app
+        # running there instead of leaving a taskbar button behind.  Don't do
+        # that while the login prompt is open; the prompt is a separate window
+        # and the user needs to finish signing in first.
+        if (
+            getattr(self, "_hide_to_tray_value", False)
+            and getattr(self, "_spotify_login_prompt", None) is None
+            and self._hide_window_to_tray()
+        ):
+            return
         if IS_WINDOWS:
             try:
                 import ctypes
@@ -2076,6 +2174,145 @@ class GameBeatsApp:
             self.root.iconify()
         except Exception:
             pass
+
+    def _ensure_tray_icon(self):
+        """Create the notification-area icon once and keep it alive."""
+        if not HAS_PYSTRAY or not HAS_PIL:
+            self._log(
+                "Tray icon support is unavailable in this build. "
+                "Reinstall GameBeats to enable hidden-icon mode."
+            )
+            return False
+        if getattr(self, "_tray_icon", None) is not None:
+            return True
+        try:
+            from PIL import Image
+
+            img = None
+            for path in (
+                getattr(self, "_puppy_icon_path", "") or _puppy_icon_path(),
+                _design_asset_path("puppy_design", "encore.png"),
+            ):
+                if not path:
+                    continue
+                try:
+                    img = Image.open(path).convert("RGBA")
+                    break
+                except Exception:
+                    img = None
+            if img is None:
+                img = Image.new("RGBA", (64, 64), (24, 20, 37, 255))
+            img.thumbnail((64, 64))
+
+            def _on_show(icon, item):
+                try:
+                    self.root.after(0, self._show_main_window_from_tray)
+                except Exception:
+                    pass
+
+            def _on_toggle(icon, item):
+                try:
+                    self.root.after(0, self._puppy_overlay_toggle)
+                except Exception:
+                    pass
+
+            def _on_next(icon, item):
+                try:
+                    self.root.after(0, self._puppy_overlay_next)
+                except Exception:
+                    pass
+
+            def _on_exit(icon, item):
+                try:
+                    self.root.after(0, self._on_close)
+                except Exception:
+                    pass
+
+            menu = pystray.Menu(
+                pystray.MenuItem("Show GameBeats", _on_show, default=True),
+                pystray.MenuItem("Play / Pause", _on_toggle),
+                pystray.MenuItem("Next track", _on_next),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Exit GameBeats", _on_exit),
+            )
+            icon = pystray.Icon("GameBeats", img, "GameBeats", menu)
+            icon.run_detached()
+            self._tray_icon = icon
+            return True
+        except Exception as ex:
+            self._log(f"Could not create the tray icon: {ex}")
+            return False
+
+    def _remove_tray_icon(self):
+        icon = getattr(self, "_tray_icon", None)
+        self._tray_icon = None
+        if icon is None:
+            return
+        try:
+            icon.stop()
+        except Exception:
+            pass
+
+    def _hide_window_to_tray(self):
+        """Hide the main window while keeping the app alive in the tray."""
+        if not self._ensure_tray_icon():
+            return False
+        try:
+            if IS_WINDOWS:
+                import ctypes
+                hwnd = self._mainwindow_hwnd()
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
+                else:
+                    self.root.withdraw()
+            else:
+                self.root.withdraw()
+            self._hidden_to_tray = True
+            self._log("GameBeats hidden to the hidden icons tray.")
+            return True
+        except Exception as ex:
+            self._log(f"Could not hide GameBeats to the tray: {ex}")
+            return False
+
+    def _show_main_window_from_tray(self):
+        """Restore the main window from the notification area."""
+        self._start_minimized_tray = False
+        self._hidden_to_tray = False
+        try:
+            if IS_WINDOWS:
+                import ctypes
+                hwnd = self._mainwindow_hwnd()
+                if hwnd:
+                    ctypes.windll.user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                    ctypes.windll.user32.SetForegroundWindow(hwnd)
+                else:
+                    self.root.deiconify()
+            else:
+                self.root.deiconify()
+            self.root.lift()
+        except Exception:
+            try:
+                self.root.deiconify()
+                self.root.lift()
+            except Exception:
+                pass
+        self._remove_tray_icon()
+
+    def listen_for_second_instance(self, event_handle):
+        """Bring this instance forward when the user launches GameBeats again."""
+        def _wait():
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.WaitForSingleObject(
+                    ctypes.c_void_p(event_handle), 0xFFFFFFFF)  # INFINITE
+                if getattr(self, "_closing", False):
+                    return
+                self.root.after(0, self._show_main_window_from_tray)
+            except Exception:
+                pass
+
+        threading.Thread(target=_wait, daemon=True).start()
 
     def _apply_puppy_taskbar_icon(self, hwnd):
         """Attach the puppy .ico to the real top-level window (taskbar)."""
@@ -2138,7 +2375,8 @@ class GameBeatsApp:
                 
                 # Re-map the window so Windows taskbar notices the status change
                 self.root.withdraw()
-                self.root.deiconify()
+                if not getattr(self, "_start_minimized_tray", False):
+                    self.root.deiconify()
                 self._apply_puppy_taskbar_icon(hwnd)
                 
                 self._log(f"GameBeats main window HWND: {self._gamebeats_hwnd:#x} (Forced taskbar style)")
@@ -2270,6 +2508,25 @@ class GameBeatsApp:
         self._set_puppy_singing_visible(
             bool(getattr(self, "_is_playing", False))
             or self._spotify_sound_detected_recently(2.0)
+        )
+
+    def _save_hide_to_tray_setting(self, *_):
+        try:
+            enabled = bool(self.hide_to_tray_var.get())
+        except Exception:
+            enabled = bool(self.configure.get("hide_to_tray", False))
+        if enabled and not HAS_PYSTRAY:
+            enabled = False
+            try:
+                self.hide_to_tray_var.set(False)
+            except Exception:
+                pass
+            self._log("Tray icon support is unavailable in this build.")
+        self._hide_to_tray_value = enabled
+        self.configure["hide_to_tray"] = enabled
+        self._save_config()
+        self._log(
+            "Hide to hidden icons when minimized " + ("on" if enabled else "off")
         )
 
     def _apply_shuffle_state(self, enabled, *, log=False):
@@ -3692,6 +3949,23 @@ class GameBeatsApp:
             pass
         return "idle"
 
+    def _puppy_audio_ready(self) -> bool:
+        """True once the audio meter has actually heard music.
+
+        A play command can be accepted several seconds before audio is
+        audible.  Without a meter (no game session), the play state is the
+        best signal available.
+        """
+        if not getattr(self, "_audio_monitor_running", False):
+            return True
+        confirmed = float(
+            getattr(self, "_puppy_audio_confirmed_ts", 0.0) or 0.0
+        )
+        return bool(
+            getattr(self, "_spotify_audio_active", False)
+            or (confirmed > 0 and time.time() - confirmed <= 2.0)
+        )
+
     def _puppy_should_animate(self) -> bool:
         """True only while GameBeats itself is actively playing, not paused."""
         if self._reduce_motion_enabled():
@@ -3704,6 +3978,8 @@ class GameBeatsApp:
             if not getattr(self, "_is_playing", False):
                 return False
             if self._intentional_pause_active():
+                return False
+            if not self._puppy_audio_ready():
                 return False
         except Exception:
             return False
@@ -4142,6 +4418,15 @@ class GameBeatsApp:
                 return "gif:0"
             durations = getattr(self, "_puppy_gif_durations", ())
             return f"gif:{_gif_frame_index_at(now * 1000.0, durations)}"
+        if not self._puppy_should_animate():
+            # No room GIFs were packaged: hold the neutral idle sprite
+            # instead of running the idle bob before music starts.
+            spec = getattr(self, "_puppy_anim_spec", None) or {}
+            idle_state = (spec.get("states") or {}).get("idle") or {}
+            return (
+                idle_state.get("static")
+                or (idle_state.get("frames") or ["idle"])[0]
+            )
         mode = self._puppy_animation_mode(now)
         animator = getattr(self, "_puppy_anim", None)
         if animator is not None:
@@ -5489,8 +5774,61 @@ class GameBeatsApp:
         content = ctk.CTkFrame(board, fg_color="transparent", corner_radius=0)
         content.pack(fill=tk.BOTH, expand=True, padx=16, pady=(8, 16))
 
+        # ── Windows Startup & Tray ────────────────────────────────────────────
+        T.section_header(content, "01 / WINDOWS")
+        win_card = self._card(content)
+
+        if HAS_WINREG:
+            startup_row = ctk.CTkFrame(
+                win_card, fg_color="transparent", corner_radius=0)
+            startup_row.pack(fill=tk.X)
+            startup_copy = ctk.CTkFrame(
+                startup_row, fg_color="transparent", corner_radius=0)
+            startup_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            ctk.CTkLabel(
+                startup_copy, text="Start GameBeats with Windows",
+                fg_color="transparent", text_color=TEXT,
+                font=T.retro_font(17), anchor="w",
+            ).pack(fill=tk.X)
+            ctk.CTkLabel(
+                startup_copy,
+                text="Opens minimized in the hidden icons tray when you sign in.",
+                fg_color="transparent", text_color=TEXT_MUTED,
+                font=T.retro_font(15), anchor="w", justify=tk.LEFT,
+                wraplength=620,
+            ).pack(fill=tk.X, pady=(2, 0))
+            PixelToggle(
+                startup_row, variable=self.startup_var, bg=SURFACE,
+                command=self._toggle_startup, width=44, height=20,
+            ).pack(side=tk.RIGHT, padx=(14, 2))
+            T.rule(win_card, color=BORDER, pady=(10, 8))
+
+        tray_row = ctk.CTkFrame(
+            win_card, fg_color="transparent", corner_radius=0)
+        tray_row.pack(fill=tk.X)
+        tray_copy = ctk.CTkFrame(
+            tray_row, fg_color="transparent", corner_radius=0)
+        tray_copy.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ctk.CTkLabel(
+            tray_copy, text="Hide to hidden icons when minimized",
+            fg_color="transparent", text_color=TEXT,
+            font=T.retro_font(17), anchor="w",
+        ).pack(fill=tk.X)
+        ctk.CTkLabel(
+            tray_copy,
+            text="Keep GameBeats running in the notification area. Use the "
+                 "tray icon to reopen it or exit.",
+            fg_color="transparent", text_color=TEXT_MUTED,
+            font=T.retro_font(15), anchor="w", justify=tk.LEFT,
+            wraplength=620,
+        ).pack(fill=tk.X, pady=(2, 0))
+        PixelToggle(
+            tray_row, variable=self.hide_to_tray_var, bg=SURFACE,
+            command=self._save_hide_to_tray_setting, width=44, height=20,
+        ).pack(side=tk.RIGHT, padx=(14, 2))
+
         # ── Auto Playlists ────────────────────────────────────────────────────
-        T.section_header(content, "01 / AUTO PLAYLISTS")
+        T.section_header(content, "02 / AUTO PLAYLISTS", pady=(14, 6))
         ap = self._card(content)
 
         ctk.CTkLabel(
@@ -5580,19 +5918,6 @@ class GameBeatsApp:
             font=T.retro_font(13),
         ).pack(side=tk.RIGHT, padx=(0, 6))
 
-        if HAS_WINREG:
-            T.rule(ap, color=BORDER, pady=(10, 8))
-            startup_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
-            startup_row.pack(fill=tk.X)
-            ctk.CTkLabel(
-                startup_row, text="Start GameBeats with Windows", fg_color="transparent",
-                text_color=TEXT, font=T.retro_font(17),
-            ).pack(side=tk.LEFT)
-            PixelToggle(
-                startup_row, variable=self.startup_var, bg=SURFACE,
-                command=self._toggle_startup, width=44, height=20,
-            ).pack(side=tk.RIGHT, padx=2)
-
         # ── Puppy Overlay ─────────────────────────────────────────────────────
         T.rule(ap, color=BORDER, pady=(10, 8))
         motion_row = ctk.CTkFrame(ap, fg_color="transparent", corner_radius=0)
@@ -5617,7 +5942,7 @@ class GameBeatsApp:
         self._motion_toggle.pack(side=tk.RIGHT, padx=(14, 2))
 
         T.section_header(
-            content, "02 / DESKTOP PUPPY", pady=(14, 6)
+            content, "03 / DESKTOP PUPPY", pady=(14, 6)
         )
         ov = self._card(content)
 
@@ -5691,7 +6016,7 @@ class GameBeatsApp:
         ).pack(fill=tk.X, padx=12, pady=(6, 10))
 
         # ── Keep Music Playing ────────────────────────────────────────────────
-        T.section_header(content, "03 / KEEP MUSIC PLAYING", pady=(14, 6))
+        T.section_header(content, "04 / KEEP MUSIC PLAYING", pady=(14, 6))
         km = self._card(content)
 
         km_row = ctk.CTkFrame(km, fg_color="transparent", corner_radius=0)
@@ -6213,6 +6538,13 @@ class GameBeatsApp:
             return
 
         self._autoplay_pending = True
+        # Show the loading loop immediately, before the browser opens or the
+        # playlist search starts.  It stays up until the audio meter confirms
+        # real music, then transitions to the normal bob.
+        try:
+            self._start_puppy_thinking_animation(reason="playlist")
+        except Exception:
+            pass
         custom_uri = info.get("spotify_playlist_uri", "")
         if custom_uri:
             self._log(f"Auto-play: playing assigned playlist for {info['name']}…")
@@ -6779,8 +7111,10 @@ class GameBeatsApp:
                     )
                     # A newer long-press is queued: keep thinking for that
                     # request instead of completing the animation for this
-                    # (already superseded) result.
-                    if not pending_after:
+                    # (already superseded) result.  Also keep thinking until
+                    # the audio meter has actually heard the new music; an
+                    # accepted play command is not proof that sound started.
+                    if not pending_after and self._puppy_audio_ready():
                         if not self._finish_puppy_thinking(play_change=True):
                             if not switch_started:
                                 self._play_puppy_change_animation(force=True)
@@ -8388,6 +8722,19 @@ class GameBeatsApp:
         force_btn=True to _set_play_btn_icon().
         """
         self._spotify_audio_active = bool(audio_active)
+        if audio_active:
+            # This timestamp is the "real music is audible" signal used by the
+            # room puppy.  Do not set it when a play command is merely accepted.
+            self._puppy_audio_confirmed_ts = time.time()
+            # The startup/playlist loading loop ends on real audio, not on the
+            # play command.  Playlist-switch pauses finish in
+            # _adopt_playlist_switch_playback after their sustained-loud check.
+            if (
+                self._puppy_thinking_active()
+                and getattr(self, "_puppy_thinking_reason", "") == "playlist"
+                and not getattr(self, "_playlist_switch_pause", False)
+            ):
+                self._finish_puppy_thinking(play_change=True)
         try:
             self._last_spotify_peak = float(peak)
         except Exception:
@@ -10231,20 +10578,38 @@ class GameBeatsApp:
             return True
         except: return False
 
-    def _toggle_startup(self):
-        if not HAS_WINREG: return
-        exe = sys.executable if not getattr(sys, "frozen", False) else sys.executable
+    def _startup_command(self):
+        """Command line stored in the Windows Run key."""
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}" --minimized-tray'
+        python_exe = sys.executable
+        pythonw = os.path.join(os.path.dirname(python_exe), "pythonw.exe")
+        if not os.path.exists(pythonw):
+            pythonw = python_exe
+        main_py = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "main.py",
+        )
+        return f'"{pythonw}" "{main_py}" --minimized-tray'
+
+    def _toggle_startup(self, quiet=False):
+        if not HAS_WINREG:
+            return
         try:
+            cmd = self._startup_command()
             key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
                                   r"Software\Microsoft\Windows\CurrentVersion\Run",
                                   0, winreg.KEY_SET_VALUE)
             if self.startup_var.get():
-                winreg.SetValueEx(key, "GameBeats", 0, winreg.REG_SZ, f'"{exe}"')
-                self._log("Added to Windows startup.")
+                winreg.SetValueEx(key, "GameBeats", 0, winreg.REG_SZ, cmd)
+                if not quiet:
+                    self._log(
+                        "Added to Windows startup (opens in the hidden icons tray).")
             else:
                 try: winreg.DeleteValue(key, "GameBeats")
                 except: pass
-                self._log("Removed from Windows startup.")
+                if not quiet:
+                    self._log("Removed from Windows startup.")
             winreg.CloseKey(key)
         except Exception as ex:
             self._log(f"Startup toggle failed: {ex}")
@@ -10373,6 +10738,7 @@ class GameBeatsApp:
         if getattr(self, "_closing", False):
             return
         self._closing = True
+        self._remove_tray_icon()
         try:
             guard = getattr(self, "_spotify_window_guard", None)
             if guard is not None:

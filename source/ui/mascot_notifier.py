@@ -23,10 +23,14 @@ if IS_WINDOWS:
     GWL_EXSTYLE = -20
     WS_EX_NOACTIVATE = 0x08000000
     WS_EX_TOOLWINDOW = 0x00000080
+    WS_EX_TOPMOST = 0x00000008
     SWP_NOMOVE = 0x0002
     SWP_NOSIZE = 0x0001
     SWP_NOACTIVATE = 0x0010
     HWND_TOPMOST = -1
+    HWND_TOP = 0
+    GW_HWNDPREV = 3
+    GA_ROOT = 2
 
 
 from ui import theme as T
@@ -96,25 +100,107 @@ PUPPY_DOUBLE_CLICK_MS = _system_double_click_ms()
 # still pending, so a double-click can cancel the play/pause toggle entirely.
 PUPPY_SINGLE_CLICK_DELAY_MS = PUPPY_DOUBLE_CLICK_MS + 60
 # Re-asserting topmost restacks the layered window; doing that on every audio
-# meter tick visibly hitched the animation.  Twice per second is plenty to stay
-# above a fullscreen game, so re-assert on a much slower cadence instead.
-PUPPY_TOPMOST_REASSERT_SEC = 4.0
+# meter tick visibly hitched the animation.  The fast watchdog handles windows
+# that are activated above the puppy; this slower unconditional pass also
+# covers topmost windows that are above it without being foreground.
+PUPPY_TOPMOST_REASSERT_SEC = 2.0
 PUPPY_OVERLAY_ALPHA = 0.80
+
+
+def _top_level_hwnd(hwnd: int) -> int:
+    """Return the real top-level window for a Tk child/client HWND."""
+    if not IS_WINDOWS or not isinstance(hwnd, int):
+        return hwnd
+    try:
+        return _user32.GetAncestor(hwnd, GA_ROOT) or hwnd
+    except Exception:
+        return hwnd
+
+
+def _force_topmost(hwnd: int):
+    """Restack a window at the top of Windows' always-on-top band."""
+    if not IS_WINDOWS or not isinstance(hwnd, int):
+        return
+    try:
+        top = _top_level_hwnd(hwnd)
+        old = _user32.GetWindowLongW(top, GWL_EXSTYLE)
+        _user32.SetWindowLongW(
+            top,
+            GWL_EXSTYLE,
+            old | WS_EX_TOPMOST,
+        )
+        _user32.SetWindowPos(
+            top,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+        # Windows keeps the activated topmost window above other topmost
+        # windows.  HWND_TOP (unlike HWND_TOPMOST) restacks a topmost window
+        # within the topmost band, so the puppy stays above fullscreen apps.
+        _user32.SetWindowPos(
+            top,
+            HWND_TOP,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        )
+    except Exception:
+        pass
+
+
+def _foreground_is_above(top: int) -> bool:
+    """True when the active window currently sits above *top* in z-order."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        fg = _user32.GetForegroundWindow()
+        if not fg or fg == top or not _user32.IsWindowVisible(fg):
+            return False
+        cur = _user32.GetWindow(top, GW_HWNDPREV)
+        steps = 0
+        while cur and steps < 128:
+            if cur == fg:
+                return True
+            cur = _user32.GetWindow(cur, GW_HWNDPREV)
+            steps += 1
+    except Exception:
+        pass
+    return False
 
 
 def _apply_noactivate(hwnd: int):
     if not IS_WINDOWS:
         return
     try:
-        old = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-        _user32.SetWindowLongW(
-            hwnd,
-            GWL_EXSTYLE,
-            old | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        # Tk gives a Toplevel a TkChild client window wrapped by a TkTopLevel
+        # window.  The topmost/tool-window styles must live on the wrapper or
+        # another app can cover the overlay when it is activated.
+        top = _top_level_hwnd(hwnd)
+        for target in (hwnd, top):
+            old = _user32.GetWindowLongW(target, GWL_EXSTYLE)
+            _user32.SetWindowLongW(
+                target,
+                GWL_EXSTYLE,
+                old | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            )
+        _user32.SetWindowPos(
+            top,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
         _user32.SetWindowPos(
-            hwnd,
-            HWND_TOPMOST,
+            top,
+            HWND_TOP,
             0,
             0,
             0,
@@ -273,6 +359,7 @@ class PuppySingingOverlay:
         # "change" clips and the idle bob are not allowed to start.
         self._animation_locked = False
         self._last_raise = 0.0
+        self._topmost_job = None
         self._visible = False
         self._drag_x = 0
         self._drag_y = 0
@@ -362,6 +449,36 @@ class PuppySingingOverlay:
         self._label.bind("<ButtonRelease-1>", self._on_release)
 
         win.after(80, self._noactivate_safe)
+        win.after(250, self._topmost_watchdog)
+
+    def _topmost_watchdog(self):
+        """Re-raise the puppy if another window gets stacked above it.
+
+        Windows puts the most recently activated always-on-top window at the
+        top of the topmost band.  Fullscreen browsers/games do this constantly,
+        so a one-off ``-topmost`` is not enough.  Only restack when the
+        foreground window is actually above us, which keeps the animation
+        smooth during normal desktop use.
+        """
+        self._topmost_job = None
+        win = self._win
+        if win is None:
+            return
+        try:
+            if self._visible and win.winfo_viewable():
+                top = _top_level_hwnd(win.winfo_id())
+                if (
+                    not (_user32.GetWindowLongW(
+                        top, GWL_EXSTYLE) & WS_EX_TOPMOST)
+                    or _foreground_is_above(top)
+                ):
+                    _force_topmost(top)
+        except Exception:
+            pass
+        try:
+            self._topmost_job = win.after(250, self._topmost_watchdog)
+        except Exception:
+            self._topmost_job = None
 
     def _clamp_to_desktop(self, x, y):
         """Keep a remembered position on a screen that still exists.
@@ -967,9 +1084,10 @@ class PuppySingingOverlay:
             win = self._win
             if not win.winfo_viewable():
                 win.deiconify()
-            win.lift()
-            win.attributes("-topmost", True)
-            self._noactivate_safe()
+            # Both the topmost style and the z-order restack live in
+            # _force_topmost.  Skipping the extra lift/noactivate calls here
+            # avoids painting the layered window several times per reassert.
+            _force_topmost(win.winfo_id())
         except Exception:
             pass
 
@@ -1160,6 +1278,7 @@ class MascotNotifier:
         self._play_next_btn = None
         self._play_next_pending = False
         self._loading_phase = 0
+        self._topmost_job = None
 
         root.after(0, self._build)
 
@@ -1180,6 +1299,29 @@ class MascotNotifier:
 
         self._populate(win)
         win.after(60, self._finalize)
+        win.after(250, self._topmost_watchdog)
+
+    def _topmost_watchdog(self):
+        """Keep the playlist-end card above fullscreen/late-topmost windows."""
+        self._topmost_job = None
+        if self._closed or self._win is None:
+            return
+        win = self._win
+        try:
+            if win.winfo_viewable():
+                top = _top_level_hwnd(win.winfo_id())
+                if (
+                    not (_user32.GetWindowLongW(
+                        top, GWL_EXSTYLE) & WS_EX_TOPMOST)
+                    or _foreground_is_above(top)
+                ):
+                    _force_topmost(top)
+        except Exception:
+            pass
+        try:
+            self._topmost_job = win.after(250, self._topmost_watchdog)
+        except Exception:
+            self._topmost_job = None
 
     def _finalize(self):
         if self._closed or self._win is None:
@@ -1343,6 +1485,7 @@ class MascotNotifier:
         try:
             self._win.lift()
             self._win.attributes("-topmost", True)
+            _force_topmost(self._win.winfo_id())
         except Exception:
             pass
 
@@ -1353,6 +1496,7 @@ class MascotNotifier:
             _apply_noactivate(self._win.winfo_id())
             self._win.lift()
             self._win.attributes("-topmost", True)
+            _force_topmost(self._win.winfo_id())
         except Exception:
             pass
 

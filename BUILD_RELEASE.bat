@@ -51,6 +51,7 @@ py -m nuitka ^
     --include-data-dir=..\build_assets=assets ^
     --include-data-file=core\spotify_focus_guard.exe=core\spotify_focus_guard.exe ^
     --include-package-data=playwright ^
+    --include-package=pystray ^
     --include-package=process_audio_capture ^
     --include-data-files=%APPDATA%\Python\Python313\site-packages\process_audio_capture\ProcessAudioCapture.dll=process_audio_capture\ProcessAudioCapture.dll ^
     --include-package=core ^

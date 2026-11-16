@@ -31,22 +31,53 @@ from ui import theme as T
 
 
 def _puppy_logo_path() -> str:
-    """Find the puppy logo.png across common install / dev layouts."""
+    """Find the puppy logo PNG across common install / dev layouts."""
     # games_page.py lives at source/ui/ — go up 3 levels to reach the project root
     ui_dir     = os.path.dirname(os.path.abspath(__file__))   # source/ui/
     source_dir = os.path.dirname(ui_dir)                       # source/
     root_dir   = os.path.dirname(source_dir)                   # project root
     candidates = [
-        os.path.join(root_dir,      "puppies", "puppy logo.png"),
-        os.path.join(os.getcwd(),   "puppies", "puppy logo.png"),
-        os.path.join(source_dir,    "puppies", "puppy logo.png"),
+        os.path.join(root_dir,   "puppies", "puppy logo.png"),
+        os.path.join(root_dir,   "assets", "puppy", "puppy logo.png"),
+        os.path.join(root_dir,   "assets", "puppy", "puppy_logo.png"),
+        os.path.join(os.getcwd(), "puppies", "puppy logo.png"),
+        os.path.join(os.getcwd(), "assets", "puppy", "puppy_logo.png"),
+        os.path.join(source_dir, "puppies", "puppy logo.png"),
+        os.path.join(source_dir, "assets", "puppy", "puppy_logo.png"),
     ]
     if getattr(sys, "frozen", False):
         exe_dir    = os.path.dirname(sys.executable)
         bundle_dir = getattr(sys, "_MEIPASS", "")
         candidates += [
             os.path.join(bundle_dir, "puppies", "puppy logo.png"),
+            os.path.join(bundle_dir, "assets", "puppy", "puppy logo.png"),
+            os.path.join(bundle_dir, "assets", "puppy", "puppy_logo.png"),
             os.path.join(exe_dir,    "puppies", "puppy logo.png"),
+            os.path.join(exe_dir,    "assets", "puppy", "puppy logo.png"),
+            os.path.join(exe_dir,    "assets", "puppy", "puppy_logo.png"),
+        ]
+    for p in candidates:
+        if p and os.path.exists(p):
+            return p
+    return ""
+
+
+def _app_icon_path() -> str:
+    """Find the GameBeats .ico used by the native Windows title bar."""
+    ui_dir     = os.path.dirname(os.path.abspath(__file__))
+    source_dir = os.path.dirname(ui_dir)
+    root_dir   = os.path.dirname(source_dir)
+    candidates = [
+        os.path.join(root_dir, "assets", "icon.ico"),
+        os.path.join(root_dir, "icon.ico"),
+        os.path.join(os.getcwd(), "assets", "icon.ico"),
+    ]
+    if getattr(sys, "frozen", False):
+        exe_dir    = os.path.dirname(sys.executable)
+        bundle_dir = getattr(sys, "_MEIPASS", "")
+        candidates += [
+            os.path.join(bundle_dir, "assets", "icon.ico"),
+            os.path.join(exe_dir,    "assets", "icon.ico"),
         ]
     for p in candidates:
         if p and os.path.exists(p):
@@ -427,28 +458,69 @@ class AddGameDialog(ctk.CTkToplevel):
             import ctypes.wintypes
             work_rect = ctypes.wintypes.RECT()
             ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(work_rect), 0)  # SPI_GETWORKAREA
+            wa_left   = work_rect.left
             wa_top    = work_rect.top
+            wa_right  = work_rect.right
             wa_bottom = work_rect.bottom
-            workarea_h = wa_bottom - wa_top
         except Exception:
+            wa_left = 0
             wa_top = 0
+            wa_right = parent.winfo_screenwidth()
             wa_bottom = parent.winfo_screenheight()
-            workarea_h = wa_bottom
-        # Keep dialog shorter than the workarea; leave ~80px for title bar + breathing room
-        h = min(750, workarea_h - 80)
+
+        # CustomTkinter geometry sizes are logical while winfo_* dimensions
+        # and the Windows workarea are physical.  Convert both before
+        # centering so the dialog sits in the middle of the main window on
+        # scaled displays instead of drifting right and below the taskbar.
+        try:
+            ui_scale = max(1.0, float(parent.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            ui_scale = 1.0
+
+        workarea_w = max(1, wa_right - wa_left)
+        workarea_h = max(1, wa_bottom - wa_top)
+        w = min(900, max(620, int((workarea_w - 40) / ui_scale)))
+        h = min(750, max(420, int((workarea_h - 80) / ui_scale)))
+
+        parent_w = parent.winfo_width()
+        parent_h = parent.winfo_height()
+        if parent_w <= 1:
+            parent_x, parent_w = wa_left, workarea_w
+        else:
+            parent_x = parent.winfo_rootx()
+        if parent_h <= 1:
+            parent_y, parent_h = wa_top, workarea_h
+        else:
+            parent_y = parent.winfo_rooty()
+
+        phys_w = int(w * ui_scale)
+        phys_h = int(h * ui_scale)
+        px = parent_x + max(0, (parent_w - phys_w) // 2)
+        py = parent_y + max(0, (parent_h - phys_h) // 2)
+        # Clamp to the workarea so the title bar and bottom buttons stay
+        # reachable on smaller or heavily scaled screens.
+        px = max(wa_left, min(px, wa_right - phys_w))
+        py = max(wa_top, min(py, wa_bottom - phys_h))
         self.minsize(w, min(550, h))
-        px = parent.winfo_rootx() + max(0, (parent.winfo_width()  - w) // 2)
-        py = parent.winfo_rooty() + max(0, (parent.winfo_height() - h) // 2)
-        # Clamp vertically so the window never starts above wa_top or goes below wa_bottom
-        py = max(wa_top, min(py, wa_bottom - h - 40))
         self.geometry(f"{w}x{h}+{px}+{py}")
 
-        # Set window icon to the app's puppy logo
+        # Set the native title-bar icon to the GameBeats logo.  iconphoto
+        # alone leaves the default Tk icon on Windows title bars, so set the
+        # .ico as well when it is available.
         _icon = _load_window_icon()
         if _icon:
             self._icon_ref = _icon  # keep a reference so GC doesn't collect it
             self.after(50,  lambda: self.iconphoto(False, _icon))
             self.after(200, lambda: self.iconphoto(False, _icon))
+        _ico_path = _app_icon_path()
+        if _ico_path:
+            def _apply_ico():
+                try:
+                    self.iconbitmap(_ico_path)
+                except Exception:
+                    pass
+            self.after(20, _apply_ico)
+            self.after(200, _apply_ico)
 
         # Bottom buttons first so they always stay visible
         brow = ctk.CTkFrame(self, fg_color=BG, corner_radius=0)

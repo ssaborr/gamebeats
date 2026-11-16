@@ -136,6 +136,10 @@ CONNECT_DEVICE_SKIP = re.compile(
     re.I,
 )
 DEFAULT_BYPASS_MAIN_BUTTON_XPATH = '//*[@id="main"]/div/button/span'
+SPOTIFY_ACCOUNTS_LOGIN_URL = (
+    "https://accounts.spotify.com/en/login"
+    "?continue=https%3A%2F%2Fopen.spotify.com%2F"
+)
 GO_BACK_LABEL = re.compile(r"go back to previous site|back to previous", re.I)
 BYPASS_CLICK_MS = 900
 BYPASS_VISIBLE_MS = 1500
@@ -340,6 +344,10 @@ class SpotifyWebController:
         self._player_context = None
         self._player_page = None
         self._browser_launched_at = 0.0
+        # Normal Chrome used only for the one-time Spotify login. It is
+        # deliberately not Playwright-controlled so reCAPTCHA sees a normal
+        # browser. Closed again before the playback browser starts.
+        self._login_chrome_proc = None
 
         # Audio routing is configured by _refresh_audio_pids() once the browser
         # and player mode are known. Do not force desktop audio here: in web
@@ -473,9 +481,12 @@ class SpotifyWebController:
 
     def _browser_args(self) -> list:
         args = [
-            "--disable-blink-features=AutomationControlled",
+            # Do NOT pass --disable-blink-features=AutomationControlled or
+            # --exclude-switches=enable-automation here. Chrome shows an
+            # "unsupported command-line flag" banner for the former, and
+            # that banner makes the Spotify login page look broken. The
+            # init script below already hides navigator.webdriver.
             "--autoplay-policy=no-user-gesture-required",
-            "--exclude-switches=enable-automation",
             "--disable-infobars",
             # A previous run can leave Chrome showing the off-screen
             # "Restore pages?" bubble.  Playwright's first goto then waits
@@ -773,6 +784,18 @@ class SpotifyWebController:
 
     def _ensure_browser_impl(self, check_login: bool = False) -> bool:
         with self._browser_lock:
+            # The normal-Chrome login window owns the profile. Do not try to
+            # start Playwright (or close that window from a background task)
+            # until the user clicks "I am logged in".
+            if (
+                self._login_chrome_proc is not None
+                and self._login_chrome_proc.poll() is None
+            ):
+                self._last_error = (
+                    "Finish signing in to Spotify in the Chrome window first."
+                )
+                return False
+
             if self._page and not self._page.is_closed():
                 return True
 
@@ -928,34 +951,25 @@ class SpotifyWebController:
             self._hide_window = old_hide
 
     def open_login_window(self) -> bool:
-        def _work():
-            old_hide = self._hide_window
-            self._hide_window = False
-            try:
-                # If the browser was previously running hidden, we must close it completely
-                # so that a new, visible browser instance is created. Otherwise the login
-                # window will open but remain completely hidden to the user.
-                if old_hide:
-                    self._close_browser_impl()
+        existing = bool(
+            self._login_chrome_proc is not None
+            and self._login_chrome_proc.poll() is None
+        )
+        if existing:
+            # Just open the login URL again in the Chrome instance that is
+            # already running with this profile.
+            return self._launch_normal_login_chrome()
 
-                if not self._ensure_browser_impl(False):
-                    return False
-                page = self._page
-                if not page:
-                    return False
-                page.goto("https://open.spotify.com/", wait_until="domcontentloaded", timeout=60000)
-                try:
-                    page.bring_to_front()
-                except Exception:
-                    pass
-                self._log("Spotify login window opened.")
-                return True
-            finally:
-                self._hide_window = old_hide
-
-        return bool(self._browser_call(_work, timeout=90, default=False))
+        # Normal Chrome needs exclusive ownership of the profile, so stop the
+        # playback browser before opening it.
+        self._browser_call(self._close_browser_impl, timeout=20, default=False)
+        return self._launch_normal_login_chrome()
 
     def browser_login_ready(self) -> bool:
+        # The normal Chrome login window must be closed before Playwright can
+        # open the same profile.
+        self._close_normal_login_chrome()
+        time.sleep(0.6)
         return bool(self._browser_call(self._browser_login_ready_impl, timeout=90, default=False))
 
     def check_login_silently(self) -> bool:
@@ -965,6 +979,10 @@ class SpotifyWebController:
         Returns False if the login button is detected (session expired / not logged in).
         The browser instance is closed after the check.
         """
+        if self._login_chrome_proc is not None and self._login_chrome_proc.poll() is None:
+            # Don't fight the normal-Chrome login window for the profile.
+            return True
+
         def _work():
             try:
                 if not self._ensure_browser_impl(False):
@@ -1116,6 +1134,89 @@ class SpotifyWebController:
             if path and os.path.isfile(path):
                 return path
         return ""
+
+    def _normal_login_chrome_pids(self) -> set[int]:
+        """Chrome processes that use GameBeats' login profile."""
+        if not (IS_WINDOWS and HAS_PSUTIL):
+            return set()
+        markers = {
+            os.path.normcase(self._profile_dir),
+            os.path.normcase(os.path.basename(self._profile_dir)),
+        }
+        pids = set()
+        try:
+            for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+                try:
+                    name = (proc.info.get("name") or "").lower()
+                    if name != "chrome.exe":
+                        continue
+                    cmd = os.path.normcase(" ".join(proc.info.get("cmdline") or []))
+                    if any(marker and marker in cmd for marker in markers):
+                        pids.add(int(proc.info["pid"]))
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    pass
+        except Exception:
+            pass
+        return pids
+
+    def _close_normal_login_chrome(self) -> None:
+        """Close the plain-Chrome login window and release the profile."""
+        proc = self._login_chrome_proc
+        self._login_chrome_proc = None
+        if proc is not None:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=3)
+                    except Exception:
+                        proc.kill()
+            except Exception:
+                pass
+        if IS_WINDOWS and HAS_PSUTIL:
+            for pid in self._normal_login_chrome_pids():
+                try:
+                    psutil.Process(pid).kill()
+                except Exception:
+                    pass
+
+    def _launch_normal_login_chrome(self) -> bool:
+        """Open Spotify login in normal Chrome, not an automation browser.
+
+        Playwright's Chrome shows an unsupported-flag banner and can trip
+        Spotify's reCAPTCHA. A normal Chrome window logs in cleanly; the
+        resulting profile is then reused by the playback browser.
+        """
+        exe = self._find_chrome_exe()
+        if not exe:
+            self._last_error = (
+                "Google Chrome not found — install Chrome to log in to Spotify."
+            )
+            self._log(self._last_error)
+            return False
+        try:
+            cmd = [
+                exe,
+                f"--user-data-dir={self._profile_dir}",
+                "--new-window",
+                "--hide-crash-restore-bubble",
+                "--disable-session-crashed-bubble",
+                SPOTIFY_ACCOUNTS_LOGIN_URL,
+            ]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                close_fds=not IS_WINDOWS,
+            )
+            if self._login_chrome_proc is None or self._login_chrome_proc.poll() is not None:
+                self._login_chrome_proc = proc
+            self._log("Spotify login window opened (normal Chrome).")
+            return True
+        except Exception as ex:
+            self._last_error = f"Could not open Spotify login: {ex}"
+            self._log(self._last_error)
+            return False
 
     def _launch_player_desktop(self, playlist_uri: str) -> bool:
         """Open playlist in Spotify desktop app (shows reliably in Connect)."""
@@ -2664,6 +2765,8 @@ class SpotifyWebController:
             self._page = None
             self._pw = None
             self._login_checked = False
+            # Also close a plain-Chrome login window if one is still open.
+            self._close_normal_login_chrome()
             try:
                 from core.audio_monitor import register_music_player_pids
                 register_music_player_pids([])
